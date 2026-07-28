@@ -206,6 +206,10 @@ def download(urls, task_id: str) -> list:
 
 def main():
     args = sys.argv[1:]
+    dry_run = False
+    if args and args[0] == "--dry-run":
+        dry_run = True
+        args = args[1:]
     mode = args[0] if args else "t2v"
 
     if mode == "download":
@@ -237,6 +241,10 @@ def main():
         payload = payload_multimodal(args[1], args[2] if len(args) > 2 else None)
     else:
         sys.exit(f"unknown mode: {mode!r} (t2v | i2v | ff | multi | download)")
+
+    if dry_run:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
 
     task_id = submit(payload)
     final = poll(task_id)
