@@ -81,10 +81,10 @@
       "prompt": "Over-the-shoulder shot preserving the action axis as both actors face each other.",
       "camera": {
         "shot_size": "over_shoulder",
-        "focal_length_mm": 65.0,
+        "focal_length_mm": 50.0,
         "motion": "arc_clockwise",
-        "start": [0.0, -3.2, 2.2],
-        "end": [0.8, -2.8, 2.2],
+        "start": [-0.2, -5.0, 2.5],
+        "end": [0.6, -4.5, 2.5],
         "look_at": "actor_b"
       },
       "actors": [

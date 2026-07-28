@@ -25,6 +25,7 @@
 - Create: `videoactagent/shotscript.py`
 - Create: `tests/test_station_shotscript.py`
 - Create: `videoactagent/blender_proxy.py`
+- Create: `videoactagent/blender_runner.py`
 - Create at runtime: `runs/stage1_blender/station_proxy.blend`
 - Create at runtime: `runs/stage1_blender/station_proxy.mp4`
 - Create at runtime: `runs/stage1_blender/keyframes/shot_01.png`, `shot_02.png`, `shot_03.png`
@@ -36,7 +37,7 @@ Create a single-platform scene with recurring `actor_a` (orange) and `actor_b` (
 
 1. `s01`, 5 s wide shot: A walks from `[-3,0,0]` to `[-1,0,0]`; B stays `[2,0,0]`; camera makes a small truck-right move.
 2. `s02`, 5 s medium shot: A walks from `[-1,0,0]` to `[0.5,0,0]`; B stays `[1.5,0,0]`; camera dollies in.
-3. `s03`, 5 s over-shoulder shot: A stays `[0.5,0,0]`; B stays `[1.5,0,0]`; camera makes a small clockwise arc.
+3. `s03`, 5 s over-shoulder shot: A stays `[0.5,0,0]`; B stays `[1.5,0,0]`; camera makes a small clockwise arc. The validated framing revision uses 50 mm and moves the camera back to keep both performers legible.
 
 The top-level JSON contains `scene_id`, `fps=3`, `world_bounds`, and three shots. Every shot contains `shot_id`, `duration`, camera start/end/focal length/motion/look-at, both actor plans, and continuity (`previous_shot`, `screen_direction`, `axis_side`).
 
@@ -70,7 +71,7 @@ Create `videoactagent/blender_proxy.py`. It runs only inside Blender and:
 7. keyframes actor root locations with linear interpolation inside shots and one-frame cuts between shots;
 8. renders at 960x540, 3 fps, Eevee, MPEG-4/H.264;
 9. saves the `.blend` before rendering;
-10. renders the middle frame of each shot as PNG;
+10. reopens the saved `.blend` in a second real Blender process launched with `-F PNG`, then renders the middle frame of each shot as PNG;
 11. exports `trajectory_report.json` from actual Blender object keyframes and scene frame ranges.
 
 The script must print `BLENDER_PROXY_OK` only after `.blend`, MP4, three PNGs, and report exist and have non-zero sizes.
@@ -80,8 +81,16 @@ The script must print `BLENDER_PROXY_OK` only after `.blend`, MP4, three PNGs, a
 Execute:
 
 ```powershell
-& 'D:\blender\blender.exe' --background --factory-startup --python videoactagent/blender_proxy.py -- --shotscript examples/station_shotscript.json --output-dir runs/stage1_blender
+& 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' videoactagent/blender_runner.py --blender 'D:\blender\blender.exe' --shotscript examples/station_shotscript.json --output-dir runs/stage1_blender
 ```
+
+Blender 5.1.2 exposes mutually exclusive dynamic output-format enums. The main
+process is launched with `-F FFMPEG` for the 45-frame H.264 render; the compiler
+then reopens the saved scene in a second real Blender process launched with
+`-F PNG` for the three inspection frames. Both processes must exit successfully
+and emit their own evidence marker.
+The runner also treats a Python traceback or a missing success marker as failure,
+because Blender can return process exit code 0 even after a Python exception.
 
 Expected external evidence:
 
@@ -102,4 +111,3 @@ Use the local image viewer to inspect all three PNGs. Reopen the `.blend` with:
 ```
 
 Record SHA-256, size, dimensions, frame ranges, Blender object count, actual actor endpoints, and visible issues. Show clickable PNGs and MP4/GIF if the application supports it. Clearly mark Seedance/Kling/VACE as unverified.
-
