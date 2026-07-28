@@ -1,3 +1,5 @@
+import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -78,6 +80,39 @@ class ControlBridgeIntegrationTests(unittest.TestCase):
                     self.assertEqual(image.size, (960, 540))
                     last_pixels = image.convert("RGB").tobytes()
                 self.assertNotEqual(first_pixels, last_pixels, shot_id)
+
+            bundle_path = output_dir / "control_bundle.json"
+            self.assertTrue(bundle_path.is_file())
+            bundle_text = bundle_path.read_text(encoding="utf-8")
+            bundle = json.loads(bundle_text)
+            self.assertEqual(bundle["schema_version"], "0.1")
+            self.assertEqual(bundle["source_scene_id"], "station_platform")
+            self.assertEqual(bundle["fps"], 3)
+            self.assertFalse(bundle["submission_ready"])
+            self.assertEqual(
+                bundle["submission_blocker"],
+                "public asset URLs are not configured",
+            )
+            self.assertEqual(
+                [shot["shot_id"] for shot in bundle["shots"]],
+                ["s01", "s02", "s03"],
+            )
+            self.assertEqual(bundle["shots"][0]["frame_range"], [1, 15])
+            self.assertEqual(bundle["shots"][2]["frame_range"], [31, 45])
+            self.assertIn("wide shot", bundle["shots"][0]["prompts"]["cinematic"])
+
+            for shot in bundle["shots"]:
+                for control in shot["controls"].values():
+                    path = output_dir / control["path"]
+                    contents = path.read_bytes()
+                    self.assertEqual(control["bytes"], len(contents))
+                    self.assertEqual(
+                        control["sha256"],
+                        hashlib.sha256(contents).hexdigest(),
+                    )
+            self.assertNotIn("http://", bundle_text)
+            self.assertNotIn("https://", bundle_text)
+            self.assertNotIn("task_id", bundle_text)
 
 
 if __name__ == "__main__":

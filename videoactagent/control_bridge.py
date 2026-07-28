@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -12,6 +13,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from videoactagent.shotscript import ShotScript
+from videoactagent.prompts import compile_shot_prompts
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,15 +146,89 @@ def export_controls(
     return records
 
 
+def file_record(path: Path, output_dir: Path) -> dict:
+    contents = path.read_bytes()
+    return {
+        "path": path.relative_to(output_dir).as_posix(),
+        "bytes": len(contents),
+        "sha256": hashlib.sha256(contents).hexdigest(),
+    }
+
+
+def write_bundle(
+    script: ShotScript,
+    records: list[dict],
+    output_dir: Path,
+) -> Path:
+    output_dir = output_dir.resolve()
+    shots = []
+    for shot, record in zip(script.shots, records, strict=True):
+        prompts = compile_shot_prompts(shot)
+        shots.append(
+            {
+                "shot_id": shot.shot_id,
+                "duration": shot.duration,
+                "frame_range": record["frame_range"],
+                "prompts": {
+                    "plain": prompts.plain,
+                    "cinematic": prompts.cinematic,
+                    "timed": prompts.timed,
+                },
+                "controls": {
+                    "first_frame": file_record(Path(record["first_frame"]), output_dir),
+                    "last_frame": file_record(Path(record["last_frame"]), output_dir),
+                    "proxy_video": file_record(Path(record["proxy_video"]), output_dir),
+                },
+            }
+        )
+    bundle = {
+        "schema_version": "0.1",
+        "source_scene_id": script.scene_id,
+        "fps": script.fps,
+        "submission_ready": False,
+        "submission_blocker": "public asset URLs are not configured",
+        "shots": shots,
+    }
+    bundle_path = output_dir / "control_bundle.json"
+    temporary = output_dir / ".control_bundle.json.tmp"
+    temporary.write_text(
+        json.dumps(bundle, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(bundle_path)
+    validate_bundle(bundle_path, output_dir)
+    return bundle_path
+
+
+def validate_bundle(bundle_path: Path, output_dir: Path) -> None:
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    if bundle.get("submission_ready") is not False:
+        raise RuntimeError("local-only bundle must not be submission ready")
+    for shot in bundle.get("shots", []):
+        for control in shot.get("controls", {}).values():
+            path = output_dir / control["path"]
+            actual = file_record(path, output_dir)
+            if actual != control:
+                raise RuntimeError(f"control hash validation failed: {path}")
+
+
 def main() -> None:
     args = parse_args()
+    script = ShotScript.from_path(args.shotscript)
     records = export_controls(
         args.blender,
         args.shotscript,
         args.blend,
         args.output_dir,
     )
-    print("CONTROL_BRIDGE_OK", json.dumps(records, ensure_ascii=False))
+    bundle_path = write_bundle(script, records, args.output_dir.resolve())
+    print(
+        "CONTROL_BRIDGE_OK",
+        json.dumps(
+            {"bundle": str(bundle_path), "shots": len(records)},
+            ensure_ascii=False,
+        ),
+    )
 
 
 if __name__ == "__main__":
