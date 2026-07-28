@@ -36,6 +36,8 @@ class ShotPromptTests(unittest.TestCase):
 
         self.assertIn("dolly in", prompts[1].cinematic)
         self.assertIn("arc clockwise", prompts[2].cinematic)
+        self.assertIn("look at actor B", prompts[2].cinematic)
+        self.assertIn("performs face actor B", prompts[2].timed)
         for compiled in prompts:
             self.assertIn("left to right", compiled.cinematic)
             self.assertIn("north side of the action axis", compiled.cinematic)

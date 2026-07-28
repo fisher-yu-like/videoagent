@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 
 from videoactagent.shotscript import ActorPlan, Shot, Vec3
 
@@ -13,7 +14,12 @@ class ShotPrompts:
 
 
 def _words(value: str) -> str:
-    return value.replace("_", " ")
+    words = value.replace("_", " ")
+    return re.sub(
+        r"\bactor ([a-z0-9]+)\b",
+        lambda match: f"actor {match.group(1).upper()}",
+        words,
+    )
 
 
 def _actor_name(actor_id: str) -> str:
