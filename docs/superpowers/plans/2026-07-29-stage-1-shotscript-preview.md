@@ -1,181 +1,105 @@
-# Stage 1 ShotScript Preview Implementation Plan
+# Stage 1 ShotScript and Blender Proxy Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Turn one concrete three-shot, two-actor story into a validated ShotScript and an actually rendered 2D animated preview with trajectory artifacts.
+**Goal:** Compile one concrete three-shot, two-actor story into a validated ShotScript and a real Blender 5.1 scene, `.blend` file, rendered MP4, keyframes, and measured trajectory report.
 
-**Architecture:** A small standard-library validator parses the canonical ShotScript JSON and enforces cross-shot references, durations, camera vectors, actor identities, and continuity fields. A Pillow renderer consumes the same parsed objects to render top-down frames, camera frustums, actor paths, GIF output, contact sheet, and measured trajectory endpoints. This is a real local compiler experiment, not evidence for Blender or a video-generation API.
+**Architecture:** A standard-library parser validates a canonical ShotScript JSON. A Blender Python entry point consumes exactly that validated structure, creates simple but identifiable actors, animates actors and camera, renders a three-shot MP4 with Blender's bundled FFmpeg, saves the scene, and exports measurements. No diffusion model or external API is involved.
 
-**Tech Stack:** Bundled Python 3.12.13, bundled Pillow, JSON, dataclasses, unittest.
+**Tech Stack:** Bundled Python 3.12.13 for validation; Blender 5.1.2 at `D:\blender\blender.exe`; Blender Python 3.13; Eevee; Blender-bundled FFmpeg; unittest.
 
 ---
 
-## Real-evidence boundary
+## Evidence boundary
 
-- Input is the checked-in station story and its checked-in ShotScript, not an invented API response.
-- The renderer must create actual image files and the report must inspect actual pixels, dimensions, frame count, and measured endpoints.
-- The result is labeled `2D control-plan preview`; it is not labeled Blender output, model generation, or camera-control success.
-- No network, API, server, GPU, model download, or third-party package installation is permitted.
+- JSON parsing, source checks, and unit tests are local code evidence only.
+- `.blend`, PNG frames, and MP4 must be produced by the actual installed Blender executable in background mode.
+- The report must include Blender version, exit code, file sizes, hashes, video frame metadata available from Blender, and visual inspection of rendered PNG frames.
+- These outputs prove the control plan is executable in Blender; they do not prove Seedance/Kling/VACE follows it.
+- No fake API response, mock render success, invented task ID, server, GPU, or package installation is permitted.
 
-## File map
+## Files
 
-- Create: `examples/station_story.md` — controlled three-shot story and intended blocking.
-- Create: `examples/station_shotscript.json` — canonical Stage 1 input.
-- Create: `videoactagent/shotscript.py` — typed parser and validation errors.
-- Create: `tests/test_station_shotscript.py` — reads and validates the actual example.
-- Create: `videoactagent/preview2d.py` — Pillow renderer and CLI.
-- Create: `tests/test_preview2d.py` — renders actual temporary GIF/PNG files and inspects them.
-- Create at runtime: `runs/stage1_station/preview.gif`
-- Create at runtime: `runs/stage1_station/contact_sheet.png`
-- Create at runtime: `runs/stage1_station/trajectory_report.json`
+- Create: `examples/station_story.md`
+- Create: `examples/station_shotscript.json`
+- Create: `videoactagent/shotscript.py`
+- Create: `tests/test_station_shotscript.py`
+- Create: `videoactagent/blender_proxy.py`
+- Create at runtime: `runs/stage1_blender/station_proxy.blend`
+- Create at runtime: `runs/stage1_blender/station_proxy.mp4`
+- Create at runtime: `runs/stage1_blender/keyframes/shot_01.png`, `shot_02.png`, `shot_03.png`
+- Create at runtime: `runs/stage1_blender/trajectory_report.json`
 
-## Task 1: Add the real controlled story and canonical ShotScript
+## Task 1: Add the controlled story and canonical ShotScript
 
-Create `examples/station_story.md` with the exact controlled scenario:
+Create a single-platform scene with recurring `actor_a` (orange) and `actor_b` (blue):
 
-```markdown
-# Station meeting — controlled three-shot experiment
+1. `s01`, 5 s wide shot: A walks from `[-3,0,0]` to `[-1,0,0]`; B stays `[2,0,0]`; camera makes a small truck-right move.
+2. `s02`, 5 s medium shot: A walks from `[-1,0,0]` to `[0.5,0,0]`; B stays `[1.5,0,0]`; camera dollies in.
+3. `s03`, 5 s over-shoulder shot: A stays `[0.5,0,0]`; B stays `[1.5,0,0]`; camera makes a small clockwise arc.
 
-Two recurring actors meet on one railway platform. Actor A wears orange and enters from screen-left. Actor B wears blue and waits on screen-right. The sequence preserves the left-to-right movement and stays on the north side of the action axis.
+The top-level JSON contains `scene_id`, `fps=3`, `world_bounds`, and three shots. Every shot contains `shot_id`, `duration`, camera start/end/focal length/motion/look-at, both actor plans, and continuity (`previous_shot`, `screen_direction`, `axis_side`).
 
-1. `s01`, 5 s, wide establishing shot. Camera makes a small truck-right move. Actor A walks from x=-3 to x=-1; actor B remains at x=2.
-2. `s02`, 5 s, medium shot. Camera dollies toward the actors. Actor A walks from x=-1 to x=0.5; actor B remains at x=1.5.
-3. `s03`, 5 s, over-shoulder shot. Camera makes a small clockwise arc while both actors remain in place and face each other.
-```
+Validate the actual file with `python -m json.tool`. Commit the data separately.
 
-Create `examples/station_shotscript.json` as a top-level object containing `scene_id`, `fps`, `world_bounds`, and three `shots`. Every shot contains `shot_id`, `duration`, `camera`, `actors`, and `continuity`. Coordinates use `[x, y, z]`; camera paths use `start`, `end`, and `look_at`; actor paths use `start`, `end`, `color`, `action`, and `facing`.
+## Task 2: Parse and validate the actual ShotScript using TDD
 
-Run `python -m json.tool examples/station_shotscript.json` with bundled Python. Expected: formatted JSON and exit 0.
+Write `tests/test_station_shotscript.py` before production code. It loads the checked-in example and asserts actual values:
 
-Commit: `git commit -m "data: add controlled station ShotScript"`.
+- shot IDs are `s01`, `s02`, `s03`;
+- all durations are 5 seconds and preview fps is 3;
+- both actors recur in every shot;
+- previous-shot chain is correct;
+- A's end position in each shot equals its next start position;
+- all shots remain `left_to_right` and `north` of the axis.
 
-## Task 2: Parse and validate the actual ShotScript
+The initial test must fail because `videoactagent.shotscript` is absent. Implement immutable dataclasses `Vec3`, `CameraPlan`, `ActorPlan`, `ContinuityPlan`, `Shot`, and `ShotScript`, plus `ShotScript.from_path()` and `validate()`.
 
-Write `tests/test_station_shotscript.py` first. It must load `examples/station_shotscript.json` and assert:
+Reject duplicate IDs, malformed vectors, non-positive timing, missing recurring actors, broken shot references, actor discontinuity, unsupported screen direction, and unsupported axis side. Run focused and full suites with bundled Python 3.12, then commit.
 
-- exactly three shots with IDs `s01`, `s02`, `s03`;
-- every duration is 5 seconds;
-- recurring actor set is exactly `{actor_a, actor_b}`;
-- `s02.previous_shot == s01` and `s03.previous_shot == s02`;
-- actor A's `s01.end` equals `s02.start`;
-- all shots keep `axis_side == north` and `screen_direction == left_to_right`.
+## Task 3: Build the real Blender compiler
 
-The first run must FAIL because `videoactagent.shotscript` does not exist. Convert import absence into an assertion failure, not a test-loader error.
+Create `videoactagent/blender_proxy.py`. It runs only inside Blender and:
 
-Implement `videoactagent/shotscript.py` with:
+1. parses arguments after `--`;
+2. imports the same `ShotScript` parser from the repository;
+3. clears the factory scene;
+4. creates a platform, tracks, action-axis line, sunlight, area light, world background, and labeled actor materials;
+5. creates each actor from a cylinder body and sphere head parented to an empty root;
+6. creates one camera and animates location, focal length, and look-at rotation for every frame;
+7. keyframes actor root locations with linear interpolation inside shots and one-frame cuts between shots;
+8. renders at 960x540, 3 fps, Eevee, MPEG-4/H.264;
+9. saves the `.blend` before rendering;
+10. renders the middle frame of each shot as PNG;
+11. exports `trajectory_report.json` from actual Blender object keyframes and scene frame ranges.
 
-```python
-class ShotScriptError(ValueError): ...
+The script must print `BLENDER_PROXY_OK` only after `.blend`, MP4, three PNGs, and report exist and have non-zero sizes.
 
-@dataclass(frozen=True)
-class Vec3:
-    x: float
-    y: float
-    z: float
+## Task 4: Run a real headless Blender experiment
 
-@dataclass(frozen=True)
-class CameraPlan:
-    shot_size: str
-    focal_length_mm: float
-    motion: str
-    start: Vec3
-    end: Vec3
-    look_at: str
-
-@dataclass(frozen=True)
-class ActorPlan:
-    actor_id: str
-    color: str
-    start: Vec3
-    end: Vec3
-    action: str
-    facing: str
-
-@dataclass(frozen=True)
-class ContinuityPlan:
-    previous_shot: str | None
-    screen_direction: str
-    axis_side: str
-
-@dataclass(frozen=True)
-class Shot:
-    shot_id: str
-    duration: float
-    camera: CameraPlan
-    actors: tuple[ActorPlan, ...]
-    continuity: ContinuityPlan
-
-@dataclass(frozen=True)
-class ShotScript:
-    scene_id: str
-    fps: int
-    world_bounds: tuple[float, float, float, float]
-    shots: tuple[Shot, ...]
-
-    @classmethod
-    def from_path(cls, path: Path) -> "ShotScript": ...
-
-    def validate(self) -> None: ...
-```
-
-Validation must reject duplicate shot IDs, non-positive fps/durations, malformed vectors, missing recurring actors, broken `previous_shot` chains, actor position discontinuity, and unsupported axis/screen-direction values.
-
-Run the focused test, then the full local suite using the bundled Python executable. Commit: `git commit -m "feat: validate executable ShotScript"`.
-
-## Task 3: Render actual 2D preview files
-
-Write `tests/test_preview2d.py` first. It loads the real station ShotScript, renders into a real temporary directory, opens the resulting files with Pillow, and asserts:
-
-- GIF exists, format is GIF, size is 960x540, and has 45 frames (3 shots x 5 s x 3 preview fps);
-- contact sheet exists, format is PNG, and contains three labeled panels;
-- trajectory report exists and reports actor A ending `s01` exactly where it starts `s02`;
-- at least 1% of pixels differ between the first and last frame of `s01`.
-
-The first run must FAIL because `videoactagent.preview2d` does not exist.
-
-Implement `videoactagent/preview2d.py` with:
-
-- linear interpolation for camera and actor positions;
-- top-down world-to-pixel projection from `world_bounds`;
-- platform grid and action axis;
-- colored actor circles with IDs;
-- actor path polylines;
-- camera position, look direction, and a simple frustum triangle;
-- shot ID, time, motion, shot size, and focal length labels;
-- GIF writer using Pillow `save_all=True`;
-- three-panel contact sheet from the middle frame of each shot;
-- JSON trajectory report measured from the parsed positions;
-- CLI: `python -m videoactagent.preview2d <shotscript.json> --output-dir <dir> --preview-fps 3`.
-
-Run the focused test and full suite. Commit: `git commit -m "feat: render ShotScript as 2D animated preview"`.
-
-## Task 4: Produce and inspect the actual Stage 1 artifacts
-
-Run with bundled Python:
+Execute:
 
 ```powershell
-& 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -m videoactagent.preview2d examples/station_shotscript.json --output-dir runs/stage1_station --preview-fps 3
+& 'D:\blender\blender.exe' --background --factory-startup --python videoactagent/blender_proxy.py -- --shotscript examples/station_shotscript.json --output-dir runs/stage1_blender
 ```
 
-Inspect the actual output using Pillow and the local image viewer. Record:
+Expected external evidence:
 
-- file sizes and SHA-256 hashes;
-- GIF dimensions and frame count;
-- first/middle/last frame screenshots;
-- actual trajectory endpoint values;
-- any visible clipping, wrong labels, discontinuity, or camera-direction errors.
+- Blender exits 0 and prints its real version plus `BLENDER_PROXY_OK`;
+- `.blend` exists and can be reopened headlessly;
+- MP4 exists, is non-empty, and Blender reports 45 rendered frames;
+- three actual PNG frames exist and are visually distinct;
+- trajectory report contains the real frame ranges and Blender-evaluated positions.
 
-Run the complete local suite fresh. Do not call the stage complete if the real output is missing or visually incorrect.
+If Blender fails, use systematic debugging. Do not replace it with a fake renderer or mark success from file-name existence alone.
 
-## Task 5: Stage 1 report
+## Task 5: Inspect and report
 
-Report separately:
+Use the local image viewer to inspect all three PNGs. Reopen the `.blend` with:
 
-**Local code evidence** — tests, JSON parse, hashes, image dimensions, frame count, trajectory measurements.
+```powershell
+& 'D:\blender\blender.exe' --background runs/stage1_blender/station_proxy.blend --python-expr "import bpy; print('REOPEN_OK', len(bpy.context.scene.objects), bpy.context.scene.frame_start, bpy.context.scene.frame_end)"
+```
 
-**Visual evidence** — clickable contact sheet and preview GIF.
-
-**External evidence** — explicitly `not applicable / not run`: no Blender, Seedance, Kling, VACE, server, or GPU.
-
-List actual limitations and the next Blender installation/runtime decision. Continue autonomously only within the existing no-server/no-paid-resource authorization.
+Record SHA-256, size, dimensions, frame ranges, Blender object count, actual actor endpoints, and visible issues. Show clickable PNGs and MP4/GIF if the application supports it. Clearly mark Seedance/Kling/VACE as unverified.
 
