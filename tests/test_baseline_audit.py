@@ -1,7 +1,17 @@
+"""Stage 5 pinned-source audit tests for ``videoactagent.baseline_audit``.
+
+Run: ``& $PY -m unittest tests.test_baseline_audit -v`` (see
+``docs/DEBUGGING.md``). Inputs are ``baselines/manifest.json`` and the real
+``third_party/VACE``/``third_party/ReCamMaster`` checkouts; generated reports
+use temporary directories. This verifies source provenance, not model weights,
+CUDA inference, or generated-video quality.
+"""
+
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 MANIFEST = Path("baselines/manifest.json")
@@ -9,6 +19,35 @@ THIRD_PARTY = Path("third_party")
 
 
 class BaselineAuditTests(unittest.TestCase):
+    def test_git_head_uses_checkout_scoped_safe_directory_without_global_config(self):
+        from videoactagent.baseline_audit import _git_head
+
+        checkout = (THIRD_PARTY / "VACE").resolve()
+        expected_head = "a" * 40
+        with patch("videoactagent.baseline_audit.subprocess.run") as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = expected_head + "\n"
+
+            actual_head = _git_head(checkout)
+
+        self.assertEqual(actual_head, expected_head)
+        run.assert_called_once_with(
+            [
+                "git",
+                "-c",
+                f"safe.directory={checkout}",
+                "-C",
+                str(checkout),
+                "rev-parse",
+                "HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+        )
+
     def test_manifest_pins_official_baseline_commits(self):
         self.assertTrue(MANIFEST.is_file(), "baseline manifest is missing")
         manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))

@@ -5,8 +5,10 @@ from dataclasses import dataclass
 from dataclasses import asdict
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
+import uuid
 
 import numpy as np
 from PIL import Image
@@ -17,6 +19,10 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from videoactagent.shotscript import ShotScript
+
+
+DEFAULT_MINIMUM_CONFIDENCE = 1.05
+STRICT_REFERENCE_MINIMUM_CONFIDENCE = 1.25
 
 
 @dataclass(frozen=True)
@@ -62,15 +68,65 @@ def classify_translation(
     expected_motion: str,
     confidence: float,
     threshold_px: float = 5.0,
-    minimum_confidence: float = 1.25,
+    minimum_confidence: float = DEFAULT_MINIMUM_CONFIDENCE,
 ) -> str:
+    return decompose_translation_evidence(
+        dx=dx,
+        expected_motion=expected_motion,
+        confidence=confidence,
+        threshold_px=threshold_px,
+        minimum_confidence=minimum_confidence,
+    )["overall_verdict"]
+
+
+def _observed_background_direction(dx: float, threshold_px: float) -> str:
+    if dx < -threshold_px:
+        return "negative"
+    if dx > threshold_px:
+        return "positive"
+    return "near_zero"
+
+
+def _classify_direction(dx: float, expected_motion: str, threshold_px: float) -> str:
     if expected_motion != "truck_right":
         raise ValueError(f"unsupported camera motion verdict: {expected_motion}")
-    if confidence < minimum_confidence:
-        return "inconclusive"
-    if abs(dx) < threshold_px:
+    if abs(dx) <= threshold_px:
         return "insufficient"
     return "matched" if dx < 0 else "opposite"
+
+
+def decompose_translation_evidence(
+    dx: float,
+    expected_motion: str,
+    confidence: float,
+    threshold_px: float = 5.0,
+    minimum_confidence: float = DEFAULT_MINIMUM_CONFIDENCE,
+) -> dict:
+    """Separate observed direction from the confidence gate.
+
+    Direction is only a statement about the measured background translation.
+    The overall verdict remains inconclusive unless the correlation confidence
+    clears the selected heuristic minimum. This is not a camera-pose estimate.
+    """
+    if not np.isfinite(minimum_confidence) or minimum_confidence <= 1.0:
+        raise ValueError(
+            "minimum_confidence must be finite and greater than 1.0"
+        )
+    direction_verdict = _classify_direction(dx, expected_motion, threshold_px)
+    confidence_gate_passed = bool(
+        np.isfinite(confidence) and confidence >= minimum_confidence
+    )
+    confidence_verdict = "passed" if confidence_gate_passed else "below_minimum"
+    overall_verdict = direction_verdict if confidence_gate_passed else "inconclusive"
+    return {
+        "observed_background_direction": _observed_background_direction(
+            dx, threshold_px
+        ),
+        "direction_verdict": direction_verdict,
+        "confidence_gate_passed": confidence_gate_passed,
+        "confidence_verdict": confidence_verdict,
+        "overall_verdict": overall_verdict,
+    }
 
 
 def _input_record(path: Path) -> dict:
@@ -89,6 +145,47 @@ def _load_grayscale(path: Path) -> tuple[np.ndarray, tuple[int, int]]:
     return grayscale, size
 
 
+def _write_json_atomic(path: Path, value: dict) -> None:
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode(
+        "utf-8"
+    )
+    temporary = destination.with_name(
+        f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(destination)
+        if os.name == "posix":
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _assert_output_not_alias_inputs(output: Path, inputs: tuple[Path, ...]) -> None:
+    destination = output.resolve(strict=False)
+    if output.is_symlink():
+        raise ValueError("camera evaluation output must not be a symlink")
+    for source in inputs:
+        resolved_source = source.resolve(strict=True)
+        same_identity = False
+        if output.exists():
+            try:
+                same_identity = os.path.samefile(output, source)
+            except OSError:
+                same_identity = False
+        if destination == resolved_source or same_identity:
+            raise ValueError(f"output must not alias input: {source}")
+
+
 def evaluate_camera_motion(
     first_path: Path,
     middle_path: Path,
@@ -96,7 +193,7 @@ def evaluate_camera_motion(
     expected_motion: str,
     crop_fraction: float = 0.42,
     threshold_px: float = 5.0,
-    minimum_confidence: float = 1.25,
+    minimum_confidence: float = DEFAULT_MINIMUM_CONFIDENCE,
 ) -> dict:
     paths = {
         "first": Path(first_path),
@@ -126,9 +223,28 @@ def evaluate_camera_motion(
             estimate_translation(crops["first"], crops["last"])
         ),
     }
-    first_to_last_dx = measurements["first_to_last"]["dx"]
+    directional_evidence = {
+        name: decompose_translation_evidence(
+            dx=measurement["dx"],
+            expected_motion=expected_motion,
+            confidence=measurement["confidence"],
+            threshold_px=threshold_px,
+            minimum_confidence=minimum_confidence,
+        )
+        for name, measurement in measurements.items()
+    }
+    strict_directional_evidence = {
+        name: decompose_translation_evidence(
+            dx=measurement["dx"],
+            expected_motion=expected_motion,
+            confidence=measurement["confidence"],
+            threshold_px=threshold_px,
+            minimum_confidence=STRICT_REFERENCE_MINIMUM_CONFIDENCE,
+        )
+        for name, measurement in measurements.items()
+    }
     return {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
         "evidence_type": "heuristic_phase_correlation",
         "expected_motion": expected_motion,
         "expected_background_dx": "negative",
@@ -139,16 +255,19 @@ def evaluate_camera_motion(
         "crop_bounds": [0, 0, width, crop_height],
         "inputs": {name: _input_record(path) for name, path in paths.items()},
         "measurements": measurements,
-        "verdict": classify_translation(
-            first_to_last_dx,
-            expected_motion,
-            measurements["first_to_last"]["confidence"],
-            threshold_px,
-            minimum_confidence,
-        ),
+        "directional_evidence": directional_evidence,
+        "verdict": directional_evidence["first_to_last"]["overall_verdict"],
+        "strict_reference": {
+            "minimum_confidence": STRICT_REFERENCE_MINIMUM_CONFIDENCE,
+            "directional_evidence": strict_directional_evidence,
+            "verdict": strict_directional_evidence["first_to_last"][
+                "overall_verdict"
+            ],
+        },
         "limitations": [
             "global background translation is not ground-truth camera pose",
             "actor motion, zoom, parallax, and generated scene changes can contaminate the estimate",
+            "a heuristic matched verdict does not mean the model or camera control improved",
         ],
     }
 
@@ -162,11 +281,24 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--shot", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--crop-fraction", type=float, default=0.42)
+    parser.add_argument(
+        "--minimum-confidence",
+        type=float,
+        default=DEFAULT_MINIMUM_CONFIDENCE,
+        help=(
+            "heuristic phase-correlation confidence gate; must be finite and "
+            "greater than 1.0 (default: 1.05; strict reference: 1.25)"
+        ),
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
+    _assert_output_not_alias_inputs(
+        args.output,
+        (args.first, args.middle, args.last, args.shotscript),
+    )
     script = ShotScript.from_path(args.shotscript)
     try:
         shot = next(shot for shot in script.shots if shot.shot_id == args.shot)
@@ -178,15 +310,10 @@ def main(argv: list[str] | None = None) -> None:
         args.last,
         shot.camera.motion,
         crop_fraction=args.crop_fraction,
+        minimum_confidence=args.minimum_confidence,
     )
     result["shot_id"] = shot.shot_id
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.output.with_name(f".{args.output.name}.tmp")
-    temporary.write_text(
-        json.dumps(result, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(args.output)
+    _write_json_atomic(args.output, result)
     reread = json.loads(args.output.read_text(encoding="utf-8"))
     if reread.get("shot_id") != shot.shot_id:
         raise RuntimeError("camera evaluation output verification failed")

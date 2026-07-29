@@ -29,6 +29,11 @@ Each requested hash path is now represented by a stable
 `exists`/`is_file`/`bytes`/`sha256` record; a missing path or directory cannot
 produce `verified_source_only`.
 
+Each HEAD lookup is checkout-scoped and non-persistent: the audit executes
+`git -c safe.directory=<resolved-checkout> -C <resolved-checkout> rev-parse HEAD`
+for that repository. This permits read-only verification on hosts where Git
+reports dubious ownership without changing global or repository Git config.
+
 ## Facts taken from the pinned source
 
 ### VACE

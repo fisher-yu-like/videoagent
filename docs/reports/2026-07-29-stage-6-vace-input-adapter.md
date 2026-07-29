@@ -9,7 +9,7 @@ Date: 2026-07-29
 | Adapter and provenance | `verified_local` | Real Stage 2 `s01` files, hashes, negative tamper tests |
 | Mask materialization | `verified_local` | Real 15-frame 960×540 mask independently decoded |
 | Persistent input inspection | `verified_local` | Blender 5.1.2 metadata, OS hashes, saved frames and `inspection.json` |
-| Pinned VACE preprocessing | `not_run` | Requires the A100 server environment |
+| Pinned VACE preprocessing | `historical_only` | Old-job A100 evidence archived; rebuilt current job is unvalidated |
 | Weight load | `not_run` | No weights downloaded or loaded |
 | VACE inference | `not_run` | No GPU process launched |
 | Control adherence | `unverified` | No VACE output exists yet |
@@ -53,7 +53,7 @@ Run directory: `runs/stage6_vace_inputs/s01/`
 | --- | --- | --- |
 | Stage 2 proxy | 92,783 bytes; 960×540; 15 frames; 3 fps; 5.0 s | `2fe40427bed79725cc18b0394d0c0fb2ab9943fe542d1196c0d2b0815c168b2e` |
 | Generated mask | 2,273 bytes; 960×540; 15 frames; 3 fps; 5.0 s | `cbc0ef39ac29dc57dac06cb67111924c73f4ce1034bcbfda34cf16f79ab2029e` |
-| VACE job | Four-input mapping and false evidence flags | `e1f4f1b13265db05ee6a145aeb6607f1963885ccb07d24b5b8a1882c15becd71` |
+| Current VACE job | Rebuilt four-input mapping and false evidence flags | `2ecc5fe51b9fe9d2e9bf608a0829c68b316fb45ae1b8a444bc661375a6cd5063` |
 | Independent inspection | Blender metadata, hashes, mask samples, observations | `89388c900369664859b2a548b5d9472ead98e3db1bac7bc62725322e1ae1d6a1` |
 
 Blender 5.1.2 independently reported both videos as 960×540, 15 frames, and
@@ -97,17 +97,22 @@ Result: 45 tests run in 81.420 seconds, exit code 0, no failures and no
 `ResourceWarning` output. Independent specification review and code-quality
 review both approved local Tasks 1–3 after the contract fixes.
 
-## Server boundary
+The later 2026-07-30 provenance remediation added adversarial path/hard-link
+tests, current-failure invalidation, report-to-validated binding, concurrent
+job publication, and injected replace-failure cleanup. Its focused Stage 6 and
+module-I/O regression run completed 72 tests with 0 failures and 1
+platform-permission skip. This run did not execute VACE, CUDA, a model, an API,
+or a server.
 
-The rented server is network-reachable, but none of the local SSH public keys
-is authorized. Three key-only attempts returned exit code 255 with
-`Permission denied (publickey,password)`. The Windows trusted interactive
-control runtime is unavailable, so the supplied password was not placed in a
-command, environment variable, script, or file. No remote diagnostics,
-installation, download, GPU use, or inference has occurred.
+## Historical server note
 
-The next automatic task is pinned VACE preprocessing on the A100. It remains
-blocked until the project public key is added to the Matpool instance. Once
-key access works, the first remote actions are read-only GPU/OS/disk checks,
-followed by the pinned Python/PyTorch environment and source-only preprocessing
-probe. Weight download and the one-shot BF16 inference remain separate gates.
+At the time this input-adapter report was written, SSH key access had not yet
+been configured, so the remote preprocessing task was still pending. That
+historical state has since been superseded: key access, the CUDA environment,
+and the pinned VACE source-preprocessing probe were subsequently exercised on
+the rented A100. The real remote attempts, including two preserved failures and
+the final passing source-validation record, are documented separately in
+`2026-07-29-stage-6-source-validation.md`. Those successful files are now
+explicitly archived under `.historical-old-job.json` names because they predate
+the strengthened report-binding contract and refer to the superseded job hash.
+Model-weight download and generative inference remain separate later tasks.

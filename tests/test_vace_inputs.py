@@ -1,14 +1,26 @@
+"""Stage 6 provenance-safe VACE input preparation tests for ``vace_inputs``.
+
+Run: ``& $PY -m unittest tests.test_vace_inputs -v`` (see
+``docs/DEBUGGING.md``). Real source media comes from
+``runs/stage2_control_bridge``; prepared proxy/mask/job outputs are exercised in
+temporary directories (persistent examples live in ``runs/stage6_vace_inputs``).
+Failure injections and patched ffmpeg pipes are mechanics tests; passing does
+not prove VACE source preprocessing, CUDA execution, or generated-video quality.
+"""
+
 from __future__ import annotations
 
 import copy
 import gc
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest import mock
@@ -18,6 +30,7 @@ import imageio_ffmpeg
 
 from videoactagent.vace_inputs import (
     ProvenanceError,
+    _atomic_write_json,
     build_vace_inputs,
     verify_prepared_job,
     write_full_generation_mask,
@@ -164,6 +177,57 @@ class VaceInputProvenanceTests(unittest.TestCase):
                     self.assertFalse(temporary_paths[-1].exists())
 
         self.assertEqual(len(set(temporary_paths)), len(temporary_paths))
+
+    def test_job_atomic_writer_survives_concurrent_publishers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "vace_job.json"
+            barrier = threading.Barrier(8)
+            failures: list[BaseException] = []
+
+            def publish(index: int) -> None:
+                try:
+                    barrier.wait()
+                    _atomic_write_json(
+                        target,
+                        {"publisher": index, "payload": str(index) * 4096},
+                    )
+                except BaseException as exc:  # pragma: no cover - asserted below
+                    failures.append(exc)
+
+            threads = [
+                threading.Thread(target=publish, args=(index,)) for index in range(8)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=10)
+
+            self.assertEqual(failures, [])
+            self.assertFalse(any(thread.is_alive() for thread in threads))
+            published = json.loads(target.read_text(encoding="utf-8"))
+            self.assertIn(published["publisher"], range(8))
+            self.assertEqual(
+                published["payload"], str(published["publisher"]) * 4096
+            )
+            self.assertEqual(list(target.parent.glob(".vace_job.json.*.tmp")), [])
+
+    def test_job_atomic_writer_fsyncs_and_cleans_up_replace_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "vace_job.json"
+            target.write_text('{"state":"old"}\n', encoding="utf-8")
+            with mock.patch(
+                "videoactagent.vace_inputs.os.fsync", wraps=os.fsync
+            ) as fsync, mock.patch(
+                "pathlib.Path.replace", side_effect=OSError("injected replace failure")
+            ):
+                with self.assertRaisesRegex(OSError, "injected replace failure"):
+                    _atomic_write_json(target, {"state": "new"})
+
+            self.assertGreaterEqual(fsync.call_count, 1)
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")), {"state": "old"}
+            )
+            self.assertEqual(list(target.parent.glob(".vace_job.json.*.tmp")), [])
 
     def test_builds_s01_job_only_from_hash_verified_stage2_media(self):
         source_bundle = json.loads(REAL_BUNDLE.read_text(encoding="utf-8"))

@@ -1,0 +1,35 @@
+{
+  "schema_version": "0.1",
+  "shot_id": "s01",
+  "source": "manual_visual_inspection",
+  "video_sha256": "f3a95d76e898858726be8651f0472bafd0ff6a33e6c0e6743f5e23730aae35f3",
+  "frames": {
+    "first": {
+      "sha256": "6af45a73f417732b36e85fecc4d45bf8aff74bdb67b7c0d654ea82e85b5ad75c",
+      "actor_a_visible": true,
+      "actor_b_visible": true
+    },
+    "middle": {
+      "sha256": "5923ab1b9910cb0a68c1e9d89e4e9fd90345ca42d0cb91bbce44dc1f1972300f",
+      "actor_a_visible": true,
+      "actor_b_visible": true
+    },
+    "last": {
+      "sha256": "378179169ecbbf4259c1c936e0beb6050197e6a24aac1de7e79a07e5ce759719",
+      "actor_a_visible": true,
+      "actor_b_visible": true
+    }
+  },
+  "observations": {
+    "actor_a_action": "matched",
+    "actor_b_action": "matched",
+    "actors_facing": "matched",
+    "screen_direction": "matched"
+  },
+  "notes": [
+    "The man enters from frame left and approaches the woman between the first and middle frames.",
+    "The woman remains standing on frame right while both people face one another.",
+    "The last frame shows the two people shaking hands near the center of the platform.",
+    "Camera motion is not judged manually here; the automatic Stage 4 result remains authoritative."
+  ]
+}

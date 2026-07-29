@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +15,7 @@ from PIL import Image
 
 
 VACE_COMMIT = "48eb44f1c4be87cc65a98bff985a26976841e9f3"
+VACE_PROCESSOR_BLOB_ID = "a0788111a7b79fda3070a2ab8372956c0726af26"
 SCHEMA_VERSION = "0.1"
 EVIDENCE_SOURCE = "real_stage2_blender"
 VACE_MODEL_NAME = "vace-1.3B"
@@ -25,6 +28,41 @@ REQUIRED_CONTROLS = ("first_frame", "last_frame", "proxy_video")
 
 class ProvenanceError(ValueError):
     """Raised when a Stage 2 bundle cannot prove its media provenance."""
+
+
+def _fsync_parent(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path.parent, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        for attempt in range(50):
+            try:
+                temporary.replace(path)
+                break
+            except PermissionError:
+                if attempt == 49:
+                    raise
+                time.sleep(0.01)
+        _fsync_parent(path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def sha256_file(path: Path) -> str:
@@ -352,12 +390,7 @@ def build_vace_inputs(bundle_path: Path, shot_id: str, output_dir: Path) -> Path
         },
     }
     job_path = output_dir / "vace_job.json"
-    temporary = output_dir / ".vace_job.json.tmp"
-    temporary.write_text(
-        json.dumps(job, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(job_path)
+    _atomic_write_json(job_path, job)
     return job_path
 
 

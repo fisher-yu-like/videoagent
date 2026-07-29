@@ -8,11 +8,19 @@ import subprocess
 
 
 def _git_head(checkout: Path) -> str | None:
+    checkout = checkout.resolve()
     if not (checkout / ".git").exists():
         return None
     completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=checkout,
+        [
+            "git",
+            "-c",
+            f"safe.directory={checkout}",
+            "-C",
+            str(checkout),
+            "rev-parse",
+            "HEAD",
+        ],
         capture_output=True,
         text=True,
         encoding="utf-8",
