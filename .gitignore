@@ -15,4 +15,4 @@ checkpoints/
 *.mp4
 *.blend
 .worktrees/
-
+third_party/

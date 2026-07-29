@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1",
+  "evidence_boundary": "Source checkout verification does not prove inference, quality, CUDA compatibility, or GPU memory fit.",
+  "baselines": [
+    {
+      "name": "VACE",
+      "role": "primary_structural_control",
+      "repository": "https://github.com/ali-vilab/VACE.git",
+      "checkout": "VACE",
+      "commit": "48eb44f1c4be87cc65a98bff985a26976841e9f3",
+      "required_files": [
+        "README.md",
+        "UserGuide.md",
+        "requirements.txt",
+        "vace"
+      ],
+      "hash_files": [
+        "README.md",
+        "UserGuide.md",
+        "requirements.txt",
+        "pyproject.toml"
+      ]
+    },
+    {
+      "name": "ReCamMaster",
+      "role": "camera_rerender_comparator",
+      "repository": "https://github.com/KlingAIResearch/ReCamMaster.git",
+      "checkout": "ReCamMaster",
+      "commit": "fcf98bc86e876bb534518cd99e8a65b282f0f16e",
+      "required_files": [
+        "README.md",
+        "requirements.txt",
+        "inference_recammaster.py",
+        "vis_cam.py"
+      ],
+      "hash_files": [
+        "README.md",
+        "requirements.txt",
+        "inference_recammaster.py",
+        "vis_cam.py"
+      ]
+    }
+  ]
+}
