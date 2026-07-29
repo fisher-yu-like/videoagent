@@ -183,6 +183,21 @@ class TrajectoryEditorTests(unittest.TestCase):
                 output_dir=Path("outputs/s01"),
             )
 
+    def test_rejects_persistent_lock_path_that_is_also_an_input(self) -> None:
+        from videoactagent.trajectory_editor import EditorSession
+
+        lock_input = self.workspace / "outputs" / ".s01.trajectory.lock"
+        lock_input.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (80, 45), (11, 22, 33)).save(lock_input, format="PNG")
+        with self.assertRaisesRegex(ValueError, "lock.*input|collision"):
+            EditorSession.from_paths(
+                workspace=self.workspace,
+                image=Path("outputs/.s01.trajectory.lock"),
+                shotscript=Path("inputs/shots.json"),
+                shot_id="s01",
+                output_dir=Path("outputs/s01"),
+            )
+
     def test_rejects_resolved_output_escape_without_symlink_privilege(self) -> None:
         from videoactagent.trajectory_editor import EditorSession
 
@@ -776,6 +791,7 @@ assert.strictEqual(tracks[0].points[0].x, 0.1);
                 """
 import json, os, sys, time
 from pathlib import Path
+from videoactagent.trajectory_editor import _lock_open_flags, _try_advisory_lock, _unlock_advisory_lock, _write_persistent_lock_metadata
 lock_path, ready_path, release_path = map(Path, sys.argv[1:])
 record = {
     "pid": os.getpid(),
@@ -783,18 +799,19 @@ record = {
     "output_identity": ["subprocess-holder"],
     "token": "subprocess-holder-token",
 }
-descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+descriptor = os.open(lock_path, _lock_open_flags(writable=True) | os.O_CREAT, 0o600)
 try:
+    if not _try_advisory_lock(descriptor):
+        raise RuntimeError("subprocess could not acquire advisory lock")
     data = (json.dumps(record) + "\\n").encode("utf-8")
-    os.write(descriptor, data)
-    os.fsync(descriptor)
+    _write_persistent_lock_metadata(descriptor, data)
     ready_path.write_text("ready", encoding="utf-8")
     deadline = time.monotonic() + 10
     while not release_path.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
 finally:
+    _unlock_advisory_lock(descriptor)
     os.close(descriptor)
-    lock_path.unlink(missing_ok=True)
 """,
                 str(lock_path),
                 str(ready_path),
@@ -840,7 +857,8 @@ finally:
 
         def inspect_lock_then_fail(*args, **kwargs):
             nonlocal observed
-            observed = json.loads(lock_path.read_bytes())
+            self.assertTrue(lock_path.is_file())
+            observed = json.loads(editor._read_lock_diagnostic(lock_path))
             self.assertEqual(os.getpid(), observed["pid"])
             self.assertIsInstance(observed["timestamp"], (int, float))
             self.assertEqual(list(session.output_directory_identity), observed["output_identity"])
@@ -851,7 +869,8 @@ finally:
         with mock.patch.object(editor, "_commit_pair", side_effect=inspect_lock_then_fail):
             with self.assertRaisesRegex(OSError, "injected commit failure"):
                 session.save(_payload())
-        self.assertFalse(lock_path.exists(), "the owner must release its lock after an exception")
+        self.assertTrue(lock_path.is_file(), "the persistent lock path is never removed")
+        session.save(_payload())
 
     def test_save_does_not_delete_a_replacement_lock_it_does_not_own(self) -> None:
         import videoactagent.trajectory_editor as editor
@@ -859,17 +878,178 @@ finally:
         session = self._session()
         lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
         replacement = b'{"token":"replacement-owner"}\n'
+        displaced = lock_path.with_name(lock_path.name + ".displaced")
+        real_close = os.close
+        swapped = False
 
-        def replace_lock_then_fail(*args, **kwargs):
-            self.assertTrue(lock_path.exists())
-            lock_path.unlink()
-            lock_path.write_bytes(replacement)
-            raise OSError("injected owner replacement")
+        def close_then_replace(descriptor):
+            nonlocal swapped
+            real_close(descriptor)
+            if not swapped and lock_path.is_file():
+                swapped = True
+                os.replace(lock_path, displaced)
+                lock_path.write_bytes(replacement)
 
-        with mock.patch.object(editor, "_commit_pair", side_effect=replace_lock_then_fail):
-            with self.assertRaisesRegex(OSError, "injected owner replacement"):
-                session.save(_payload())
+        with mock.patch.object(editor.os, "close", side_effect=close_then_replace):
+            session.save(_payload())
+        self.assertTrue(swapped)
         self.assertEqual(replacement, lock_path.read_bytes())
+
+    def test_release_never_removes_even_an_empty_replacement_lock_file(self) -> None:
+        import videoactagent.trajectory_editor as editor
+
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        displaced = lock_path.with_name(lock_path.name + ".displaced-empty-window")
+        real_close = os.close
+        swapped = False
+
+        def close_then_replace_with_empty_lock(descriptor):
+            nonlocal swapped
+            real_close(descriptor)
+            if not swapped and lock_path.is_file():
+                swapped = True
+                os.replace(lock_path, displaced)
+                lock_path.touch()
+
+        with mock.patch.object(editor.os, "close", side_effect=close_then_replace_with_empty_lock):
+            session.save(_payload())
+
+        self.assertTrue(swapped, "the regression must inject immediately after closing the held descriptor")
+        self.assertTrue(lock_path.is_file())
+        self.assertEqual(b"", lock_path.read_bytes())
+
+    def test_lock_fstat_failure_preserves_original_error_and_does_not_leak_advisory_lock(self) -> None:
+        import videoactagent.trajectory_editor as editor
+
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        real_fstat = os.fstat
+        injected = False
+
+        def fail_first_lock_fstat(descriptor):
+            nonlocal injected
+            if lock_path.is_file() and not injected:
+                injected = True
+                raise OSError("injected persistent lock fstat failure")
+            return real_fstat(descriptor)
+
+        with mock.patch.object(editor.os, "fstat", side_effect=fail_first_lock_fstat):
+            with self.assertRaisesRegex(OSError, "injected persistent lock fstat failure"):
+                session.save(_payload())
+        self.assertTrue(injected)
+        self.assertTrue(lock_path.is_file())
+        session.save(_payload())
+
+    def test_lock_metadata_write_failure_preserves_original_error_and_does_not_leak_advisory_lock(self) -> None:
+        import videoactagent.trajectory_editor as editor
+
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        with mock.patch.object(editor, "_write_all", side_effect=OSError("injected lock metadata write failure")):
+            with self.assertRaisesRegex(OSError, "injected lock metadata write failure"):
+                session.save(_payload())
+        self.assertTrue(lock_path.is_file())
+        session.save(_payload())
+
+    def test_crashed_subprocess_releases_os_lock_and_persistent_file_is_reacquired(self) -> None:
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        ready_path = self.workspace / "crash-lock-ready"
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                """
+import os, sys
+from pathlib import Path
+from videoactagent.trajectory_editor import _lock_open_flags, _try_advisory_lock, _write_persistent_lock_metadata
+lock_path, ready_path = map(Path, sys.argv[1:])
+descriptor = os.open(lock_path, _lock_open_flags(writable=True) | os.O_CREAT, 0o600)
+if not _try_advisory_lock(descriptor):
+    raise RuntimeError("crash holder could not acquire advisory lock")
+_write_persistent_lock_metadata(descriptor, b'{"token":"crash-holder"}\\n')
+ready_path.write_text("ready", encoding="utf-8")
+sys.stdin.buffer.read(1)
+os._exit(23)
+""",
+                str(lock_path),
+                str(ready_path),
+            ],
+            cwd=ROOT,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready_path.exists() and holder.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            if not ready_path.exists():
+                stdout, stderr = holder.communicate(timeout=1)
+                self.fail(f"crash holder did not become ready: stdout={stdout!r}, stderr={stderr!r}")
+            assert holder.stdin is not None
+            holder.stdin.write(b"x")
+            holder.stdin.flush()
+            holder.wait(timeout=5)
+            self.assertEqual(23, holder.returncode)
+            session.save(_payload())
+            self.assertTrue(lock_path.is_file())
+        finally:
+            if holder.poll() is None:
+                holder.kill()
+                holder.wait(timeout=5)
+            for stream in (holder.stdin, holder.stdout, holder.stderr):
+                if stream is not None:
+                    stream.close()
+
+    def test_lock_diagnostic_is_single_file_and_strictly_byte_bounded(self) -> None:
+        import videoactagent.trajectory_editor as editor
+
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        lock_path.write_bytes(b"A" * (editor.LOCK_DIAGNOSTIC_MAX_BYTES + 4096))
+        reads: list[int] = []
+        real_read = os.read
+
+        def bounded_read(descriptor, count):
+            reads.append(count)
+            return real_read(descriptor, count)
+
+        with mock.patch.object(Path, "glob", side_effect=AssertionError("diagnostics must not glob")), mock.patch.object(
+            editor.os, "read", side_effect=bounded_read
+        ):
+            diagnostic = editor._read_lock_diagnostic(lock_path)
+        self.assertEqual([editor.LOCK_DIAGNOSTIC_MAX_BYTES], reads)
+        self.assertLessEqual(len(diagnostic.encode("utf-8")), editor.LOCK_DIAGNOSTIC_MAX_BYTES)
+
+    def test_rejects_unsafe_persistent_lock_directory_and_hardlink(self) -> None:
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        lock_path.mkdir()
+        with self.assertRaisesRegex((OSError, ValueError), "lock|regular"):
+            session.save(_payload())
+        lock_path.rmdir()
+
+        source = self.workspace / "foreign-lock-source"
+        source.write_bytes(b"foreign")
+        os.link(source, lock_path)
+        with self.assertRaisesRegex((OSError, ValueError), "hardlink|link count"):
+            session.save(_payload())
+
+    def test_rejects_persistent_lock_symlink_without_touching_target(self) -> None:
+        session = self._session()
+        lock_path = session.output_dir.parent / f".{session.output_dir.name}.trajectory.lock"
+        target = self.workspace / "foreign-lock-target"
+        original = b"foreign-lock-target"
+        target.write_bytes(original)
+        try:
+            lock_path.symlink_to(target)
+        except OSError:
+            self.skipTest("symlink creation is unavailable")
+        with self.assertRaisesRegex((OSError, ValueError), "lock|regular|symlink"):
+            session.save(_payload())
+        self.assertEqual(original, target.read_bytes())
 
     def test_double_rollback_failure_keeps_new_file_and_both_old_backups(self) -> None:
         session = self._session()
@@ -1019,11 +1199,11 @@ finally:
             "Save",
             "Load",
             "-m videoactagent.trajectory validate",
-            "runs/trajectory/s01/browser_test/trajectory.json",
-            "4f4a5c3f7e888a004acf651e0fefe96b16bfec558dd811ad1eb25cab6e664c27",
-            "472fcdc38a3b45243817d7ab76ea5c13fafceef50fa84d32d9b11672dec50c29",
+            "runs/trajectory/s01/browser_polyline/trajectory.json",
+            "856f7b1e92587a9ddb85f68004e23bd555318ae8318f062c52585f9529468bb8",
+            "5f04d30ea04a0c1ceccbb2340d8063dc1b9271c81811247097553c252e9adbf5",
             "960×540 RGB",
-            "实际页面拖拽",
+            "实际页面完成 polyline 绘制",
             "不是 `session.save` 单测",
         ):
             with self.subTest(token=token):
@@ -1034,17 +1214,17 @@ class RealStage2TrajectoryEditorTests(unittest.TestCase):
     def test_persisted_browser_acceptance_artifacts_match_recorded_hashes(self) -> None:
         from videoactagent.trajectory import TrajectoryInstruction
 
-        output = ROOT / "runs" / "trajectory" / "s01" / "browser_test"
+        output = ROOT / "runs" / "trajectory" / "s01" / "browser_polyline"
         trajectory = output / "trajectory.json"
         overlay = output / "trajectory_overlay.png"
         self.assertTrue(trajectory.is_file(), f"missing actual browser artifact: {trajectory}")
         self.assertTrue(overlay.is_file(), f"missing actual browser artifact: {overlay}")
         self.assertEqual(
-            "4f4a5c3f7e888a004acf651e0fefe96b16bfec558dd811ad1eb25cab6e664c27",
+            "856f7b1e92587a9ddb85f68004e23bd555318ae8318f062c52585f9529468bb8",
             hashlib.sha256(trajectory.read_bytes()).hexdigest(),
         )
         self.assertEqual(
-            "472fcdc38a3b45243817d7ab76ea5c13fafceef50fa84d32d9b11672dec50c29",
+            "5f04d30ea04a0c1ceccbb2340d8063dc1b9271c81811247097553c252e9adbf5",
             hashlib.sha256(overlay.read_bytes()).hexdigest(),
         )
         instruction = TrajectoryInstruction.from_path(trajectory)

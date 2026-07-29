@@ -32,6 +32,8 @@ from .trajectory import TrajectoryInstruction, canonical_bytes
 MAX_REQUEST_BYTES = 1024 * 1024
 OUTPUT_LOCK_TIMEOUT_SECONDS = 5.0
 OUTPUT_LOCK_RETRY_SECONDS = 0.02
+LOCK_DIAGNOSTIC_MAX_BYTES = 16 * 1024
+LOCK_BYTE_OFFSET = LOCK_DIAGNOSTIC_MAX_BYTES
 STATIC_HTML = Path(__file__).with_name("static") / "trajectory_editor.html"
 STATIC_LOGIC = Path(__file__).with_name("static") / "trajectory_editor_logic.js"
 
@@ -158,7 +160,7 @@ class _OutputLockOwnership:
 
 
 def _lock_open_flags(*, writable: bool) -> int:
-    flags = os.O_WRONLY if writable else os.O_RDONLY
+    flags = os.O_RDWR if writable else os.O_RDONLY
     flags |= getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -174,8 +176,18 @@ def _write_all(descriptor: int, data: bytes) -> None:
         offset += written
 
 
+def _write_persistent_lock_metadata(descriptor: int, data: bytes) -> None:
+    if len(data) > LOCK_DIAGNOSTIC_MAX_BYTES:
+        raise ValueError("output lock metadata exceeds diagnostic region")
+    os.ftruncate(descriptor, LOCK_BYTE_OFFSET + 1)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    _write_all(descriptor, data)
+    _write_all(descriptor, b" " * (LOCK_DIAGNOSTIC_MAX_BYTES - len(data)))
+    os.fsync(descriptor)
+
+
 def _read_lock_diagnostic(path: Path) -> str:
-    """Return bounded lock-owner evidence without following a hostile link."""
+    """Read one bounded persistent-lock record without following links."""
 
     try:
         before = path.lstat()
@@ -185,60 +197,139 @@ def _read_lock_diagnostic(path: Path) -> str:
         return f"lock metadata unavailable: {type(exc).__name__}: {exc}"
     if not stat.S_ISREG(before.st_mode):
         return f"unsafe lock type (mode={oct(before.st_mode)})"
+    if before.st_nlink != 1:
+        return f"unsafe lock link count ({before.st_nlink})"
     try:
         descriptor = os.open(path, _lock_open_flags(writable=False))
     except OSError as exc:
         return f"lock metadata unavailable: {type(exc).__name__}: {exc}"
     try:
         opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            return "unsafe opened lock metadata"
         if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
             return "lock changed while diagnostics were opened"
-        data = os.read(descriptor, 16 * 1024)
+        data = os.read(descriptor, LOCK_DIAGNOSTIC_MAX_BYTES)
     except OSError as exc:
         return f"lock metadata unavailable: {type(exc).__name__}: {exc}"
     finally:
         os.close(descriptor)
+    try:
+        after = path.lstat()
+    except OSError:
+        return "lock changed while diagnostics were read"
+    if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+        return "lock changed while diagnostics were read"
     return data.decode("utf-8", errors="replace").strip() or "empty lock metadata"
 
 
-def _release_output_lock(path: Path, ownership: _OutputLockOwnership) -> None:
-    """Delete a lock only while both its file identity and token are ours."""
+def _validate_persistent_lock_info(info: os.stat_result, label: str) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"{label} must be a regular lock file")
+    if info.st_nlink != 1:
+        raise ValueError(f"{label} must not be a hardlink (link count {info.st_nlink})")
 
+
+def _open_persistent_lock(path: Path, token: str) -> tuple[int, _OutputLockOwnership]:
     try:
         before = path.lstat()
     except FileNotFoundError:
-        return
-    if not stat.S_ISREG(before.st_mode):
-        return
-    if (int(before.st_dev), int(before.st_ino)) != (ownership.device, ownership.inode):
-        return
-    try:
-        descriptor = os.open(path, _lock_open_flags(writable=False))
-    except OSError:
-        return
+        before = None
+    if before is not None:
+        _validate_persistent_lock_info(before, "output lock")
+
+    descriptor = os.open(path, _lock_open_flags(writable=True) | os.O_CREAT, 0o600)
     try:
         opened = os.fstat(descriptor)
-        if (int(opened.st_dev), int(opened.st_ino)) != (ownership.device, ownership.inode):
-            return
-        data = os.read(descriptor, 16 * 1024)
-        try:
-            record = json.loads(data)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return
-        if not isinstance(record, dict) or record.get("token") != ownership.token:
-            return
-    finally:
-        os.close(descriptor)
-    # Windows denies unlink while this process still has the file open.  Repeat
-    # the identity check after closing before removing the verified token.
-    try:
+        _validate_persistent_lock_info(opened, "opened output lock")
         current = path.lstat()
-    except FileNotFoundError:
-        return
-    if (int(current.st_dev), int(current.st_ino)) != (ownership.device, ownership.inode):
-        return
-    path.unlink()
-    _fsync_directory(path.parent)
+        _validate_persistent_lock_info(current, "output lock")
+        opened_identity = (int(opened.st_dev), int(opened.st_ino))
+        if opened_identity != (int(current.st_dev), int(current.st_ino)):
+            raise ValueError("output lock changed while it was opened")
+        if before is not None and opened_identity != (int(before.st_dev), int(before.st_ino)):
+            raise ValueError("output lock changed during acquisition")
+        return descriptor, _OutputLockOwnership(*opened_identity, token)
+    except BaseException:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+        raise
+
+
+def _assert_persistent_lock_identity(
+    path: Path,
+    descriptor: int,
+    ownership: _OutputLockOwnership,
+) -> None:
+    opened = os.fstat(descriptor)
+    _validate_persistent_lock_info(opened, "opened output lock")
+    current = path.lstat()
+    _validate_persistent_lock_info(current, "output lock")
+    expected = (ownership.device, ownership.inode)
+    if (int(opened.st_dev), int(opened.st_ino)) != expected:
+        raise ValueError("opened output lock identity changed")
+    if (int(current.st_dev), int(current.st_ino)) != expected:
+        raise ValueError("output lock path identity changed while held")
+
+
+def _try_advisory_lock(descriptor: int) -> bool:
+    opened = os.fstat(descriptor)
+    if opened.st_size <= LOCK_BYTE_OFFSET:
+        os.lseek(descriptor, LOCK_BYTE_OFFSET, os.SEEK_SET)
+        os.write(descriptor, b"\0")
+        os.fsync(descriptor)
+    os.lseek(descriptor, LOCK_BYTE_OFFSET, os.SEEK_SET)
+    if os.name == "nt":
+        import errno
+        import msvcrt
+
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK} or getattr(
+                exc, "winerror", None
+            ) in {33, 36, 158}:
+                return False
+            raise
+    else:
+        import errno
+        import fcntl
+
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+    return True
+
+
+def _unlock_advisory_lock(descriptor: int) -> None:
+    os.lseek(descriptor, LOCK_BYTE_OFFSET, os.SEEK_SET)
+    if os.name == "nt":
+        import msvcrt
+
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+def _release_output_lock(descriptor: int, ownership: _OutputLockOwnership) -> None:
+    """Release the OS lock and descriptor; never delete the shared lock path."""
+
+    try:
+        _unlock_advisory_lock(descriptor)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
 
 
 def _write_transaction_journal(path: Path, record: dict[str, object]) -> None:
@@ -578,6 +669,9 @@ class EditorSession:
             raise ValueError("image must be a decodable raster preview") from exc
 
         output_path = _workspace_path(root, output_dir, "output-dir")
+        output_lock_path = output_path.parent / f".{output_path.name}.trajectory.lock"
+        if any(_same_file(output_lock_path, source) for source in (image_path, shotscript_path)):
+            raise ValueError("output lock collision with input")
         output_path.mkdir(parents=True, exist_ok=True)
         _reject_symlink_components(root, output_dir, "output-dir")
         trajectory_path = output_path / "trajectory.json"
@@ -645,16 +739,25 @@ class EditorSession:
             + "\n"
         ).encode("utf-8")
         deadline = time.monotonic() + max(0.0, float(OUTPUT_LOCK_TIMEOUT_SECONDS))
+        descriptor: int | None = None
         ownership: _OutputLockOwnership | None = None
 
-        while ownership is None:
+        while descriptor is None:
+            candidate: int | None = None
             try:
-                descriptor = os.open(
-                    path,
-                    _lock_open_flags(writable=True) | os.O_CREAT | os.O_EXCL,
-                    0o600,
-                )
-            except FileExistsError:
+                candidate, candidate_ownership = _open_persistent_lock(path, token)
+                acquired = _try_advisory_lock(candidate)
+            except BaseException:
+                if candidate is not None:
+                    try:
+                        os.close(candidate)
+                    except OSError:
+                        pass
+                raise
+
+            if not acquired:
+                assert candidate is not None
+                os.close(candidate)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     diagnostic = _read_lock_diagnostic(path)
@@ -665,28 +768,21 @@ class EditorSession:
                 time.sleep(min(max(0.001, float(OUTPUT_LOCK_RETRY_SECONDS)), remaining))
                 continue
 
+            assert candidate is not None
+            descriptor = candidate
+            ownership = candidate_ownership
             try:
-                info = os.fstat(descriptor)
-                ownership = _OutputLockOwnership(
-                    device=int(info.st_dev),
-                    inode=int(info.st_ino),
-                    token=token,
-                )
-                _write_all(descriptor, data)
-                os.fsync(descriptor)
-            except BaseException:
-                os.close(descriptor)
-                _release_output_lock(path, ownership)
-                raise
-            else:
-                os.close(descriptor)
-            try:
+                _assert_persistent_lock_identity(path, descriptor, ownership)
+                _write_persistent_lock_metadata(descriptor, data)
+                _assert_persistent_lock_identity(path, descriptor, ownership)
                 _fsync_directory(path.parent)
                 self._assert_output_directory_identity()
             except BaseException:
-                _release_output_lock(path, ownership)
+                _release_output_lock(descriptor, ownership)
+                descriptor = None
                 raise
 
+        assert ownership is not None
         try:
             yield
             present = (
@@ -696,8 +792,9 @@ class EditorSession:
             if present[0] != present[1]:
                 raise ValueError("existing trajectory outputs are an inconsistent partial pair")
             self._assert_output_directory_identity()
+            _assert_persistent_lock_identity(path, descriptor, ownership)
         finally:
-            _release_output_lock(path, ownership)
+            _release_output_lock(descriptor, ownership)
 
     def config(self) -> dict[str, object]:
         return {
