@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import warnings
@@ -17,12 +19,15 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from videoactagent.shotscript import ActorPlan, Shot, ShotScript, Vec3
+from videoactagent.trajectory import TrajectoryInstruction
+from videoactagent.trajectory_proxy import camera_world_xy
 
 
 def parse_args() -> argparse.Namespace:
     argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--shotscript", type=Path)
+    parser.add_argument("--trajectory", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--keyframes-only", action="store_true")
     parser.add_argument("--keyframe-frames")
@@ -46,6 +51,18 @@ def create_material(name: str, color: tuple[float, float, float, float], metalli
     principled.inputs["Base Color"].default_value = color
     principled.inputs["Metallic"].default_value = metallic
     principled.inputs["Roughness"].default_value = roughness
+    return material
+
+
+def create_emissive_material(name: str, color: tuple[float, float, float, float]):
+    material = create_material(name, color, metallic=0.0, roughness=0.25)
+    principled = material.node_tree.nodes.get("Principled BSDF")
+    emission = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
+    if emission is not None:
+        emission.default_value = color
+    strength = principled.inputs.get("Emission Strength")
+    if strength is not None:
+        strength.default_value = 4.0
     return material
 
 
@@ -216,6 +233,173 @@ def configure_scene(script: ShotScript):
     return scene, actor_roots, camera, ranges
 
 
+def _remove_keyframes(owner, data_paths: tuple[str, ...], start_frame: int, end_frame: int):
+    for frame in range(start_frame, end_frame + 1):
+        for data_path in data_paths:
+            try:
+                owner.keyframe_delete(data_path=data_path, frame=frame)
+            except (RuntimeError, TypeError):
+                pass
+
+
+def _frame_for_time(start_frame: int, end_frame: int, normalized_time: float) -> int:
+    return start_frame + int(round(normalized_time * (end_frame - start_frame)))
+
+
+def _actor_world(point, bounds: tuple[float, float, float, float]) -> Vector:
+    min_x, max_x, min_y, max_y = bounds
+    return Vector(
+        (
+            min_x + float(point.x) * (max_x - min_x),
+            max_y - float(point.y) * (max_y - min_y),
+            0.0,
+        )
+    )
+
+
+def _camera_world(shot: Shot, point) -> Vector:
+    centre = target_position(shot, float(point.t), shot.camera.look_at)
+    orbit_scale = 18.0
+    height = (shot.camera.start.z + shot.camera.end.z) / 2.0
+    world_x, world_y = camera_world_xy(
+        point.x, point.y, centre.x, centre.y, orbit_scale
+    )
+    return Vector(
+        (
+            world_x,
+            world_y,
+            height,
+        )
+    )
+
+
+def _add_trajectory_curve(name: str, world_points: list[Vector], material):
+    curve_data = bpy.data.curves.new(f"{name}_data", type="CURVE")
+    curve_data.dimensions = "3D"
+    curve_data.bevel_depth = 0.055
+    curve_data.bevel_resolution = 3
+    spline = curve_data.splines.new("POLY")
+    spline.points.add(len(world_points) - 1)
+    for spline_point, world in zip(spline.points, world_points):
+        spline_point.co = (world.x, world.y, max(0.12, world.z), 1.0)
+    obj = bpy.data.objects.new(name, curve_data)
+    bpy.context.collection.objects.link(obj)
+    obj.data.materials.append(material)
+    return obj
+
+
+def _add_control_marker(track_id: str, index: int, world: Vector, material):
+    location = (world.x, world.y, max(0.16, world.z))
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=12,
+        ring_count=8,
+        radius=0.10,
+        location=location,
+    )
+    marker = bpy.context.object
+    marker.name = f"TrajectoryPoint_{track_id}_{index:02d}"
+    marker.data.materials.append(material)
+
+    label_data = bpy.data.curves.new(
+        f"TrajectoryLabel_{track_id}_{index:02d}_data", type="FONT"
+    )
+    label_data.body = str(index)
+    label_data.align_x = "CENTER"
+    label_data.align_y = "CENTER"
+    label_data.size = 0.20
+    label_data.extrude = 0.008
+    label = bpy.data.objects.new(
+        f"TrajectoryLabel_{track_id}_{index:02d}", label_data
+    )
+    bpy.context.collection.objects.link(label)
+    label.location = (world.x, world.y, max(0.28, world.z))
+    label.data.materials.append(material)
+
+
+def apply_trajectory(
+    script: ShotScript,
+    instruction: TrajectoryInstruction,
+    actor_roots,
+    camera,
+    ranges,
+):
+    if instruction.scene_id != script.scene_id:
+        raise ValueError("trajectory scene does not match ShotScript")
+    matches = [item for item in ranges if item[0].shot_id == instruction.shot_id]
+    if len(matches) != 1:
+        raise ValueError("trajectory must identify exactly one ShotScript shot")
+    shot, start_frame, end_frame = matches[0]
+    if not math.isclose(instruction.duration_seconds, shot.duration, abs_tol=1e-9):
+        raise ValueError("trajectory duration does not match ShotScript shot")
+
+    camera_material = create_emissive_material(
+        "trajectory_camera_material", (1.0, 0.02, 0.72, 1.0)
+    )
+    actor_material = create_emissive_material(
+        "trajectory_actor_material", (0.02, 0.95, 1.0, 1.0)
+    )
+    anchor_material = create_emissive_material(
+        "trajectory_anchor_material", (0.95, 0.9, 0.05, 1.0)
+    )
+    applied = {}
+
+    for track in sorted(instruction.tracks, key=lambda item: item.track_id):
+        if track.target_type == "camera":
+            if track.target_id != "main_camera":
+                raise ValueError(f"unknown camera trajectory target: {track.target_id}")
+            _remove_keyframes(
+                camera, ("location", "rotation_euler"), start_frame, end_frame
+            )
+            world_points = [_camera_world(shot, point) for point in track.points]
+            for point, world in zip(track.points, world_points):
+                frame = _frame_for_time(start_frame, end_frame, point.t)
+                camera.location = world
+                point_camera(camera, target_position(shot, point.t, shot.camera.look_at))
+                camera.keyframe_insert(data_path="location", frame=frame)
+                camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
+            material = camera_material
+        elif track.target_type == "actor":
+            if track.target_id not in actor_roots:
+                raise ValueError(f"unknown actor trajectory target: {track.target_id}")
+            actor = actor_roots[track.target_id]
+            _remove_keyframes(actor, ("location",), start_frame, end_frame)
+            world_points = [_actor_world(point, script.world_bounds) for point in track.points]
+            for point, world in zip(track.points, world_points):
+                frame = _frame_for_time(start_frame, end_frame, point.t)
+                actor.location = world
+                actor.keyframe_insert(data_path="location", frame=frame)
+            overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
+            material = actor_material
+        elif track.target_type == "anchor":
+            world_points = [_actor_world(point, script.world_bounds) for point in track.points]
+            overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
+            material = anchor_material
+        else:
+            raise ValueError(f"unsupported Blender trajectory target: {track.target_type}")
+
+        _add_trajectory_curve(
+            f"TrajectoryCurve_{track.track_id}", overlay_points, material
+        )
+        for index, world in enumerate(overlay_points, start=1):
+            _add_control_marker(track.track_id, index, world, material)
+        applied[track.track_id] = {
+            "target_type": track.target_type,
+            "target_id": track.target_id,
+            "primitive": track.primitive,
+            "semantic": track.semantic,
+            "keyframe_count": len(track.points),
+            "frames": [
+                _frame_for_time(start_frame, end_frame, point.t)
+                for point in track.points
+            ],
+            "first_world": rounded_vector(world_points[0]),
+            "middle_world": rounded_vector(world_points[len(world_points) // 2]),
+            "last_world": rounded_vector(world_points[-1]),
+        }
+    return shot, start_frame, end_frame, applied
+
+
 def rounded_vector(value: Vector) -> list[float]:
     return [round(float(component), 6) for component in value]
 
@@ -358,6 +542,124 @@ def render_outputs(script: ShotScript, output_dir: Path):
     )
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def render_trajectory_outputs(
+    script: ShotScript,
+    instruction: TrajectoryInstruction,
+    shotscript_path: Path,
+    trajectory_path: Path,
+    output_dir: Path,
+):
+    output_dir = output_dir.resolve()
+    output_dir.mkdir(parents=True, exist_ok=False)
+    scene, actor_roots, camera, ranges = configure_scene(script)
+    shot, start_frame, end_frame, applied = apply_trajectory(
+        script, instruction, actor_roots, camera, ranges
+    )
+
+    blend_path = output_dir / "trajectory_proxy.blend"
+    video_path = output_dir / "trajectory_proxy.mp4"
+    manifest_path = output_dir / "trajectory_proxy_manifest.json"
+    bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
+
+    scene.render.ffmpeg.format = "MPEG4"
+    scene.render.ffmpeg.codec = "H264"
+    scene.render.filepath = str(video_path)
+    scene.frame_set(scene.frame_start)
+    bpy.ops.render.render(animation=True)
+
+    middle_frame = (start_frame + end_frame) // 2
+    temporary_frames = render_keyframes_in_png_process(
+        blend_path, output_dir, [start_frame, middle_frame, end_frame]
+    )
+    frames_dir = output_dir / "frames"
+    frames_dir.mkdir()
+    frame_paths = []
+    for source, name in zip(temporary_frames, ("first.png", "middle.png", "last.png")):
+        target = frames_dir / name
+        source.replace(target)
+        frame_paths.append(target)
+    (output_dir / "keyframes").rmdir()
+    overlay_path = output_dir / "trajectory_overlay.png"
+    shutil.copyfile(frame_paths[1], overlay_path)
+
+    scene_objects = sorted(
+        obj.name for obj in bpy.data.objects if obj.name.startswith("Trajectory")
+    )
+    manifest = {
+        "schema_version": "0.1",
+        "renderer": "blender",
+        "blender_version": bpy.app.version_string,
+        "shotscript_sha256": sha256_file(shotscript_path),
+        "trajectory_sha256": sha256_file(trajectory_path),
+        "controlled_shot": {
+            "scene_id": instruction.scene_id,
+            "shot_id": shot.shot_id,
+            "frame_range": [start_frame, end_frame],
+            "sample_frames": [start_frame, middle_frame, end_frame],
+        },
+        "video": {
+            "path": video_path.name,
+            "sha256": sha256_file(video_path),
+            "bytes": video_path.stat().st_size,
+            "frame_count": scene.frame_end - scene.frame_start + 1,
+            "fps": scene.render.fps,
+            "resolution": [scene.render.resolution_x, scene.render.resolution_y],
+        },
+        "blend": {
+            "path": blend_path.name,
+            "sha256": sha256_file(blend_path),
+            "bytes": blend_path.stat().st_size,
+        },
+        "frames": {
+            path.stem: {
+                "path": str(path.relative_to(output_dir)).replace("\\", "/"),
+                "sha256": sha256_file(path),
+                "bytes": path.stat().st_size,
+            }
+            for path in frame_paths
+        },
+        "overlay": {
+            "path": overlay_path.name,
+            "sha256": sha256_file(overlay_path),
+            "bytes": overlay_path.stat().st_size,
+            "source": "blender_rendered_middle_frame",
+        },
+        "applied_tracks": applied,
+        "scene_objects": scene_objects,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    required = [blend_path, video_path, manifest_path, overlay_path, *frame_paths]
+    missing = [
+        str(path) for path in required if not path.is_file() or path.stat().st_size == 0
+    ]
+    if missing:
+        raise RuntimeError(f"missing Blender trajectory outputs: {missing}")
+    print(
+        "TRAJECTORY_PROXY_OK",
+        json.dumps(
+            {
+                "video": str(video_path),
+                "manifest": str(manifest_path),
+                "frames": scene.frame_end,
+                "controlled_shot": shot.shot_id,
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+
 def main():
     args = parse_args()
     if args.keyframes_only:
@@ -371,7 +673,17 @@ def main():
     if args.shotscript is None:
         raise ValueError("--shotscript is required")
     script = ShotScript.from_path(args.shotscript)
-    render_outputs(script, args.output_dir)
+    if args.trajectory is not None:
+        instruction = TrajectoryInstruction.from_path(args.trajectory)
+        render_trajectory_outputs(
+            script,
+            instruction,
+            args.shotscript,
+            args.trajectory,
+            args.output_dir,
+        )
+    else:
+        render_outputs(script, args.output_dir)
 
 
 if __name__ == "__main__":
