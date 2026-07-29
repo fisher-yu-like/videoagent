@@ -1,0 +1,64 @@
+{
+  "schema_version": "0.1",
+  "modules": [
+    {
+      "module_id": "stage2_control_bundle",
+      "inputs": [],
+      "outputs": [
+        {
+          "path": "runs/stage2_control_bridge/control_bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "febf93a5ed5e1a3e8611322c280126239b57164ec56e429708f283d03f7aa617"
+        },
+        {
+          "path": "runs/stage2_control_bridge/shots/s01/proxy.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "2fe40427bed79725cc18b0394d0c0fb2ab9943fe542d1196c0d2b0815c168b2e"
+        }
+      ]
+    },
+    {
+      "module_id": "stage6_source_validation",
+      "inputs": [
+        {
+          "path": "runs/stage6_vace_inputs/s01/vace_job.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "e1f4f1b13265db05ee6a145aeb6607f1963885ccb07d24b5b8a1882c15becd71"
+        },
+        {
+          "path": "runs/stage6_vace_inputs/s01/src_mask.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "cbc0ef39ac29dc57dac06cb67111924c73f4ce1034bcbfda34cf16f79ab2029e"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/stage6_vace_inputs/s01/source_validation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "813046fc4441ed249f21e598d82f32e172dc3038401cdc4dd591edcf3c6d7dae",
+          "bindings": {
+            "status": "passed",
+            "evidence_source": "pinned_vace_preprocessor_real_cuda",
+            "inference.model_constructed": false,
+            "inference.checkpoint_loaded": false
+          }
+        },
+        {
+          "path": "runs/stage6_vace_inputs/s01/vace_job.validated.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "fcf235e7b2c4aae02098ae0ca1ea326e1565b4b9bbc14c9feb88a48a072ebc5e",
+          "bindings": {
+            "evidence.source_validation_passed": true,
+            "evidence.inference_success": false
+          }
+        }
+      ]
+    }
+  ]
+}
