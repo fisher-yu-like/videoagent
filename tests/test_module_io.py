@@ -1,3 +1,10 @@
+"""Stage 0/2/6/trajectory local I/O diagnostics.
+
+Run: ``python -m unittest tests.test_module_io -v``. The checks read real
+workspace JSON/video inputs and outputs; mechanics-only fixtures exercise
+failure handling and never constitute acceptance evidence.
+"""
+
 from __future__ import annotations
 
 import hashlib
@@ -27,13 +34,14 @@ MANIFEST = ROOT / "examples" / "module_io_manifest.json"
 
 
 class RealModuleIOTests(unittest.TestCase):
-    def test_real_stage2_and_stage6_records_are_hash_and_media_verified(self):
+    def test_real_stage2_stage6_and_trajectory_records_are_verified(self):
         report = inspect_manifest(MANIFEST, workspace=ROOT)
 
         self.assertTrue(report["ok"])
         by_id = {item["module_id"]: item for item in report["modules"]}
         self.assertEqual(by_id["stage2_control_bundle"]["status"], "passed")
         self.assertEqual(by_id["stage6_source_validation"]["status"], "passed")
+        self.assertEqual(by_id["trajectory_instruction_s01"]["status"], "passed")
 
         stage2_video = next(
             item
@@ -60,6 +68,14 @@ class RealModuleIOTests(unittest.TestCase):
         )
         self.assertFalse(validation["inspection"]["inference"]["model_constructed"])
         self.assertFalse(validation["inspection"]["inference"]["checkpoint_loaded"])
+
+        trajectory = by_id["trajectory_instruction_s01"]["outputs"][0]
+        self.assertEqual(
+            trajectory["sha256"],
+            "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+        )
+        self.assertTrue(trajectory["hash_match"])
+        self.assertTrue(all(item["match"] for item in trajectory["binding_results"]))
 
     def test_real_json_and_video_public_inspectors_decode_actual_files(self):
         json_report = inspect_json(
@@ -573,7 +589,7 @@ class ModuleIOCLITests(unittest.TestCase):
         self.assertEqual(list(output.parent.glob(f".{output.name}.*.tmp")), [])
         self.assertIn("controlled replace failure", stderr.getvalue())
 
-    def test_cli_all_inspects_both_real_modules(self):
+    def test_cli_all_inspects_all_registered_real_modules(self):
         output = ROOT / "runs" / "local_debug" / "module_io_all_test.json"
         self.addCleanup(output.unlink, missing_ok=True)
         stdout = StringIO()
@@ -594,7 +610,14 @@ class ModuleIOCLITests(unittest.TestCase):
         report = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(code, 0)
         self.assertTrue(report["ok"])
-        self.assertEqual(len(report["modules"]), 2)
+        module_ids = {item["module_id"] for item in report["modules"]}
+        self.assertTrue(
+            {
+                "stage2_control_bundle",
+                "stage6_source_validation",
+                "trajectory_instruction_s01",
+            }.issubset(module_ids)
+        )
         self.assertIn("MODULE_IO_OK", stdout.getvalue())
 
     def test_cli_rejects_all_with_module_without_writing(self):

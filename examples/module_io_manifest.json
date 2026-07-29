@@ -59,6 +59,33 @@
           }
         }
       ]
+    },
+    {
+      "module_id": "trajectory_instruction_s01",
+      "inputs": [
+        {
+          "path": "examples/trajectory_circle_s01.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "548a41e173091b749c9f5c0796348c4a836a5819bca3a5a40e8c46a849feb065"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory/s01/trajectory.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+          "bindings": {
+            "schema_version": "0.1",
+            "scene_id": "station_platform",
+            "shot_id": "s01",
+            "coordinate_space": "normalized_0_1_top_left",
+            "duration_seconds": 5.0,
+            "sample_count": 121
+          }
+        }
+      ]
     }
   ]
 }

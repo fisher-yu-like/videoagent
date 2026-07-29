@@ -1,49 +1,144 @@
 # VideoActAgent 模块调试指南
 
-以下命令默认在仓库根目录
-`C:\Users\sy\Desktop\videoactagent` 运行。Windows 自带的默认 Python 版本过旧，
-本项目本地测试使用：
+以下命令默认在仓库根目录 `C:\Users\sy\Desktop\videoactagent` 执行。建议先设置：
 
 ```powershell
 $PY = 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+$BLENDER = 'D:\blender\blender.exe'
 ```
 
-## Stage 3：已有后端结果离线审计
+每个 `tests/test_*.py` 文件顶部也写有该模块的输入、输出和聚焦命令。单元测试中的临时数据只验证接口机制；只有明确读取 `runs/` 中真实文件的用例可以说明当前真实产物状态。
 
-查看接口：
+## 0. 统一模块 I/O 检查
+
+检查现有全部已注册模块：
 
 ```powershell
-& $PY -m videoactagent.stage3_audit --help
+& $PY -m videoactagent.module_io inspect --all `
+  --manifest examples\module_io_manifest.json `
+  --workspace . `
+  --output runs\local_debug\module_io_report.json
 ```
 
-审计现有真实 Kling 运行目录，不调用网络 API：
+只检查当前轨迹模块：
+
+```powershell
+& $PY -m videoactagent.module_io inspect `
+  --module trajectory_instruction_s01 `
+  --manifest examples\module_io_manifest.json `
+  --workspace . `
+  --output runs\local_debug\trajectory_module_io_report.json
+```
+
+成功标记是 `MODULE_IO_OK`。报告会重新读取文件、解码 JSON/视频，并核对声明的 SHA-256 和字段绑定。
+
+聚焦测试：
+
+```powershell
+& $PY -X tracemalloc=15 -W error::ResourceWarning -m unittest tests.test_module_io -v
+```
+
+## 1. ShotScript 与真实 Blender Proxy
+
+验证 ShotScript 与提示编译：
+
+```powershell
+& $PY -m unittest tests.test_station_shotscript tests.test_prompts -v
+```
+
+重新渲染真实 Stage 1 Proxy：
+
+```powershell
+& $PY videoactagent\blender_runner.py `
+  --blender $BLENDER `
+  --shotscript examples\station_shotscript.json `
+  --output-dir runs\stage1_blender
+```
+
+输出包括 `station_proxy.blend`、各镜头 MP4、首尾帧和渲染清单。真实 Blender 集成测试：
+
+```powershell
+& $PY -m unittest tests.test_blender_proxy_integration -v
+```
+
+## 2. Control Bridge
+
+```powershell
+& $PY videoactagent\control_bridge.py `
+  --blender $BLENDER `
+  --shotscript examples\station_shotscript.json `
+  --blend runs\stage1_blender\station_proxy.blend `
+  --output-dir runs\stage2_control_bridge
+```
+
+主要输出：
+
+- `runs/stage2_control_bridge/control_bundle.json`
+- `runs/stage2_control_bridge/shots/s01/proxy.mp4`
+- `runs/stage2_control_bridge/shots/s01/first.png`
+- `runs/stage2_control_bridge/shots/s01/last.png`
+
+聚焦测试：
+
+```powershell
+& $PY -m unittest tests.test_control_bridge_integration -v
+```
+
+## 3. Kling / Seedance 后端接口
+
+先只做离线准备，不调用 API：
+
+```powershell
+& $PY -m videoactagent.backend_prepare `
+  --bundle runs\stage2_control_bridge\control_bundle.json `
+  --backend kling `
+  --output runs\stage3_backend\kling_readiness.json
+```
+
+真实调用入口如下。它们会产生费用，只应在确认环境变量已配置并且确实需要新样本时运行：
+
+```powershell
+& $PY -m videoactagent.jd_smoke submit-kling `
+  --bundle runs\stage2_control_bridge\control_bundle.json `
+  --shot s01 --prompt cinematic --run-root runs\stage3_api
+
+& $PY -m videoactagent.jd_smoke submit-seedance `
+  --bundle runs\stage2_control_bridge\control_bundle.json `
+  --shot s01 --prompt cinematic --run-root runs\stage3_api
+```
+
+对已有任务只查询一次或下载一次：
+
+```powershell
+& $PY -m videoactagent.jd_smoke query --run-dir <真实运行目录>
+& $PY -m videoactagent.jd_smoke download --run-dir <真实运行目录>
+```
+
+离线审计现有 Kling 结果：
 
 ```powershell
 & $PY -m videoactagent.stage3_audit `
   --run-dir runs\stage3_api\20260729T012120Z_kling_d8bde2ef `
-  --blender D:\blender\blender.exe `
+  --blender $BLENDER `
   --output runs\stage3_api\20260729T012120Z_kling_d8bde2ef\audit.json
 ```
 
-成功标记是 `STAGE3_AUDIT_OK`。该命令检查请求/状态记录内部一致性、任务 ID、
-终态视频 URL、MP4 哈希以及 Blender 解码元数据。运行目录内只允许覆盖保留文件
-`audit.json`，不会覆盖 `result.mp4`。
-
-测试：
+接口测试不调用真实 API：
 
 ```powershell
-& $PY -m unittest tests.test_stage3_audit -v
+& $PY -m unittest `
+  tests.test_backend_contracts `
+  tests.test_backend_prepare `
+  tests.test_dry_run `
+  tests.test_jd_response_parsing `
+  tests.test_jd_smoke `
+  tests.test_run_directory `
+  tests.test_stage3_audit -v
 ```
 
-## Stage 4：相机方向与置信度评估
+## 4. Camera Motion Evaluator
 
-查看接口：
-
-```powershell
-& $PY -m videoactagent.camera_eval --help
-```
-
-重新评估真实 Kling 首、中、尾帧：
+对现有真实 Kling 首、中、尾帧重新计算：
 
 ```powershell
 & $PY -m videoactagent.camera_eval `
@@ -55,47 +150,46 @@ $PY = 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\pyth
   --output runs\stage4_camera_eval\kling_s01_camera_eval.json
 ```
 
-成功标记是 `CAMERA_EVAL_OK`。重点查看输出中的
-`directional_evidence.first_to_last`：`direction_verdict` 表示测得的背景运动方向，
-`confidence_gate_passed` 表示相关峰是否足够可信，`verdict` 是保守总结果。
-
-测试：
+默认阈值是 `1.05`；传入 `--minimum-confidence 1.25` 可复现严格参考。`matched` 是背景平移启发式结论，不是相机位姿真值。
 
 ```powershell
 & $PY -m unittest tests.test_camera_eval -v
 ```
 
-## Stage 6：VACE 输入和环境诊断
-
-查看接口：
+## 5. 固定开源 Baseline
 
 ```powershell
-& $PY -m videoactagent.stage6_debug --help
+& $PY -m videoactagent.baseline_audit `
+  --manifest baselines\manifest.json `
+  --third-party third_party `
+  --output runs\stage5_baseline_audit\audit.json
 ```
 
-检查本地环境：
+```powershell
+& $PY -m unittest tests.test_baseline_audit tests.test_source_safety -v
+```
+
+## 6. VACE 输入适配与服务器预处理
+
+本地从真实 Stage 2 bundle 生成 VACE 输入：
+
+```powershell
+& $PY -m videoactagent.vace_inputs prepare `
+  --bundle runs\stage2_control_bridge\control_bundle.json `
+  --shot s01 `
+  --output-dir runs\stage6_vace_inputs\s01
+```
+
+本地诊断：
 
 ```powershell
 & $PY -m videoactagent.stage6_debug doctor --vace-root third_party\VACE
-```
-
-本地没有 CUDA 时 `cuda_ok=false` 和退出码 1 是真实诊断，不表示接口损坏。
-
-验证真实 Stage 6 job、proxy 与 mask：
-
-```powershell
 & $PY -m videoactagent.stage6_debug verify-inputs `
   --job runs\stage6_vace_inputs\s01\vace_job.json `
   --bundle runs\stage2_control_bridge\control_bundle.json
 ```
 
-打印服务器预处理探针命令但不执行：
-
-```powershell
-& $PY -m videoactagent.stage6_debug print-probe-command
-```
-
-服务器真实运行时必须分别指定验证报告和新的 validated job；原始 job 不会被覆盖：
+服务器端真实预处理探针的入口：
 
 ```bash
 /root/venvs/vace/bin/python -m videoactagent.vace_preprocess_probe \
@@ -105,23 +199,16 @@ $PY = 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\pyth
   --validated-job-output runs/stage6_vace_inputs/s01/vace_job.validated.json
 ```
 
-只有同一次真实 upstream decode 和 CUDA transfer 完成并通过合约检查时，程序才会写出 `vace_job.validated.json`。手写或单独修改 `source_validation.json` 不能升级原始 job。
-
-测试：
+聚焦测试：
 
 ```powershell
-& $PY -m unittest tests.test_stage6_debug -v
+& $PY -m unittest `
+  tests.test_vace_inputs `
+  tests.test_stage6_debug `
+  tests.test_vace_preprocess_probe -v
 ```
 
-## Stage 7：真实视频闭环反馈
-
-查看接口：
-
-```powershell
-& $PY -m videoactagent.closed_loop --help
-```
-
-用真实 Kling 视频、Stage 4 结果和人工检查记录生成三份互相绑定的 JSON：
+## 7. 现有离线闭环
 
 ```powershell
 & $PY -m videoactagent.closed_loop evaluate `
@@ -133,98 +220,35 @@ $PY = 'C:\Users\sy\.cache\codex-runtimes\codex-primary-runtime\dependencies\pyth
   --output-dir runs\stage7_closed_loop\kling_s01
 ```
 
-成功标记是 `CLOSED_LOOP_EVALUATED`。输出包括：
-
-- `expectation.json`：ShotScript 的相机、人物和连续性期望；
-- `feedback.json`：真实视频/帧哈希、自动相机结果和人工观察；
-- `revision.json`：固定操作词汇内的下一轮修订建议。
-
-测试：
-
 ```powershell
 & $PY -m unittest tests.test_closed_loop -v
 ```
 
-## 全量回归
+## 8. ATI 风格轨迹指令
+
+校验并规范化示例轨迹：
 
 ```powershell
-& $PY -X tracemalloc=25 -W always::ResourceWarning -m unittest discover -s tests -v
+& $PY -m videoactagent.trajectory validate `
+  --input examples\trajectory_circle_s01.json `
+  --output runs\trajectory\s01\trajectory.json `
+  --expected-scene station_platform `
+  --expected-shot s01
 ```
 
-## Stage 4 当前门槛与复现实验
-
-默认门槛已调整为 `1.05`。对已有真实 Kling 三帧运行：
+当前真实规范化输出 SHA-256：
+`52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6`。
 
 ```powershell
-& $PY -m videoactagent.camera_eval `
-  --first runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\first.png `
-  --middle runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\middle.png `
-  --last runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\last.png `
-  --shotscript examples\station_shotscript.json `
-  --shot s01 `
-  --output runs\stage4_camera_eval\kling_s01_camera_eval.json
+& $PY -m unittest tests.test_trajectory -v
 ```
 
-这会得到宽松启发式 `verdict=matched`，同时 JSON 内固定保留
-`strict_reference.minimum_confidence=1.25` 和
-`strict_reference.verdict=inconclusive`。三段原始 `dx`、`dy`、`confidence`
-位于 `measurements`，不可只看最终标签。
+后续模块会按相同方式增加：本地画布编辑器、确定性轨迹编译器、Blender 轨迹 Proxy、API pilot、真实视频轨迹标注器和指标评估器。
 
-显式复现旧的严格结果：
+## 9. 全量本地回归
 
 ```powershell
-& $PY -m videoactagent.camera_eval `
-  --first runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\first.png `
-  --middle runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\middle.png `
-  --last runs\stage3_api\20260729T012120Z_kling_d8bde2ef\frames\last.png `
-  --shotscript examples\station_shotscript.json `
-  --shot s01 `
-  --minimum-confidence 1.25 `
-  --output runs\stage4_camera_eval\kling_s01_camera_eval.strict.json
+& $PY -X tracemalloc=25 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
-门槛必须是有限数且严格大于 `1.0`。`matched` 仅表示 phase-correlation
-背景平移启发式通过，不是相机位姿真值，也不能证明模型或 camera control 变好。
-
-任何模块失败时保留终端输出和对应 `runs/` 目录，不要用手写 JSON 或测试夹具替代
-真实产物。
-
-## 本地模块输入输出检查
-
-该接口只读取本地文件，不调用视频生成 API。它会重新计算 SHA-256、解析 JSON，
-并用 imageio-ffmpeg 实际解码视频和计数帧；缺少必需文件、哈希过期、JSON 绑定
-不一致、视频无法解码或路径越出工作区时均返回失败。检查时 manifest 和每个存在的
-证据会先复制到私有临时目录；哈希、JSON、binding 与 FFmpeg 都消费同一份 snapshot，
-避免检查过程中原文件变化导致哈希和解析内容不一致。
-
-检查清单里的全部真实 Stage 2/Stage 6 记录：
-
-```powershell
-& $PY -m videoactagent.module_io inspect --all `
-  --manifest examples\module_io_manifest.json `
-  --workspace . `
-  --output runs\local_debug\module_io_report.json
-```
-
-成功时终端输出 `MODULE_IO_OK` 且退出码为 `0`。报告使用 UUID 临时文件、
-`fsync` 和原子替换写入；中途写入失败不会留下临时报告。`--output` 必须位于
-`--workspace` 内，且不能与 manifest 或任何本次选中的输入/输出证据指向同一文件，
-因此调试报告不会覆盖原始证据。
-
-只检查一个模块：
-
-```powershell
-& $PY -m videoactagent.module_io inspect `
-  --manifest examples\module_io_manifest.json `
-  --workspace . `
-  --module stage6_source_validation `
-  --output runs\local_debug\stage6_module_io_report.json
-```
-
-当前 Stage 6 清单要求真实 CUDA 源预处理已经通过，同时明确绑定
-`inference.model_constructed=false` 和 `inference.checkpoint_loaded=false`；因此它不把
-尚未发生的模型推理写成通过。聚焦测试命令：
-
-```powershell
-& $PY -m unittest tests.test_module_io -v
-```
+如果某个需要真实文件的测试因为文件缺失而失败，不应把它改成模拟通过；应先恢复对应真实输入或明确报告缺失。Windows 无符号链接权限导致的 symlink 测试可以明确 `skip`，仓库同时保留无特权模拟逃逸测试和真实 hardlink 测试。

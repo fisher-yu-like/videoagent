@@ -1,0 +1,44 @@
+{
+  "schema_version": "0.1",
+  "scene_id": "station_platform",
+  "shot_id": "s01",
+  "coordinate_space": "normalized_0_1_top_left",
+  "duration_seconds": 5.0,
+  "sample_count": 121,
+  "tracks": [
+    {
+      "track_id": "camera_circle_01",
+      "target": {
+        "type": "camera",
+        "id": "main_camera"
+      },
+      "primitive": "circle",
+      "semantic": "orbit_clockwise",
+      "points": [
+        {"t": 0.0, "x": 0.5, "y": 0.18, "visible": true},
+        {"t": 0.125, "x": 0.72, "y": 0.28, "visible": true},
+        {"t": 0.25, "x": 0.82, "y": 0.5, "visible": true},
+        {"t": 0.375, "x": 0.72, "y": 0.72, "visible": true},
+        {"t": 0.5, "x": 0.5, "y": 0.82, "visible": true},
+        {"t": 0.625, "x": 0.28, "y": 0.72, "visible": true},
+        {"t": 0.75, "x": 0.18, "y": 0.5, "visible": true},
+        {"t": 0.875, "x": 0.28, "y": 0.28, "visible": true},
+        {"t": 1.0, "x": 0.5, "y": 0.18, "visible": true}
+      ]
+    },
+    {
+      "track_id": "actor_path_01",
+      "target": {
+        "type": "actor",
+        "id": "actor_a"
+      },
+      "primitive": "polyline",
+      "semantic": "move",
+      "points": [
+        {"t": 0.0, "x": 0.16, "y": 0.68, "visible": true},
+        {"t": 0.5, "x": 0.34, "y": 0.6, "visible": true},
+        {"t": 1.0, "x": 0.48, "y": 0.56, "visible": true}
+      ]
+    }
+  ]
+}
