@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -31,6 +32,11 @@ class BaselineAuditTests(unittest.TestCase):
         from videoactagent.baseline_audit import audit_baselines
 
         report = audit_baselines(MANIFEST, THIRD_PARTY)
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        expected_hash_files = {
+            baseline["name"]: set(baseline["hash_files"])
+            for baseline in manifest["baselines"]
+        }
 
         self.assertEqual(report["status"], "verified_source_only")
         self.assertFalse(report["weights_downloaded"])
@@ -39,9 +45,74 @@ class BaselineAuditTests(unittest.TestCase):
             self.assertTrue(baseline["checkout_exists"], baseline["name"])
             self.assertTrue(baseline["commit_match"], baseline["name"])
             self.assertTrue(all(baseline["required_files"].values()))
+            self.assertEqual(
+                set(baseline["hashed_files"]),
+                expected_hash_files[baseline["name"]],
+            )
             for record in baseline["hashed_files"].values():
+                self.assertEqual(
+                    set(record),
+                    {"exists", "is_file", "bytes", "sha256"},
+                )
+                self.assertTrue(record["exists"])
+                self.assertTrue(record["is_file"])
                 self.assertEqual(len(record["sha256"]), 64)
                 self.assertGreater(record["bytes"], 0)
+
+    def test_missing_hash_file_makes_source_incomplete_and_is_reported(self):
+        from videoactagent.baseline_audit import audit_baselines
+
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        baseline = dict(manifest["baselines"][0])
+        missing_name = "missing-audit-evidence.txt"
+        baseline["hash_files"] = [*baseline["hash_files"], missing_name]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps({"baselines": [baseline]}),
+                encoding="utf-8",
+            )
+            report = audit_baselines(manifest_path, THIRD_PARTY)
+
+        self.assertEqual(report["status"], "source_incomplete")
+        missing_record = report["baselines"][0]["hashed_files"][missing_name]
+        self.assertEqual(
+            missing_record,
+            {
+                "exists": False,
+                "is_file": False,
+                "bytes": None,
+                "sha256": None,
+            },
+        )
+
+    def test_directory_hash_path_is_reported_as_existing_non_file(self):
+        from videoactagent.baseline_audit import audit_baselines
+
+        manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+        baseline = dict(manifest["baselines"][0])
+        directory_name = "vace"
+        baseline["hash_files"] = [directory_name]
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest_path = Path(temporary_directory) / "manifest.json"
+            manifest_path.write_text(
+                json.dumps({"baselines": [baseline]}),
+                encoding="utf-8",
+            )
+            report = audit_baselines(manifest_path, THIRD_PARTY)
+
+        self.assertEqual(report["status"], "source_incomplete")
+        self.assertEqual(
+            report["baselines"][0]["hashed_files"][directory_name],
+            {
+                "exists": True,
+                "is_file": False,
+                "bytes": None,
+                "sha256": None,
+            },
+        )
 
 
 if __name__ == "__main__":

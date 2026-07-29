@@ -29,12 +29,12 @@
 
 ## Tasks
 
-- [ ] Write a failing test that loads the manifest, expects VACE commit `48eb44f1c4be87cc65a98bff985a26976841e9f3`, ReCamMaster commit `fcf98bc86e876bb534518cd99e8a65b282f0f16e`, and invokes `audit_baselines()` against `third_party/`.
-- [ ] Observe RED because the manifest/module/checkouts are absent.
-- [ ] Add `third_party/` to `.gitignore` and create the manifest with official URLs, required files, role, and evidence boundary.
-- [ ] Implement `baseline_audit.py` to run `git rev-parse HEAD`, compare exact commits, verify required files, hash requirements/README/entry scripts, and record availability without importing or executing model code.
-- [ ] Shallow clone VACE and ReCamMaster, checkout the pinned commits, and rerun the focused test.
-- [ ] Parse actual requirements and READMEs to record Python/PyTorch/CUDA/model-weight instructions and the minimum inference commands. Do not invent missing values.
-- [ ] Run the persistent audit to `runs/stage5_baselines/audit.json`.
-- [ ] Write a report recommending VACE as the first structural-control baseline and ReCamMaster as the later camera-rerender comparator, with explicit A100-stage prerequisites.
-- [ ] Run the full suite, `git diff --check`, and secret scan; commit checked-in files only.
+- [x] Write a failing test that loads the manifest, expects VACE commit `48eb44f1c4be87cc65a98bff985a26976841e9f3`, ReCamMaster commit `fcf98bc86e876bb534518cd99e8a65b282f0f16e`, and invokes `audit_baselines()` against `third_party/`.
+- [x] Observe RED because the manifest/module/checkouts are absent.
+- [x] Add `third_party/` to `.gitignore` and create the manifest with official URLs, required files, role, and evidence boundary.
+- [x] Implement `baseline_audit.py` to run `git rev-parse HEAD`, compare exact commits, verify required files, hash requirements/README/entry scripts, and record availability without importing or executing model code.
+- [x] Shallow clone VACE and ReCamMaster, checkout the pinned commits, and rerun the focused test.
+- [x] Parse actual requirements and READMEs to record Python/PyTorch/CUDA/model-weight instructions and the minimum inference commands. Do not invent missing values.
+- [x] Run the persistent audit to `runs/stage5_baselines/audit.json`.
+- [x] Write a report recommending VACE as the first structural-control baseline and ReCamMaster as the later camera-rerender comparator, with explicit A100-stage prerequisites.
+- [x] Run the full suite, `git diff --check`, and secret scan; commit checked-in files only.

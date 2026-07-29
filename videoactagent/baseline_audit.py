@@ -27,6 +27,8 @@ def _git_head(checkout: Path) -> str | None:
 def _file_record(path: Path) -> dict:
     contents = path.read_bytes()
     return {
+        "exists": True,
+        "is_file": True,
         "bytes": len(contents),
         "sha256": hashlib.sha256(contents).hexdigest(),
     }
@@ -43,13 +45,27 @@ def audit_baselines(manifest_path: Path, third_party: Path) -> dict:
             name: (checkout / name).exists()
             for name in baseline["required_files"]
         }
-        hashed = {
-            name: _file_record(checkout / name)
-            for name in baseline["hash_files"]
-            if (checkout / name).is_file()
-        }
+        hashed = {}
+        hash_files_verified = True
+        for name in baseline["hash_files"]:
+            path = checkout / name
+            if path.is_file():
+                hashed[name] = _file_record(path)
+            else:
+                hashed[name] = {
+                    "exists": path.exists(),
+                    "is_file": False,
+                    "bytes": None,
+                    "sha256": None,
+                }
+                hash_files_verified = False
         commit_match = head == baseline["commit"]
-        checkout_verified = checkout.is_dir() and commit_match and all(required.values())
+        checkout_verified = (
+            checkout.is_dir()
+            and commit_match
+            and all(required.values())
+            and hash_files_verified
+        )
         all_verified = all_verified and checkout_verified
         records.append(
             {
