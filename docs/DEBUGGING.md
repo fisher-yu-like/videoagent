@@ -243,9 +243,84 @@ $BLENDER = 'D:\blender\blender.exe'
 & $PY -m unittest tests.test_trajectory -v
 ```
 
-后续模块会按相同方式增加：本地画布编辑器、确定性轨迹编译器、Blender 轨迹 Proxy、API pilot、真实视频轨迹标注器和指标评估器。
+### 本地轨迹画布编辑器
+
+启动只监听本机 `127.0.0.1` 的编辑器：
+
+```powershell
+& $PY -m videoactagent.trajectory_editor `
+  --image runs\stage2_control_bridge\shots\s01\first.png `
+  --shotscript examples\station_shotscript.json `
+  --shot s01 `
+  --output-dir runs\trajectory\s01\browser_polyline `
+  --port 8765
+```
+
+浏览器打开 `http://127.0.0.1:8765`，选择 target、primitive 和 semantic；通过 progress 指定每个点的归一化时间。画完或拖拽编辑后点击 `Finish`，再点击 `Save`。点击 `Load` 会重新读取已保存的轨迹。Polyline 的 progress 必须严格递增且唯一，否则页面会显示错误并拒绝 Finish。
+
+保存后独立校验页面产物：
+
+```powershell
+& $PY -m videoactagent.trajectory validate `
+  --input runs\trajectory\s01\browser_polyline\trajectory.json `
+  --output runs\trajectory\s01\browser_polyline\validated_trajectory.json `
+  --expected-scene station_platform `
+  --expected-shot s01
+```
+
+主代理已通过实际页面完成 polyline 绘制，并在滑条为 `0.8` 时拖拽原始 `t=0.2` 的点，再执行 `Finish`、`Save`、`Load`。最终时间仍为 `[0.2, 0.8]`；这不是 `session.save` 单测。验收产物为：
+
+- `runs/trajectory/s01/browser_polyline/trajectory.json`，SHA-256 `856f7b1e92587a9ddb85f68004e23bd555318ae8318f062c52585f9529468bb8`；
+- `runs/trajectory/s01/browser_polyline/trajectory_overlay.png`，SHA-256 `5f04d30ea04a0c1ceccbb2340d8063dc1b9271c81811247097553c252e9adbf5`，`960×540 RGB`；
+- `runs/trajectory/s01/browser_polyline/acceptance_manifest.json`，SHA-256 `abb26570b7d64324d7405627e7cbd20a2084cf24de89fee0c87d1150dce3ab61`。
+
+独立重算验收清单：
+
+```powershell
+& $PY -m videoactagent.trajectory_acceptance validate `
+  --manifest runs\trajectory\s01\browser_polyline\acceptance_manifest.json `
+  --workspace .
+```
+
+聚焦测试：
+
+```powershell
+& $PY -m unittest tests.test_trajectory_editor -v
+```
+
+后续模块会按相同方式增加：确定性轨迹编译器、Blender 轨迹 Proxy、API pilot、真实视频轨迹标注器和指标评估器。
 
 ## 9. 全量本地回归
+
+### Real Blender trajectory proxy (Task 5)
+
+This command starts the installed Blender executable and writes a new output
+directory; it refuses to overwrite an existing directory:
+
+```powershell
+& $PY -m videoactagent.trajectory_proxy `
+  --blender $BLENDER `
+  --shotscript examples\station_shotscript.json `
+  --trajectory runs\trajectory\s01\trajectory.json `
+  --output-dir runs\trajectory\s01\proxy_<new_run_name>
+```
+
+Inspect `trajectory_proxy.mp4`, `frames/first.png`, `frames/middle.png`,
+`frames/last.png`, `trajectory_overlay.png`, and
+`trajectory_proxy_manifest.json`. The manifest binds the exact ShotScript and
+trajectory SHA-256 values and records applied camera/actor keyframes. Blender
+stdout/stderr are always saved as `blender.stdout.log` and
+`blender.stderr.log`; a non-zero exit or timeout atomically publishes
+`failure_manifest.json` with the exit/timeout state instead of exposing an
+unlabelled partial run. The PNGs and MP4 are rendered by Blender; this module
+does not generate a Pillow-only stand-in.
+
+Focused real integration test (about one minute on the current workstation):
+
+```powershell
+& $PY -X tracemalloc=15 -W error::ResourceWarning -m unittest `
+  tests.test_trajectory_proxy_integration -v
+```
 
 ```powershell
 & $PY -X tracemalloc=25 -W error::ResourceWarning -m unittest discover -s tests -v

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoAct Trajectory Editor</title>
+  <style>
+    :root { color-scheme: dark; font: 14px system-ui, sans-serif; background:#11151b; color:#e8eef6; }
+    body { margin:0; display:grid; grid-template-columns:290px 1fr; min-height:100vh; }
+    aside { padding:16px; background:#1a2029; box-shadow:2px 0 14px #0008; overflow:auto; }
+    main { display:grid; place-items:center; padding:20px; }
+    label { display:block; margin:10px 0 4px; color:#aebed1; }
+    select,input,button { box-sizing:border-box; width:100%; padding:8px; border:1px solid #425269; border-radius:5px; background:#0e1319; color:#eef5ff; }
+    button { margin-top:8px; cursor:pointer; background:#253b54; }
+    button:hover { background:#315070; }
+    #canvasWrap { position:relative; max-width:100%; max-height:calc(100vh - 40px); }
+    canvas { display:block; max-width:100%; max-height:calc(100vh - 40px); box-shadow:0 8px 28px #000b; touch-action:none; }
+    #status { min-height:3em; margin-top:12px; white-space:pre-wrap; color:#8de1a7; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+    small { color:#91a4bb; }
+  </style>
+</head>
+<body>
+<aside>
+  <h2>Trajectory Editor</h2>
+  <small>Coordinates: normalized_0_1_top_left</small>
+  <label for="targetType">Target</label>
+  <select id="targetType"><option>camera</option><option>actor</option><option>anchor</option></select>
+  <label for="targetId">Target ID</label><input id="targetId" value="camera">
+  <label for="primitive">Primitive</label>
+  <select id="primitive"><option>polyline</option><option>circle</option><option>static</option></select>
+  <label for="semantic">Semantic / direction</label><select id="semantic"></select>
+  <div class="row">
+    <div><label for="duration">Duration (s)</label><input id="duration" type="number" min="0.01" step="0.01"></div>
+    <div><label for="sampleCount">Samples</label><input id="sampleCount" type="number" min="1" step="1"></div>
+  </div>
+  <label for="progress">Point progress</label><input id="progress" type="range" min="0" max="1" step="0.01" value="0">
+  <label for="trackSelect">Tracks</label><select id="trackSelect" size="5"></select>
+  <button id="finish">Finish / replace selected track</button>
+  <div class="row"><button id="delete">Delete</button><button id="clearDraft">Clear draft</button></div>
+  <div class="row"><button id="save">Save</button><button id="load">Load</button></div>
+  <div id="status"></div>
+</aside>
+<main><div id="canvasWrap"><canvas id="canvas"></canvas></div></main>
+<script src="/editor_logic.js"></script>
+<script>
+'use strict';
+const canvas=document.getElementById('canvas'), ctx=canvas.getContext('2d');
+const saveButton=document.getElementById('save');
+const ui=Object.fromEntries(['targetType','targetId','primitive','semantic','duration','sampleCount','progress','trackSelect','status'].map(id=>[id,document.getElementById(id)]));
+const semantics={
+  camera:{polyline:['pan_left','pan_right','truck_left','truck_right','dolly_in','dolly_out','zoom_in','zoom_out'],circle:['orbit_clockwise','orbit_counterclockwise'],static:[]},
+  actor:{polyline:['move'],circle:[],static:[]}, anchor:{polyline:[],circle:[],static:['anchor']}
+};
+let config, background=new Image(), tracks=[], draft=[], circleStart=null, dragging=null;
+function updateTools(){
+  const target=ui.targetType.value, primitive=ui.primitive.value;
+  const allowed=semantics[target][primitive]||[];
+  ui.semantic.replaceChildren(...allowed.map(v=>new Option(v,v)));
+  if(target==='camera') ui.targetId.value='camera';
+  if(target==='anchor' && ui.targetId.value==='camera') ui.targetId.value='composition_anchor';
+}
+function pointFromEvent(event){
+  const rect=canvas.getBoundingClientRect();
+  return {x:Math.max(0,Math.min(1,(event.clientX-rect.left)/rect.width)),y:Math.max(0,Math.min(1,(event.clientY-rect.top)/rect.height)),t:Number(ui.progress.value),visible:true};
+}
+function px(point){return [point.x*canvas.width,point.y*canvas.height];}
+function drawPath(points,primitive,color){
+  if(!points.length)return;
+  ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=Math.max(2,canvas.width/400);
+  ctx.beginPath(); const [sx,sy]=px(points[0]);ctx.moveTo(sx,sy);
+  for(const p of points.slice(1)){const [x,y]=px(p);ctx.lineTo(x,y);} if(primitive==='circle')ctx.closePath();ctx.stroke();
+  points.forEach((p,i)=>{const [x,y]=px(p);ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();ctx.strokeStyle='#000';ctx.stroke();ctx.fillStyle='#fff';ctx.fillText(String(i+1),x+7,y-5);ctx.fillStyle=color;});
+  if(points.length>1){const a=px(points[Math.max(0,Math.floor(points.length/2)-1)]),b=px(points[Math.floor(points.length/2)]);const ang=Math.atan2(b[1]-a[1],b[0]-a[0]);ctx.beginPath();ctx.moveTo(b[0],b[1]);ctx.lineTo(b[0]-12*Math.cos(ang-.5),b[1]-12*Math.sin(ang-.5));ctx.lineTo(b[0]-12*Math.cos(ang+.5),b[1]-12*Math.sin(ang+.5));ctx.closePath();ctx.fill();}
+}
+function render(){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(background,0,0,canvas.width,canvas.height);tracks.forEach((t,i)=>drawPath(t.points,t.primitive,['#00e5ff','#ff3d71','#ffd740','#76ff03'][i%4]));drawPath(draft,ui.primitive.value,'#fff');}
+function refreshTracks(){ui.trackSelect.replaceChildren(...tracks.map((t,i)=>new Option(`${i+1}. ${t.track_id} — ${t.semantic}`,String(i))));render();}
+function circlePoints(center,edge){const dx=edge.x-center.x,dy=edge.y-center.y,r=Math.hypot(dx,dy),clockwise=ui.semantic.value==='orbit_clockwise';return Array.from({length:17},(_,i)=>{const f=i/16*(clockwise?1:-1),a=Math.atan2(dy,dx)+f*Math.PI*2;return {t:i/16,x:Math.max(0,Math.min(1,center.x+r*Math.cos(a))),y:Math.max(0,Math.min(1,center.y+r*Math.sin(a))),visible:true};});}
+canvas.addEventListener('pointerdown',e=>{
+  const p=pointFromEvent(e);
+  if(draft.length){let best={d:.035,i:-1};draft.forEach((q,i)=>{const d=Math.hypot(q.x-p.x,q.y-p.y);if(d<best.d)best={d,i};});if(best.i>=0){dragging={point:best.i};canvas.setPointerCapture(e.pointerId);return;}}
+  if(ui.primitive.value==='static'){draft=[p];render();return;}
+  if(ui.primitive.value==='circle'){circleStart=p;draft=[p];canvas.setPointerCapture(e.pointerId);return;}
+  draft.push(p);render();
+});
+canvas.addEventListener('pointermove',e=>{const p=pointFromEvent(e);if(dragging){draft=updateDraftPoint(draft,dragging.point,p);render();}else if(circleStart){draft=circlePoints(circleStart,p);render();}});
+canvas.addEventListener('pointerup',()=>{dragging=null;circleStart=null;});
+document.getElementById('finish').onclick=()=>{try{if(!ui.semantic.value)throw Error('Target/primitive combination is unsupported');const raw=ui.trackSelect.value,selected=raw===''?-1:Number(raw),target=ui.targetType.value,id=ui.targetId.value.trim();let number=tracks.length+1,trackId=selected>=0&&tracks[selected]?tracks[selected].track_id:'';while(!trackId){const candidate=`${target}_${ui.primitive.value}_${String(number).padStart(2,'0')}`;if(!tracks.some(track=>track.track_id===candidate))trackId=candidate;else number+=1;}tracks=finishTrack(tracks,selected,draft,{track_id:trackId,target:{type:target,id},primitive:ui.primitive.value,semantic:ui.semantic.value});draft=[];refreshTracks();status('Track finished');}catch(error){status(String(error),true);}};
+document.getElementById('delete').onclick=()=>{const raw=ui.trackSelect.value,i=raw===''?-1:Number(raw);if(Number.isInteger(i)&&tracks[i])tracks.splice(i,1);draft=[];refreshTracks();};
+document.getElementById('clearDraft').onclick=()=>{draft=[];render();};
+function documentValue(){return {schema_version:'0.1',scene_id:config.scene_id,shot_id:config.shot_id,coordinate_space:'normalized_0_1_top_left',duration_seconds:Number(ui.duration.value),sample_count:Number(ui.sampleCount.value),tracks};}
+function status(message,error=false){ui.status.textContent=message;ui.status.style.color=error?'#ff7999':'#8de1a7';}
+saveButton.onclick=async()=>{if(saveButton.disabled)return;saveButton.disabled=true;try{const r=await fetch('/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(documentValue())});const v=await r.json();if(!r.ok)throw Error(v.error||r.statusText);status(`Saved\n${v.trajectory}\n${v.overlay}\nSHA ${v.overlay_sha256}`);}catch(e){status(String(e),true);}finally{saveButton.disabled=false;}};
+document.getElementById('load').onclick=async()=>{try{const r=await fetch('/trajectory.json',{cache:'no-store'});if(!r.ok)throw Error(`Load failed: HTTP ${r.status}`);const v=await r.json();tracks=v.tracks;ui.duration.value=v.duration_seconds;ui.sampleCount.value=v.sample_count;refreshTracks();status('Loaded saved trajectory');}catch(e){status(String(e),true);}};
+ui.targetType.onchange=updateTools;ui.primitive.onchange=updateTools;ui.trackSelect.onchange=()=>{const raw=ui.trackSelect.value,t=raw===''?null:tracks[Number(raw)];if(!t)return;ui.targetType.value=t.target.type;ui.targetId.value=t.target.id;ui.primitive.value=t.primitive;updateTools();ui.semantic.value=t.semantic;draft=t.points.map(p=>({...p}));render();};
+(async()=>{config=await (await fetch('/config.json')).json();ui.duration.value=config.duration_seconds;ui.sampleCount.value=config.sample_count;updateTools();background.onload=()=>{canvas.width=config.image.width;canvas.height=config.image.height;render();};background.src=config.image.url;})();
+</script>
+</body>
+</html>
