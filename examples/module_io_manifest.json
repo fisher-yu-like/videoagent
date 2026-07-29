@@ -86,6 +86,60 @@
           }
         }
       ]
+    },
+    {
+      "module_id": "trajectory_compiler_s01",
+      "inputs": [
+        {
+          "path": "runs/trajectory/s01/trajectory.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6"
+        },
+        {
+          "path": "examples/station_shotscript.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "149c5ae13bbcb6e98b8774808956f8062d82903c504f8c3279c9ea7019a1dc28"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory/s01/compiled/compiled_control.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "50b66351a657b768723c2fe8712093fde9bcefd6c87f00ce4e8891acddb4063b",
+          "bindings": {
+            "schema_version": "0.1",
+            "scene_id": "station_platform",
+            "shot_id": "s01",
+            "trajectory_sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "canonical_shotscript_sha256": "ade0f8dedd55cd4e65b1595e4d20f51720a626cc91aa07d5be64da20be046dfb",
+            "source_artifact_sha256.shotscript": "149c5ae13bbcb6e98b8774808956f8062d82903c504f8c3279c9ea7019a1dc28",
+            "source_artifact_sha256.trajectory": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "source_artifact_bytes.shotscript": 2986,
+            "source_artifact_bytes.trajectory": 1942,
+            "backend_capability.t2v": "prompt_approximation",
+            "submission_ready": true
+          }
+        },
+        {
+          "path": "runs/trajectory/s01/compiled/trajectory_prompt.txt",
+          "kind": "text",
+          "required": true,
+          "sha256": "e1b7f924beacdd00cbf7aa7807b708455dba52fc7728e96070252d3345d9d1f2"
+        },
+        {
+          "path": "runs/trajectory/s01/compiled/patched_shotscript.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "debc58cfa26643ec77ce7f6f422db791376b4bd03dbc6438657ea33fc6d9002a",
+          "bindings": {
+            "trajectory_control.trajectory_sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "trajectory_control.submission_ready": true
+          }
+        }
+      ]
     }
   ]
 }

@@ -18,7 +18,7 @@ import imageio_ffmpeg
 
 
 CHUNK_SIZE = 1024 * 1024
-SUPPORTED_KINDS = {"json", "video"}
+SUPPORTED_KINDS = {"json", "text", "video"}
 _MISSING = object()
 
 
@@ -49,6 +49,17 @@ def inspect_json(path: Path) -> dict[str, object]:
         "evidence": value.get("evidence"),
         "inference": value.get("inference"),
         "top_level_keys": sorted(value),
+    }
+
+
+def inspect_text(path: Path) -> dict[str, object]:
+    """Strictly decode one private text snapshot as UTF-8."""
+
+    value = path.read_bytes().decode("utf-8", errors="strict")
+    return {
+        "encoding": "utf-8",
+        "character_count": len(value),
+        "line_count": len(value.splitlines()),
     }
 
 
@@ -218,6 +229,8 @@ def _inspect_record(
 
         if kind == "json":
             inspection = inspect_json(snapshot)
+        elif kind == "text":
+            inspection = inspect_text(snapshot)
         else:
             inspection = inspect_video(snapshot)
         result["inspection"] = inspection

@@ -1,4 +1,13 @@
+"""Planning-stage ShotScript parser tests for ``videoactagent.shotscript``.
+
+Run: ``& $PY -m unittest tests.test_station_shotscript -v`` (see
+``docs/DEBUGGING.md``). Input is the real project example
+``examples/station_shotscript.json`` and parsed objects are held in memory.
+This validates schema/continuity fields only, not Blender or video generation.
+"""
+
 from pathlib import Path
+import json
 import unittest
 
 
@@ -18,6 +27,12 @@ class StationShotScriptTests(unittest.TestCase):
         self.assertEqual(script.fps, 3)
         self.assertEqual([shot.shot_id for shot in script.shots], ["s01", "s02", "s03"])
         self.assertEqual([shot.duration for shot in script.shots], [5.0, 5.0, 5.0])
+
+    def test_from_dict_matches_path_parser(self):
+        from videoactagent.shotscript import ShotScript
+
+        document = json.loads(EXAMPLE.read_text(encoding="utf-8"))
+        self.assertEqual(ShotScript.from_dict(document), ShotScript.from_path(EXAMPLE))
 
     def test_actual_station_example_preserves_actor_and_shot_continuity(self):
         script = self.load_script()

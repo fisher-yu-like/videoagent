@@ -61,6 +61,15 @@ class TrajectorySchemaTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             instruction.tracks[0].points[0].x = 0.0  # type: ignore[misc]
 
+    def test_from_json_bytes_is_strict_and_matches_from_path(self):
+        payload = EXAMPLE.read_bytes()
+        self.assertEqual(
+            TrajectoryInstruction.from_json_bytes(payload).to_dict(),
+            TrajectoryInstruction.from_path(EXAMPLE).to_dict(),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
+            TrajectoryInstruction.from_json_bytes(b'{"schema_version":"0.1","schema_version":"0.1"}')
+
     def test_rejects_nonfinite_out_of_range_unsorted_or_duplicate_points(self):
         valid = self._minimal_document()
         invalid_points = (
@@ -205,6 +214,30 @@ class TrajectorySchemaTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "exactly one"):
             TrajectoryInstruction.from_dict(document)
+
+    def test_local_deformation_is_canonical_but_only_as_move_polyline(self):
+        document = self._minimal_document()
+        track = document["tracks"][0]
+        track["track_id"] = "actor_a_hand"
+        track["target"] = {"type": "local_deformation", "id": "actor_a.hand"}
+        track["primitive"] = "polyline"
+        track["semantic"] = "move"
+
+        instruction = TrajectoryInstruction.from_dict(document)
+        self.assertEqual(instruction.tracks[0].target_type, "local_deformation")
+        self.assertEqual(instruction.tracks[0].target_id, "actor_a.hand")
+        self.assertEqual(
+            TrajectoryInstruction.from_dict(instruction.to_dict()).to_dict(),
+            instruction.to_dict(),
+        )
+
+        for primitive, semantic in (("circle", "move"), ("polyline", "anchor")):
+            invalid = json.loads(json.dumps(document))
+            invalid["tracks"][0]["primitive"] = primitive
+            invalid["tracks"][0]["semantic"] = semantic
+            with self.subTest(primitive=primitive, semantic=semantic):
+                with self.assertRaises(ValueError):
+                    TrajectoryInstruction.from_dict(invalid)
 
     def test_direct_dataclass_construction_runs_the_same_validation(self):
         with self.assertRaises(ValueError):

@@ -23,6 +23,7 @@ from unittest import mock
 from videoactagent.module_io import (
     inspect_json,
     inspect_manifest,
+    inspect_text,
     inspect_video,
     main,
     sha256_file,
@@ -96,6 +97,14 @@ class RealModuleIOTests(unittest.TestCase):
         path = ROOT / "runs" / "stage6_vace_inputs" / "s01" / "src_mask.mp4"
         expected = hashlib.sha256(path.read_bytes()).hexdigest()
         self.assertEqual(sha256_file(path), expected)
+
+    def test_real_trajectory_prompt_is_strict_utf8_text(self):
+        report = inspect_text(
+            ROOT / "runs" / "trajectory" / "s01" / "compiled" / "trajectory_prompt.txt"
+        )
+        self.assertEqual(report["encoding"], "utf-8")
+        self.assertEqual(report["line_count"], 2)
+        self.assertGreater(report["character_count"], 100)
 
     def test_real_video_reader_emits_no_resource_warning(self):
         import imageio_ffmpeg
@@ -175,6 +184,49 @@ class ManifestFailureTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertEqual(report["modules"][0]["status"], "failed")
         self.assertEqual(report["modules"][0]["outputs"][0]["error"], "required_missing")
+
+    def test_text_kind_checks_missing_non_utf8_and_declared_hash(self):
+        valid = self.root / "prompt.txt"
+        valid.write_text("camera orbits clockwise\n", encoding="utf-8")
+        invalid = self.root / "invalid.txt"
+        invalid.write_bytes(b"\xff\xfe\x80")
+        manifest = self.write_manifest(
+            [
+                {
+                    "module_id": "text_records",
+                    "inputs": [],
+                    "outputs": [
+                        {
+                            "path": "prompt.txt",
+                            "kind": "text",
+                            "required": True,
+                            "sha256": hashlib.sha256(valid.read_bytes()).hexdigest(),
+                        },
+                        {"path": "missing.txt", "kind": "text", "required": True},
+                        {"path": "invalid.txt", "kind": "text", "required": True},
+                    ],
+                }
+            ]
+        )
+
+        report = inspect_manifest(manifest, workspace=self.root)
+        records = report["modules"][0]["outputs"]
+        self.assertFalse(report["ok"])
+        self.assertEqual(records[0]["status"], "passed")
+        self.assertTrue(records[0]["hash_match"])
+        self.assertEqual(records[0]["inspection"]["encoding"], "utf-8")
+        self.assertEqual(records[1]["error"], "required_missing")
+        self.assertEqual(records[2]["error"], "text_inspection_failed")
+
+        stale = json.loads(manifest.read_text("utf-8"))
+        stale["modules"][0]["outputs"] = [
+            {"path": "prompt.txt", "kind": "text", "required": True, "sha256": "0" * 64}
+        ]
+        manifest.write_text(json.dumps(stale), encoding="utf-8")
+        stale_report = inspect_manifest(manifest, workspace=self.root)
+        self.assertEqual(
+            stale_report["modules"][0]["outputs"][0]["error"], "sha256_mismatch"
+        )
 
     def test_null_required_is_invalid_record_and_cannot_become_optional(self):
         manifest = self.write_manifest(

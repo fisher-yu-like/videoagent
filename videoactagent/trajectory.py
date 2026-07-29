@@ -18,7 +18,7 @@ from uuid import uuid4
 
 SCHEMA_VERSION = "0.1"
 COORDINATE_SPACE = "normalized_0_1_top_left"
-TARGET_TYPES = frozenset({"camera", "actor", "anchor"})
+TARGET_TYPES = frozenset({"camera", "actor", "anchor", "local_deformation"})
 PRIMITIVES = frozenset({"polyline", "circle", "static"})
 CAMERA_SEMANTICS = frozenset(
     {
@@ -201,8 +201,12 @@ class TrajectoryTrack:
             )
         elif target_type == "actor":
             allowed = self.primitive == "polyline" and self.semantic == "move"
-        else:
+        elif target_type == "anchor":
             allowed = self.primitive == "static" and self.semantic == "anchor"
+        else:
+            # Local deformation is a known, serializable intent so downstream
+            # compilers can reject it explicitly instead of losing the request.
+            allowed = self.primitive == "polyline" and self.semantic == "move"
         if not allowed:
             raise ValueError(
                 "target_type, primitive, and semantic are not compatible: "
@@ -316,10 +320,19 @@ class TrajectoryInstruction:
 
     @classmethod
     def from_path(cls, path: Path) -> TrajectoryInstruction:
-        with path.open("r", encoding="utf-8") as handle:
-            return cls.from_dict(
-                json.load(handle, object_pairs_hook=_reject_duplicate_json_keys)
-            )
+        return cls.from_json_bytes(path.read_bytes())
+
+    @classmethod
+    def from_json_bytes(cls, payload: bytes) -> TrajectoryInstruction:
+        """Parse one strict UTF-8 snapshot, including duplicate-key rejection."""
+
+        if not isinstance(payload, bytes):
+            raise ValueError("trajectory JSON snapshot must be bytes")
+        document = json.loads(
+            payload.decode("utf-8", errors="strict"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
+        return cls.from_dict(document)
 
     def to_dict(self) -> dict[str, object]:
         return {

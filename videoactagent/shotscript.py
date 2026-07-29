@@ -161,6 +161,12 @@ class ShotScript:
             data = json.loads(source.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise ShotScriptError(f"cannot read ShotScript {source}: {exc}") from exc
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: object) -> "ShotScript":
+        """Parse an already snapshotted ShotScript document."""
+
         root = _mapping(data, "root")
         fps_value = root.get("fps")
         if isinstance(fps_value, bool) or not isinstance(fps_value, int) or fps_value <= 0:
