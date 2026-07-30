@@ -1,3 +1,12 @@
+"""Stage 1 real Blender proxy integration test for ``blender_runner.py``.
+
+Run: ``& $PY -m unittest tests.test_blender_proxy_integration -v`` (see
+``docs/DEBUGGING.md``). Inputs: ``D:\\blender\\blender.exe`` and
+``examples/station_shotscript.json``; rendered proxy files are created in a
+temporary directory and inspected before cleanup. This invokes real Blender;
+it does not call a video-generation API or validate photorealistic output.
+"""
+
 import json
 from pathlib import Path
 import subprocess

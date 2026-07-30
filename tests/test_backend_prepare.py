@@ -1,3 +1,11 @@
+"""Stage 3 API-readiness interface tests for ``videoactagent.backend_prepare``.
+
+Run: ``& $PY -m unittest tests.test_backend_prepare -v`` (see
+``docs/DEBUGGING.md``). Real input: ``runs/stage2_control_bridge/control_bundle.json``;
+CLI reports are written only to temporary test directories. URL checks are
+syntactic and no API/media upload occurs, so this is not backend acceptance.
+"""
+
 from contextlib import redirect_stdout
 import io
 import json

@@ -199,6 +199,13 @@ $BLENDER = 'D:\blender\blender.exe'
   --validated-job-output runs/stage6_vace_inputs/s01/vace_job.validated.json
 ```
 
+The probe requires both outputs to stay inside the job directory and refuses
+aliases (including hard links) of the job, source bundle, proxy, or mask. It
+publishes the report first, then binds its relative path, actual bytes, SHA-256,
+and summary into the validated job. The 2026-07-29 successful files were moved
+to `.historical-old-job.json` names after this contract was strengthened; they
+are not current-job success markers.
+
 聚焦测试：
 
 ```powershell
@@ -326,4 +333,116 @@ Focused real integration test (about one minute on the current workstation):
 & $PY -X tracemalloc=25 -W error::ResourceWarning -m unittest discover -s tests -v
 ```
 
+## 10. Manual observation and trajectory metrics (Task 7)
+
+The observer decodes the selected frames from the supplied MP4 with ffmpeg.
+It does not run a tracker. Every frame needs either one human click or an
+explicit **Mark occluded** decision. Choose frame indices that exist in the
+real pilot video and use a new, non-existing output directory:
+
+```powershell
+& $PY -m videoactagent.trajectory_observe serve `
+  --video <real-kling-or-seedance.mp4> `
+  --trajectory runs\trajectory\s01\trajectory.json `
+  --track actor_path_01 `
+  --frames 0,4,8,12 `
+  --output-dir runs\trajectory_observation\<backend>\actor_path_01 `
+  --workspace . `
+  --port 8766
+```
+
+Open `http://127.0.0.1:8766`, annotate every displayed frame, and press
+**Save manual_visual_annotation**. The session contains the exact video hash,
+actual decoded frame hashes, shot identity, track identity, and target
+identity. The saved annotation is
+`<output-dir>/manual_annotation.json`. Stop the local server with Ctrl+C after
+the save succeeds.
+
+Evaluate only against the same real MP4 and trajectory bytes:
+
+```powershell
+& $PY -m videoactagent.trajectory_eval evaluate `
+  --trajectory runs\trajectory\s01\trajectory.json `
+  --video <the-same-real-pilot.mp4> `
+  --session-manifest runs\trajectory_observation\<backend>\actor_path_01\session_manifest.json `
+  --annotation runs\trajectory_observation\<backend>\actor_path_01\manual_annotation.json `
+  --output runs\trajectory_observation\<backend>\actor_path_01\evaluation.json `
+  --workspace .
+```
+
+The evaluator reports every common-time-base distance, endpoint error,
+direction agreement, arrival timing error, and DTW matrices/path. Occluded
+points split interpolation and DTW into separate visible segments; the tool
+never interpolates across an occluded interval. A provenance mismatch or
+invalid annotation returns a failure and does not publish a new evaluation.
+
+Focused mechanics and real-codec verification (no API calls):
+
+```powershell
+& $PY -X tracemalloc=15 -W error::ResourceWarning -m unittest `
+  tests.test_trajectory_eval -v
+```
+
 如果某个需要真实文件的测试因为文件缺失而失败，不应把它改成模拟通过；应先恢复对应真实输入或明确报告缺失。Windows 无符号链接权限导致的 symlink 测试可以明确 `skip`，仓库同时保留无特权模拟逃逸测试和真实 hardlink 测试。
+
+## 11. Bounded trajectory revision and 24-call matrix (Task 8)
+
+First finish the real Task 7 evaluation for the same backend video. Then
+prepare generation 1 of the revision plan with every evaluator source supplied
+again for independent hashing:
+
+```powershell
+& $PY -m videoactagent.trajectory_closed_loop prepare `
+  --evaluation runs\trajectory_observation\<backend>_s01\evaluation.json `
+  --prompt runs\trajectory\s01\compiled\trajectory_prompt.txt `
+  --video runs\trajectory_api_pilot\real\<run-directory>\result.mp4 `
+  --trajectory runs\trajectory\s01\trajectory.json `
+  --session-manifest runs\trajectory_observation\<backend>_s01\session_manifest.json `
+  --annotation runs\trajectory_observation\<backend>_s01\manual_annotation.json `
+  --revision-generation 0 `
+  --workspace . `
+  --output runs\trajectory_revision\<backend>_s01\revision.json
+```
+
+The command rejects generation 1 as an input, so no second revision can be
+prepared. It rehashes the video, trajectory, observer manifest, annotation,
+and every decoded observer frame, then reruns Task 7 and requires the complete
+persisted evaluation to match exactly. Its output always records
+`submission_allowed=false` and `network_called=false`; it does not import or
+call an API transport.
+
+The formal matrix is fixed at four scenes, two backends, and three conditions.
+Planning it without pilot review files is safe and leaves the gate closed:
+
+```powershell
+& $PY -m videoactagent.trajectory_experiment prepare `
+  --workspace . `
+  --output runs\trajectory_experiment\matrix_pending_review.json
+```
+
+To evaluate the gate, pass one immutable manual-review JSON report per backend.
+Each report must hash-bind the real `result.mp4`, Task 7 `evaluation.json`, its
+trajectory/session/annotation sources, and the successful Stage 3 `audit.json`:
+
+```powershell
+& $PY -m videoactagent.trajectory_experiment prepare `
+  --pilot-report kling=runs\trajectory_api_pilot\reviews\kling.json `
+  --pilot-report seedance=runs\trajectory_api_pilot\reviews\seedance.json `
+  --kling-cost-per-call <known-cost> `
+  --seedance-cost-per-call <known-cost> `
+  --currency CNY `
+  --workspace . `
+  --output runs\trajectory_experiment\matrix_reviewed.json
+```
+
+Both reports are necessary but not sufficient. Every one of the 24 expected
+condition bundles must also exist and pass its real backend validator. A
+missing bundle produces `status=preparation_required` and a null command;
+therefore `submission_allowed` stays false. For a ready bundle, the command is
+checked by the actual `jd_smoke` parser before it is persisted. The planner
+never executes any command. Run the local-only focused tests with:
+
+```powershell
+& $PY -X tracemalloc=15 -W error::ResourceWarning -m unittest `
+  tests.test_trajectory_closed_loop -v
+```

@@ -1,3 +1,11 @@
+"""Planning/prompt compiler tests for ``videoactagent.prompts``.
+
+Run: ``& $PY -m unittest tests.test_prompts -v`` (see ``docs/DEBUGGING.md``).
+Input is ``examples/station_shotscript.json`` and outputs are in-memory plain,
+cinematic, and timed prompt strings. This validates prompt preservation only;
+it does not submit the prompts or measure generated-video control quality.
+"""
+
 from pathlib import Path
 import unittest
 

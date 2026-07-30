@@ -1,3 +1,11 @@
+"""Stage 3 JD gateway response-parser unit tests for ``backends.jd``.
+
+Run: ``& $PY -m unittest tests.test_jd_response_parsing -v`` (see
+``docs/DEBUGGING.md``). Inputs are controlled in-memory dictionaries and there
+are no files or API outputs. Passing validates parser mechanics only; the
+dictionaries are not persisted gateway evidence or real backend acceptance.
+"""
+
 import unittest
 
 

@@ -1,3 +1,11 @@
+"""Stage 3 payload-preview CLI tests for ``seedance_demo.py``/``kling_demo.py``.
+
+Run: ``& $PY -m unittest tests.test_dry_run -v`` (see ``docs/DEBUGGING.md``).
+Inputs are the scripts' built-in dry-run defaults and output is JSON captured
+from stdout. ``--dry-run`` deliberately performs no API call; these assertions
+only validate payload construction and are never real generation acceptance.
+"""
+
 import json
 import locale
 import subprocess

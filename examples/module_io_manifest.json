@@ -20,13 +20,17 @@
       ]
     },
     {
-      "module_id": "stage6_source_validation",
+      "module_id": "stage6_vace_inputs_current",
       "inputs": [
         {
           "path": "runs/stage6_vace_inputs/s01/vace_job.json",
           "kind": "json",
           "required": true,
-          "sha256": "e1f4f1b13265db05ee6a145aeb6607f1963885ccb07d24b5b8a1882c15becd71"
+          "sha256": "2ecc5fe51b9fe9d2e9bf608a0829c68b316fb45ae1b8a444bc661375a6cd5063",
+          "bindings": {
+            "evidence.source_validation_passed": false,
+            "evidence.inference_success": false
+          }
         },
         {
           "path": "runs/stage6_vace_inputs/s01/src_mask.mp4",
@@ -35,9 +39,16 @@
           "sha256": "cbc0ef39ac29dc57dac06cb67111924c73f4ce1034bcbfda34cf16f79ab2029e"
         }
       ],
+      "outputs": []
+    },
+    {
+      "module_id": "stage6_source_validation_historical",
+      "lifecycle": "historical_archived_old_job",
+      "superseded_input_sha256": "e1f4f1b13265db05ee6a145aeb6607f1963885ccb07d24b5b8a1882c15becd71",
+      "inputs": [],
       "outputs": [
         {
-          "path": "runs/stage6_vace_inputs/s01/source_validation.json",
+          "path": "runs/stage6_vace_inputs/s01/source_validation.historical-old-job.json",
           "kind": "json",
           "required": true,
           "sha256": "813046fc4441ed249f21e598d82f32e172dc3038401cdc4dd591edcf3c6d7dae",
@@ -49,7 +60,7 @@
           }
         },
         {
-          "path": "runs/stage6_vace_inputs/s01/vace_job.validated.json",
+          "path": "runs/stage6_vace_inputs/s01/vace_job.validated.historical-old-job.json",
           "kind": "json",
           "required": true,
           "sha256": "fcf235e7b2c4aae02098ae0ca1ea326e1565b4b9bbc14c9feb88a48a072ebc5e",
@@ -137,6 +148,261 @@
           "bindings": {
             "trajectory_control.trajectory_sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
             "trajectory_control.submission_ready": true
+          }
+        }
+      ]
+    },
+    {
+      "module_id": "trajectory_api_pilot_prepared",
+      "inputs": [
+        {
+          "path": "runs/trajectory/s01/compiled/compiled_control.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "50b66351a657b768723c2fe8712093fde9bcefd6c87f00ce4e8891acddb4063b"
+        },
+        {
+          "path": "runs/trajectory/s01/proxy_blender_fixed_20260730T001819CST/trajectory_proxy_manifest.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "419ff831f7d50895f127f1f6bdb6cf27e7418c67dd56c7d9bcbd144eb656e415"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory_api_pilot/prepared/kling/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "edf29840aa49e133119b98fe61168805cf02d0751f42263270d8b659414aaa75",
+          "bindings": {
+            "backend": "kling",
+            "backend_capability.t2v": "prompt_approximation",
+            "bundle_type": "trajectory_api_pilot",
+            "prompt_condition": "trajectory_compiled",
+            "source_sha256.compiled_control": "50b66351a657b768723c2fe8712093fde9bcefd6c87f00ce4e8891acddb4063b",
+            "source_sha256.proxy_manifest": "419ff831f7d50895f127f1f6bdb6cf27e7418c67dd56c7d9bcbd144eb656e415",
+            "source_sha256.proxy_video": "8ecf7cbce19e537d722e9c0321a66b933722fca7ea8eb3b1063645ec45b7dee3",
+            "source_sha256.trajectory": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "source_sha256.trajectory_prompt": "e1b7f924beacdd00cbf7aa7807b708455dba52fc7728e96070252d3345d9d1f2",
+            "submission_ready": true,
+            "submit_retry_limit": 0,
+            "submitted_prompt_sha256": "e1b7f924beacdd00cbf7aa7807b708455dba52fc7728e96070252d3345d9d1f2",
+            "trajectory_sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "unsupported": []
+          }
+        },
+        {
+          "path": "runs/trajectory_api_pilot/prepared/seedance/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "faeccd2077b6fa54e8f1b97a0070fceb8fef02910aa7e0f1a2c397bfcd3a3238",
+          "bindings": {
+            "backend": "seedance",
+            "backend_capability.t2v": "prompt_approximation",
+            "bundle_type": "trajectory_api_pilot",
+            "prompt_condition": "trajectory_compiled",
+            "source_sha256.compiled_control": "50b66351a657b768723c2fe8712093fde9bcefd6c87f00ce4e8891acddb4063b",
+            "source_sha256.proxy_manifest": "419ff831f7d50895f127f1f6bdb6cf27e7418c67dd56c7d9bcbd144eb656e415",
+            "source_sha256.proxy_video": "8ecf7cbce19e537d722e9c0321a66b933722fca7ea8eb3b1063645ec45b7dee3",
+            "source_sha256.trajectory": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "source_sha256.trajectory_prompt": "e1b7f924beacdd00cbf7aa7807b708455dba52fc7728e96070252d3345d9d1f2",
+            "submission_ready": true,
+            "submit_retry_limit": 0,
+            "submitted_prompt_sha256": "e1b7f924beacdd00cbf7aa7807b708455dba52fc7728e96070252d3345d9d1f2",
+            "trajectory_sha256": "52792642f4887a78cc332898714fa877d3d6336073302e3a127cd69b7d8921e6",
+            "unsupported": []
+          }
+        }
+      ]
+    },
+    {
+      "module_id": "trajectory_real_pilot_kling_s01",
+      "inputs": [
+        {
+          "path": "runs/trajectory_api_pilot/prepared/kling/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "edf29840aa49e133119b98fe61168805cf02d0751f42263270d8b659414aaa75"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory_api_pilot/real/20260729T171212Z_kling_1bd8ea1f/result.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "5cfce7a0a887bad62904dd05f9934f647770defa11b9c066be5636f1c34bd180"
+        },
+        {
+          "path": "runs/trajectory_api_pilot/real/20260729T171212Z_kling_1bd8ea1f/audit.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "160afbd1013e79e7114254b579f7aaef09def3edb571127a3bd088f6f5d94f4d",
+          "bindings": {
+            "backend": "kling",
+            "network_called": false,
+            "checks.terminal_status_success": true,
+            "checks.download_record_matches_file": true,
+            "result.sha256": "5cfce7a0a887bad62904dd05f9934f647770defa11b9c066be5636f1c34bd180"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/kling_s01/manual_annotation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "1af2a09cc4139df994422207dc1819d33f5292bd6c9a15effc522a0e6b2d4239",
+          "bindings": {
+            "evidence_type": "manual_visual_annotation",
+            "track_id": "actor_path_01",
+            "video_sha256": "5cfce7a0a887bad62904dd05f9934f647770defa11b9c066be5636f1c34bd180"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/kling_s01/evaluation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "a0be8fc5f2caf3e089f18e9adada0d808b645dd0dc7317307f3861720b2513bf",
+          "bindings": {
+            "evidence_type": "manual_visual_trajectory_evaluation",
+            "track_id": "actor_path_01",
+            "provenance.video_sha256": "5cfce7a0a887bad62904dd05f9934f647770defa11b9c066be5636f1c34bd180",
+            "metrics.aggregate.direction_match": true
+          }
+        }
+      ]
+    },
+    {
+      "module_id": "trajectory_real_pilot_seedance_s01",
+      "inputs": [
+        {
+          "path": "runs/trajectory_api_pilot/prepared/seedance/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "faeccd2077b6fa54e8f1b97a0070fceb8fef02910aa7e0f1a2c397bfcd3a3238"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory_api_pilot/real/20260729T171238Z_seedance_cad24559/result.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "0cc51800c70f45f94314210ac590041a1e3f1ce3a913a375c4f4d24ce960bae2"
+        },
+        {
+          "path": "runs/trajectory_api_pilot/real/20260729T171238Z_seedance_cad24559/audit.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "c0fa4fbe47b5584292147a8660454d9d58b576e72e526a8b1b85b2769183a802",
+          "bindings": {
+            "backend": "seedance",
+            "network_called": false,
+            "checks.terminal_status_success": true,
+            "checks.download_record_matches_file": true,
+            "result.sha256": "0cc51800c70f45f94314210ac590041a1e3f1ce3a913a375c4f4d24ce960bae2"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/seedance_s01/manual_annotation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "38ea7217f6f0d05df5ca6583aa0a694f7a76c76b59d232edba9f21b77c714790",
+          "bindings": {
+            "evidence_type": "manual_visual_annotation",
+            "track_id": "actor_path_01",
+            "video_sha256": "0cc51800c70f45f94314210ac590041a1e3f1ce3a913a375c4f4d24ce960bae2"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/seedance_s01/evaluation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "4281bf331e18089dc63b2673aef8ff2266f4ea75516c9c52b298db5e92b99d7b",
+          "bindings": {
+            "evidence_type": "manual_visual_trajectory_evaluation",
+            "track_id": "actor_path_01",
+            "provenance.video_sha256": "0cc51800c70f45f94314210ac590041a1e3f1ce3a913a375c4f4d24ce960bae2",
+            "metrics.aggregate.direction_match": true
+          }
+        }
+      ]
+    },
+    {
+      "module_id": "trajectory_revision_real_kling_s01",
+      "inputs": [
+        {
+          "path": "runs/trajectory_api_pilot/revision_prepared/kling/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "eb6309f11d5f31e1f7b65407e123e19d9935e89d080d77012cc4065b827588f2"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory_api_pilot/revision_real/20260729T185319Z_kling_226ba30e/result.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "53c3bf8b67778882a5cefed654aebefc5ee0a5b317fc91920f48f340870778ca"
+        },
+        {
+          "path": "runs/trajectory_api_pilot/revision_real/20260729T185319Z_kling_226ba30e/audit.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "7540833677958395f69c21baa739738ba2f5384507f36d91bb11255d336486be",
+          "bindings": {
+            "backend": "kling",
+            "checks.terminal_status_success": true,
+            "result.sha256": "53c3bf8b67778882a5cefed654aebefc5ee0a5b317fc91920f48f340870778ca"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/kling_s01_revision/evaluation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "4614e565d1b941f73636a9d7d8a09ed1921bab941e34118bf149d997876cbb5d",
+          "bindings": {
+            "evidence_type": "manual_visual_trajectory_evaluation",
+            "provenance.video_sha256": "53c3bf8b67778882a5cefed654aebefc5ee0a5b317fc91920f48f340870778ca",
+            "metrics.aggregate.direction_match": true
+          }
+        }
+      ]
+    },
+    {
+      "module_id": "trajectory_revision_real_seedance_s01",
+      "inputs": [
+        {
+          "path": "runs/trajectory_api_pilot/revision_prepared/seedance/bundle.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "b2f8a24820515c6ef52544493ba2013d80e39e2c68463c90baa545cf626c0e7e"
+        }
+      ],
+      "outputs": [
+        {
+          "path": "runs/trajectory_api_pilot/revision_real/20260729T185319Z_seedance_6bd32900/result.mp4",
+          "kind": "video",
+          "required": true,
+          "sha256": "c6fbb1d98e14c1f90436ab79e3ee796bcaccc153bc7902d85f2925e4587f9deb"
+        },
+        {
+          "path": "runs/trajectory_api_pilot/revision_real/20260729T185319Z_seedance_6bd32900/audit.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "cffe52ca654cabcf4e26c584afe4617f936169f400a53a4a86a3723966d18240",
+          "bindings": {
+            "backend": "seedance",
+            "checks.terminal_status_success": true,
+            "result.sha256": "c6fbb1d98e14c1f90436ab79e3ee796bcaccc153bc7902d85f2925e4587f9deb"
+          }
+        },
+        {
+          "path": "runs/trajectory_observation/seedance_s01_revision/evaluation.json",
+          "kind": "json",
+          "required": true,
+          "sha256": "5f48c29d41f350dc5e8a7bc395c6633bb85bd684544ed0b7878c6abe583383d8",
+          "bindings": {
+            "evidence_type": "manual_visual_trajectory_evaluation",
+            "provenance.video_sha256": "c6fbb1d98e14c1f90436ab79e3ee796bcaccc153bc7902d85f2925e4587f9deb",
+            "metrics.aggregate.direction_match": false
           }
         }
       ]

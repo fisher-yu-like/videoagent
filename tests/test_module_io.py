@@ -41,7 +41,10 @@ class RealModuleIOTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         by_id = {item["module_id"]: item for item in report["modules"]}
         self.assertEqual(by_id["stage2_control_bundle"]["status"], "passed")
-        self.assertEqual(by_id["stage6_source_validation"]["status"], "passed")
+        self.assertEqual(by_id["stage6_vace_inputs_current"]["status"], "passed")
+        self.assertEqual(
+            by_id["stage6_source_validation_historical"]["status"], "passed"
+        )
         self.assertEqual(by_id["trajectory_instruction_s01"]["status"], "passed")
 
         stage2_video = next(
@@ -56,11 +59,11 @@ class RealModuleIOTests(unittest.TestCase):
         declared_validation = next(
             record
             for module in declared_manifest["modules"]
-            if module["module_id"] == "stage6_source_validation"
+            if module["module_id"] == "stage6_source_validation_historical"
             for record in module["outputs"]
-            if record["path"].endswith("source_validation.json")
+            if record["path"].endswith("source_validation.historical-old-job.json")
         )
-        validation = by_id["stage6_source_validation"]["outputs"][0]
+        validation = by_id["stage6_source_validation_historical"]["outputs"][0]
         self.assertEqual(validation["sha256"], declared_validation["sha256"])
         self.assertEqual(validation["sha256"], validation["declared_sha256"])
         self.assertEqual(
@@ -69,6 +72,9 @@ class RealModuleIOTests(unittest.TestCase):
         )
         self.assertFalse(validation["inspection"]["inference"]["model_constructed"])
         self.assertFalse(validation["inspection"]["inference"]["checkpoint_loaded"])
+        stage6_root = ROOT / "runs" / "stage6_vace_inputs" / "s01"
+        self.assertFalse((stage6_root / "source_validation.json").exists())
+        self.assertFalse((stage6_root / "vace_job.validated.json").exists())
 
         trajectory = by_id["trajectory_instruction_s01"]["outputs"][0]
         self.assertEqual(
@@ -78,9 +84,98 @@ class RealModuleIOTests(unittest.TestCase):
         self.assertTrue(trajectory["hash_match"])
         self.assertTrue(all(item["match"] for item in trajectory["binding_results"]))
 
+    def test_approved_trajectory_api_bundles_are_registered_not_provisional(self):
+        report = inspect_manifest(MANIFEST, workspace=ROOT)
+        by_id = {item["module_id"]: item for item in report["modules"]}
+        module = by_id["trajectory_api_pilot_prepared"]
+
+        self.assertTrue(report["ok"])
+        self.assertEqual(module["status"], "passed")
+        self.assertEqual(
+            [item["path"] for item in module["outputs"]],
+            [
+                "runs/trajectory_api_pilot/prepared/kling/bundle.json",
+                "runs/trajectory_api_pilot/prepared/seedance/bundle.json",
+            ],
+        )
+        self.assertTrue(
+            all(
+                result["match"]
+                for output in module["outputs"]
+                for result in output["binding_results"]
+            )
+        )
+        manifest_text = MANIFEST.read_text(encoding="utf-8")
+        self.assertNotIn("pending_review", manifest_text)
+        self.assertNotIn("provisional", manifest_text)
+
+    def test_real_trajectory_pilots_and_manual_evaluations_are_registered(self):
+        report = inspect_manifest(MANIFEST, workspace=ROOT)
+        by_id = {item["module_id"]: item for item in report["modules"]}
+
+        expected = {
+            "trajectory_real_pilot_kling_s01": (
+                "5cfce7a0a887bad62904dd05f9934f647770defa11b9c066be5636f1c34bd180",
+                "a0be8fc5f2caf3e089f18e9adada0d808b645dd0dc7317307f3861720b2513bf",
+            ),
+            "trajectory_real_pilot_seedance_s01": (
+                "0cc51800c70f45f94314210ac590041a1e3f1ce3a913a375c4f4d24ce960bae2",
+                "4281bf331e18089dc63b2673aef8ff2266f4ea75516c9c52b298db5e92b99d7b",
+            ),
+        }
+        for module_id, (video_sha, evaluation_sha) in expected.items():
+            with self.subTest(module_id=module_id):
+                module = by_id[module_id]
+                self.assertEqual(module["status"], "passed")
+                video = next(item for item in module["outputs"] if item["kind"] == "video")
+                evaluation = next(
+                    item
+                    for item in module["outputs"]
+                    if item["path"].endswith("evaluation.json")
+                )
+                self.assertEqual(video["sha256"], video_sha)
+                self.assertEqual(video["inspection"]["frame_count"], 121)
+                self.assertEqual(video["inspection"]["size"], [1280, 720])
+                self.assertEqual(evaluation["sha256"], evaluation_sha)
+                self.assertTrue(all(item["match"] for item in evaluation["binding_results"]))
+
+    def test_real_bounded_revision_results_are_registered_as_negative_evidence(self):
+        report = inspect_manifest(MANIFEST, workspace=ROOT)
+        by_id = {item["module_id"]: item for item in report["modules"]}
+        expected = {
+            "trajectory_revision_real_kling_s01": (
+                "53c3bf8b67778882a5cefed654aebefc5ee0a5b317fc91920f48f340870778ca",
+                True,
+            ),
+            "trajectory_revision_real_seedance_s01": (
+                "c6fbb1d98e14c1f90436ab79e3ee796bcaccc153bc7902d85f2925e4587f9deb",
+                False,
+            ),
+        }
+        for module_id, (video_sha, direction_match) in expected.items():
+            with self.subTest(module_id=module_id):
+                module = by_id[module_id]
+                self.assertEqual(module["status"], "passed")
+                video = next(item for item in module["outputs"] if item["kind"] == "video")
+                evaluation = next(
+                    item for item in module["outputs"] if item["path"].endswith("evaluation.json")
+                )
+                self.assertEqual(video["sha256"], video_sha)
+                direction = next(
+                    item
+                    for item in evaluation["binding_results"]
+                    if item["field"] == "metrics.aggregate.direction_match"
+                )
+                self.assertEqual(direction["actual"], direction_match)
+                self.assertTrue(direction["match"])
+
     def test_real_json_and_video_public_inspectors_decode_actual_files(self):
         json_report = inspect_json(
-            ROOT / "runs" / "stage6_vace_inputs" / "s01" / "source_validation.json"
+            ROOT
+            / "runs"
+            / "stage6_vace_inputs"
+            / "s01"
+            / "source_validation.historical-old-job.json"
         )
         video_report = inspect_video(
             ROOT / "runs" / "stage2_control_bridge" / "shots" / "s01" / "proxy.mp4"
@@ -666,7 +761,8 @@ class ModuleIOCLITests(unittest.TestCase):
         self.assertTrue(
             {
                 "stage2_control_bundle",
-                "stage6_source_validation",
+                "stage6_vace_inputs_current",
+                "stage6_source_validation_historical",
                 "trajectory_instruction_s01",
             }.issubset(module_ids)
         )

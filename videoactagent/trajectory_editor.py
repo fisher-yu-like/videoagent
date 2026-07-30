@@ -865,13 +865,13 @@ def _handler_type(session: EditorSession) -> type[BaseHTTPRequestHandler]:
         def _authorized(self, *, require_post_origin: bool = False) -> bool:
             expected_host = f"127.0.0.1:{self.server.server_address[1]}"
             if self.headers.get("Host") != expected_host:
-                self.close_connection = True
                 self._json(HTTPStatus.FORBIDDEN, {"status": "error", "error": "forbidden Host"})
+                self.close_connection = True
                 return False
             origin = self.headers.get("Origin")
             if require_post_origin and origin is not None and origin != f"http://{expected_host}":
-                self.close_connection = True
                 self._json(HTTPStatus.FORBIDDEN, {"status": "error", "error": "forbidden Origin"})
+                self.close_connection = True
                 return False
             return True
 
