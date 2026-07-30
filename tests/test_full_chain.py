@@ -302,6 +302,48 @@ class FullChainMatrixTests(unittest.TestCase):
             with self.assertRaises(ExperimentConfigError):
                 compile_matrix(config_path)
 
+    def test_rejects_duplicate_json_keys_before_snapshotting(self) -> None:
+        from videoactagent.full_chain import ExperimentConfigError, _read_json, compile_matrix
+
+        temporary, config_path = self._temporary_config()
+        self.addCleanup(temporary.cleanup)
+        document = json.loads(config_path.read_text(encoding="utf-8"))
+        raw = json.dumps(document, separators=(",", ":"))
+        request = json.dumps(document["request"], separators=(",", ":"))
+        raw = raw.replace(
+            f'"request":{request}',
+            f'"request":{{"release_token":"hidden-unbound-token"}},"request":{request}',
+            1,
+        )
+        config_path.write_text(raw, encoding="utf-8")
+        output = Path(temporary.name) / "prepared"
+        with self.assertRaises(ExperimentConfigError):
+            compile_matrix(config_path)
+        self.assertFalse(output.exists())
+
+        config_path.write_text(
+            json.dumps(self._config_document(), separators=(",", ":")), encoding="utf-8"
+        )
+        raw = config_path.read_text(encoding="utf-8")
+        raw = raw.replace(
+            '"query_limit":4', '"query_limit":3,"query_limit":4', 1
+        )
+        config_path.write_text(raw, encoding="utf-8")
+        with self.assertRaises(ExperimentConfigError):
+            compile_matrix(config_path)
+
+        root = Path(temporary.name) / "runs/work/whole_story_v4"
+        representatives = {
+            "summary": root / "summary.json",
+            "manifest": root / "station_reunion/manifest.json",
+            "backend": root / "station_reunion/bundles/kling.json",
+        }
+        for label, path in representatives.items():
+            original = path.read_text(encoding="utf-8")
+            path.write_text('{"schema_version":"shadow",' + original.lstrip()[1:], encoding="utf-8")
+            with self.assertRaises(ExperimentConfigError):
+                _read_json(path, label)
+
 
 if __name__ == "__main__":
     unittest.main()

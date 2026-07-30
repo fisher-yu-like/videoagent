@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 
-class ExperimentConfigError(ValueError):
+class MatrixError(ValueError):
+    """Raised when an immutable full-chain matrix artifact is malformed."""
+
+
+class ExperimentConfigError(MatrixError):
     """Raised when a full-chain matrix is not the approved offline contract."""
 
 
@@ -116,9 +120,26 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+class _DuplicateJsonKey(ValueError):
+    def __init__(self, key: object) -> None:
+        self.key = key
+        super().__init__(f"duplicate key {key!r}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateJsonKey(key)
+        result[key] = value
+    return result
+
+
 def _read_json(path: Path, label: str) -> dict[str, Any]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+    except _DuplicateJsonKey as exc:
+        raise ExperimentConfigError(f"cannot read {label}: duplicate JSON key {exc.key!r}") from exc
     except (OSError, json.JSONDecodeError) as exc:
         raise ExperimentConfigError(f"cannot read {label}: {exc}") from exc
     if not isinstance(value, dict):
