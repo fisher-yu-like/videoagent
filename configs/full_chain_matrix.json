@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "source_summary": "runs/work/whole_story_v4/summary.json",
+  "story_ids": [
+    "station_reunion",
+    "station_departure",
+    "crosswalk_opposite",
+    "crosswalk_diagonal",
+    "forest_follow",
+    "forest_converge",
+    "studio_exchange",
+    "studio_formation"
+  ],
+  "canary_story_ids": ["station_reunion", "studio_formation"],
+  "backends": ["kling", "seedance", "vace"],
+  "request": {
+    "duration_seconds": 5.0,
+    "query_limit": 4,
+    "download_limit": 1
+  },
+  "vace": {
+    "frame_count": 81,
+    "fps": 16,
+    "seed": 2026
+  },
+  "budgets": {
+    "generation_submissions": 16,
+    "status_queries": 64,
+    "downloads": 16,
+    "vace_inferences": 8,
+    "automatic_retries": 0
+  },
+  "submit": false,
+  "release_policy": "explicit_matrix_bound_token",
+  "release_gates": {
+    "canary_enabled": false,
+    "remainder_enabled": false
+  }
+}
