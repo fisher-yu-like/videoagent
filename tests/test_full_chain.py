@@ -210,6 +210,15 @@ class FullChainMatrixTests(unittest.TestCase):
             manifest["bundles"][backend] = bundle
             manifest["bundle_files"][backend]["sha256"] = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        frozen = config["frozen_inputs"]["stories"]["station_reunion"]
+        frozen["manifest_sha256"] = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        frozen["source_hashes"] = manifest["source_hashes"]
+        frozen["backend_input_sha256"] = {
+            backend: hashlib.sha256((case_dir / "bundles" / f"{backend}.json").read_bytes()).hexdigest()
+            for backend in ("kling", "seedance", "vace")
+        }
+        config_path.write_text(json.dumps(config), encoding="utf-8")
         with self.assertRaises(ExperimentConfigError):
             compile_matrix(config_path)
 

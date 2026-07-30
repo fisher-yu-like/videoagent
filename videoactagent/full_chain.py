@@ -31,6 +31,8 @@ _FROZEN_STORY_IDS = (
 )
 _FROZEN_CANARIES = ("station_reunion", "studio_formation")
 _CANONICAL_SUMMARY = Path("runs/work/whole_story_v4/summary.json")
+_CANONICAL_SUMMARY_SHA256 = "bc0f58d6ccdf331bb728c250882cece05dcdba020a2f3674f4c179a0f32aca02"
+_CANONICAL_FROZEN_INPUTS_SHA256 = "a5a019b5f2777ff9c5cf194beb002711ea2334544f7c89e864f52f1b020cf32d"
 _EXPECTED_BUDGETS = {
     "generation_submissions": 16,
     "status_queries": 64,
@@ -198,6 +200,12 @@ def _hash(value: object, label: str) -> str:
     return value
 
 
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _contains_shot_id(value: object) -> bool:
     if isinstance(value, dict):
         return "shot_id" in value or any(_contains_shot_id(item) for item in value.values())
@@ -246,7 +254,13 @@ def _parse_config(path: Path) -> ExperimentConfig:
     frozen_inputs = _object(document.get("frozen_inputs"), "frozen_inputs")
     if set(frozen_inputs) != {"summary_sha256", "stories"}:
         raise ExperimentConfigError("frozen_inputs must contain summary_sha256 and stories")
+    if _canonical_digest(frozen_inputs) != _CANONICAL_FROZEN_INPUTS_SHA256:
+        raise ExperimentConfigError(
+            "frozen_inputs differs from the independently anchored canonical v4 digest set"
+        )
     frozen_summary_sha256 = _hash(frozen_inputs.get("summary_sha256"), "frozen summary hash")
+    if frozen_summary_sha256 != _CANONICAL_SUMMARY_SHA256:
+        raise ExperimentConfigError("frozen summary hash differs from the independently anchored v4 summary")
     frozen_stories_value = _object(frozen_inputs.get("stories"), "frozen stories")
     if tuple(frozen_stories_value) != _FROZEN_STORY_IDS:
         raise ExperimentConfigError("frozen stories must be the exact approved v4 set and order")
