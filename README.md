@@ -33,3 +33,25 @@ python run.py configs/whole_story_suite.json
 - [实验与历史评分纠正](docs/EXPERIMENTS.md)
 
 本阶段默认 `submit=false`、`max_api_calls=0`，不会调用 Kling、Seedance 或服务器推理。API 与服务器实验必须另行报告并获准后执行。
+
+## Gated full-chain preparation
+
+```powershell
+.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json prepare
+```
+
+This one-time offline command writes `runs/work/full_chain_24_v1/`: the frozen
+matrix, 16 API-ready jobs, 8 VACE-ready jobs, and `summary.json`. Every job is
+at `jobs/<story>__<backend>/prepared/`; its parent is reserved for a separate
+future release approval. Prepare creates no approval, reads no credentials,
+and invokes no API, GPU, or network.
+
+Only offline status commands are available:
+
+```powershell
+.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json canary-status
+.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json remainder-status
+```
+
+There is intentionally no submit action. Real API submission or VACE inference
+requires a separate explicit, matrix-bound approval and execution workflow.
