@@ -1190,24 +1190,20 @@ os._exit(23)
         self.assertEqual(old_json, session.trajectory_path.read_bytes())
         self.assertEqual([], list(session.output_dir.parent.glob(pattern)))
 
-    def test_debugging_guide_records_real_browser_acceptance_and_commands(self) -> None:
-        guide = (ROOT / "docs" / "DEBUGGING.md").read_text(encoding="utf-8")
+    def test_usage_guide_exposes_the_offline_whole_story_entry(self) -> None:
+        guide = (ROOT / "docs" / "USAGE.md").read_text(encoding="utf-8")
         for token in (
-            "-m videoactagent.trajectory_editor",
-            "浏览器",
-            "Finish",
-            "Save",
-            "Load",
-            "-m videoactagent.trajectory validate",
-            "runs/trajectory/s01/browser_polyline/trajectory.json",
-            "856f7b1e92587a9ddb85f68004e23bd555318ae8318f062c52585f9529468bb8",
-            "5f04d30ea04a0c1ceccbb2340d8063dc1b9271c81811247097553c252e9adbf5",
-            "960×540 RGB",
-            "实际页面完成 polyline 绘制",
-            "不是 `session.save` 单测",
+            "python run.py configs/whole_story_suite.json",
+            "8 个独立故事",
+            "无需配置 API 密钥",
+            "prompt_only",
+            "source_video",
+            "incomplete",
+            "不得继续计算人物轨迹或相机控制分数",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, guide)
+        self.assertNotIn("-m videoactagent.trajectory_editor", guide)
 
 
 class RealStage2TrajectoryEditorTests(unittest.TestCase):

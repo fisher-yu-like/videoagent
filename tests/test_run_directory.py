@@ -1,7 +1,7 @@
 """Stage 3 run-recording unit test for ``videoactagent.run_record.RunDirectory``.
 
 Run: ``& $PY -m unittest tests.test_run_directory -v`` (see
-``docs/DEBUGGING.md``). A request JSON is written to a temporary directory and
+``docs/USAGE.md``). A request JSON is written to a temporary directory and
 checked for authorization redaction. This is filesystem/security mechanics;
 there is no API call and no real generation artifact.
 """

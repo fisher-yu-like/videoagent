@@ -1,6 +1,6 @@
-"""Stage 3 payload-preview CLI tests for ``seedance_demo.py``/``kling_demo.py``.
+"""Payload-preview tests for the isolated API examples.
 
-Run: ``& $PY -m unittest tests.test_dry_run -v`` (see ``docs/DEBUGGING.md``).
+Run: ``python -m unittest tests.test_dry_run -v`` (see ``docs/USAGE.md``).
 Inputs are the scripts' built-in dry-run defaults and output is JSON captured
 from stdout. ``--dry-run`` deliberately performs no API call; these assertions
 only validate payload construction and are never real generation acceptance.
@@ -26,12 +26,12 @@ class DryRunTests(unittest.TestCase):
         return json.loads(completed.stdout)
 
     def test_seedance_t2v_dry_run_prints_payload_builder_output(self):
-        payload = self.run_cli("seedance_demo.py", "t2v")
+        payload = self.run_cli("examples/api/seedance_demo.py", "t2v")
         self.assertEqual(payload["model"], "Doubao-Seedance-2.0")
         self.assertEqual(payload["parameters"]["duration"], 5)
 
     def test_kling_t2v_dry_run_prints_payload_builder_output(self):
-        payload = self.run_cli("kling_demo.py", "t2v")
+        payload = self.run_cli("examples/api/kling_demo.py", "t2v")
         self.assertEqual(payload["model"], "Kling-V2-5-Turbo")
         self.assertEqual(payload["parameters"]["duration"], 5)
 

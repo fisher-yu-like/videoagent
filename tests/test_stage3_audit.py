@@ -1,7 +1,7 @@
 """Stage 3 offline audit tests for the persisted real Kling API run.
 
 Run: ``& $PY -m unittest tests.test_stage3_audit -v`` (see
-``docs/DEBUGGING.md``). Real input/output evidence lives in
+``docs/USAGE.md``). Real input/output evidence lives in
 ``runs/stage3_api/20260729T012120Z_kling_d8bde2ef`` (including ``result.mp4``
 and ``audit.json``), with ``D:\\blender\\blender.exe`` used for decode metadata.
 Network entry points are blocked; tampered fixtures test rejection mechanics,

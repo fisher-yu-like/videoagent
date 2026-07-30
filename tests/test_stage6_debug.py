@@ -1,7 +1,7 @@
 """Stage 6 local/server diagnostic interface tests for ``stage6_debug``.
 
 Run: ``& $PY -m unittest tests.test_stage6_debug -v`` (see
-``docs/DEBUGGING.md``). Real inputs are ``runs/stage6_vace_inputs/s01/vace_job.json``,
+``docs/USAGE.md``). Real inputs are ``runs/stage6_vace_inputs/s01/vace_job.json``,
 the Stage 2 bundle, and ``third_party/VACE``; commands emit JSON to stdout and
 ``print-probe-command`` only prints a server command. Passing locally does not
 prove CUDA readiness, upstream preprocessing, weights, or VACE inference.

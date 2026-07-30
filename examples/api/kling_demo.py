@@ -2,12 +2,12 @@
 JD Cloud AI Gateway — Kling 视频生成调试脚本
 文档: 视频生成API.pdf
 用法:
-    python kling_demo.py t2v                 # Kling-V2-5-Turbo 文生视频
-    python kling_demo.py i2v <img_url>       # Kling-V2-5-Turbo 图生视频
-    python kling_demo.py v3_t2v              # Kling-V3-omni 文生视频
-    python kling_demo.py v3_i2v <img_url>    # Kling-V3-omni 图生视频
-    python kling_demo.py omni <img_url>      # Kling-V3-omni 图片主体生成 (object_creation)
-    python kling_demo.py download <task_id>  # 下载已完成任务的视频到本地
+    python examples/api/kling_demo.py t2v                 # Kling-V2-5-Turbo 文生视频
+    python examples/api/kling_demo.py i2v <img_url>       # Kling-V2-5-Turbo 图生视频
+    python examples/api/kling_demo.py v3_t2v              # Kling-V3-omni 文生视频
+    python examples/api/kling_demo.py v3_i2v <img_url>    # Kling-V3-omni 图生视频
+    python examples/api/kling_demo.py omni <img_url>      # Kling-V3-omni 图片主体生成
+    python examples/api/kling_demo.py download <task_id>  # 下载已完成任务的视频到本地
 生成物默认下载到 ~/Downloads/kling/
 """
 import json
@@ -186,7 +186,7 @@ def main():
 
     if mode == "download":
         if len(args) < 2:
-            sys.exit("usage: python kling_demo.py download <task_id>")
+            sys.exit("usage: python examples/api/kling_demo.py download <task_id>")
         task_id = args[1]
         final = _request(QUERY_URL_TMPL.format(task_id=task_id), "GET")
         status = final.get("task_status")
@@ -202,17 +202,17 @@ def main():
         payload = payload_t2v()
     elif mode == "i2v":
         if len(args) < 2:
-            sys.exit("usage: python kling_demo.py i2v <image_url>")
+            sys.exit("usage: python examples/api/kling_demo.py i2v <image_url>")
         payload = payload_i2v(args[1])
     elif mode == "v3_t2v":
         payload = payload_v3_t2v()
     elif mode == "v3_i2v":
         if len(args) < 2:
-            sys.exit("usage: python kling_demo.py v3_i2v <image_url>")
+            sys.exit("usage: python examples/api/kling_demo.py v3_i2v <image_url>")
         payload = payload_v3_i2v(args[1])
     elif mode == "omni":
         if len(args) < 2:
-            sys.exit("usage: python kling_demo.py omni <image_url>")
+            sys.exit("usage: python examples/api/kling_demo.py omni <image_url>")
         payload = payload_omni(args[1])
     else:
         sys.exit(f"unknown mode: {mode!r} (t2v | i2v | v3_t2v | v3_i2v | omni | download)")

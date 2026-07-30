@@ -1,7 +1,7 @@
 """Stage 3 backend payload/capability contracts for ``videoactagent.backends``.
 
 Run: ``& $PY -m unittest tests.test_backend_contracts -v`` (define ``$PY`` as in
-``docs/DEBUGGING.md``). Input: ``examples/station_shotscript.json``; assertions
+``docs/USAGE.md``). Input: ``examples/station_shotscript.json``; assertions
 inspect in-memory payloads only. No API is called, so passing is mechanics
 evidence and is not a real Seedance/Kling generation acceptance result.
 """

@@ -1,7 +1,7 @@
 """Planning-stage ShotScript parser tests for ``videoactagent.shotscript``.
 
 Run: ``& $PY -m unittest tests.test_station_shotscript -v`` (see
-``docs/DEBUGGING.md``). Input is the real project example
+``docs/USAGE.md``). Input is the real project example
 ``examples/station_shotscript.json`` and parsed objects are held in memory.
 This validates schema/continuity fields only, not Blender or video generation.
 """

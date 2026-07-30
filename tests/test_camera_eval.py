@@ -1,7 +1,7 @@
 """Stage 4 camera-motion heuristic tests for ``videoactagent.camera_eval``.
 
 Run: ``& $PY -m unittest tests.test_camera_eval -v`` (see
-``docs/DEBUGGING.md``). Real inputs include the persisted Kling first/middle/last
+``docs/USAGE.md``). Real inputs include the persisted Kling first/middle/last
 frames under ``runs/stage3_api/20260729T012120Z_kling_d8bde2ef/frames``; the
 persistent CLI output is ``runs/stage4_camera_eval/kling_s01_camera_eval.json``.
 Synthetic phase-correlation cases are mechanics only; only the real-frame case

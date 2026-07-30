@@ -2,7 +2,7 @@
 
 ## 目标
 
-系统以一个连续故事为一次执行单位：一个 story prompt、一个完整 Blender proxy、一个 story-level bundle 和一组完整性结果。第一阶段不再把三镜头 proxy 与单镜头 API 请求混在一起，也不再把未发送给后端的 proxy 描述成生成条件。
+系统以一个连续故事为一次执行单位：一个人工配对的 story prompt/ShotScript、一个完整 Blender proxy、一组 story-level 离线输入清单和完整性结果。当前没有自然语言到 ShotScript 的自动编译，也不再把三镜头 proxy 与单镜头 API 请求混在一起，或把未发送给后端的 proxy 描述成生成条件。
 
 ## 核心流程
 
@@ -25,8 +25,8 @@ Suite 配置固定统一 profile：
 
 - story duration：5 秒；
 - proxy：960×540、3 fps、15 帧；
-- 目标 API 输出：1280×720；
-- seed：`null`，并标记 `unsupported_by_gateway`，不虚构同 seed；
+- 闭源 API 目标输出：1280×720；
+- 闭源 API seed：`null`，并标记 `unsupported_by_gateway`，不虚构同 seed；VACE 清单不继承该声明；
 - `submit=false`、`max_api_calls=0` 为默认和当前阶段硬门。
 
 每个 case 必须有唯一的 `story_id`、ShotScript、人工 prompt 和 proxy SHA-256。8 个 case 覆盖 station、city crosswalk、forest path 和 studio room，人物起止位置与相机路径不能全部相同。
@@ -38,6 +38,8 @@ Bundle 必须明确：
 - `duration_seconds` 来自 story 根级 profile，不从 `shots[0]` 推导；
 - 不包含 `shot_id`；
 - 所有 prompt、ShotScript、proxy 和 profile 均有来源哈希。
+
+这些 JSON 当前是离线输入合同，不是现有 `jd_smoke` 或 VACE preprocess 可直接消费的 job；下一阶段必须先写 whole-story adapter，不能退回逐镜头提交器。
 
 ## 完整性优先
 
@@ -81,7 +83,7 @@ runs/
 python run.py configs/whole_story_suite.json
 ```
 
-当前入口只做离线验证、Blender 渲染和 bundle 准备，不联网。
+当前入口只做离线验证、来源快照、Blender 渲染和输入清单准备，不联网。人物/相机起止位置会与 Blender report 复核；静止相机诊断还要求位置和朝向同时锁定。
 
 ## 历史评分纠正
 

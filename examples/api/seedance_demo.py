@@ -3,11 +3,11 @@ JD Cloud AI Gateway — Doubao-Seedance 视频生成调试脚本
 文档: 视频生成API.pdf（Doubao-Seedance-2.0 / 1.5-pro / 1-0-pro 系列）
 
 用法:
-    python seedance_demo.py t2v                      # 文生视频 (默认 Seedance-2.0)
-    python seedance_demo.py i2v <image_url>          # 单图生视频
-    python seedance_demo.py ff <first_url> <last_url>  # 首尾帧
-    python seedance_demo.py multi <img_url> [audio_url]  # 多模态(仅 2.0)
-    python seedance_demo.py download <task_id>       # 下载已完成任务
+    python examples/api/seedance_demo.py t2v                      # 文生视频
+    python examples/api/seedance_demo.py i2v <image_url>          # 单图生视频
+    python examples/api/seedance_demo.py ff <first_url> <last_url>  # 首尾帧
+    python examples/api/seedance_demo.py multi <img_url> [audio_url]  # 多模态
+    python examples/api/seedance_demo.py download <task_id>       # 下载已完成任务
 
 环境变量:
     JD_KLING_KEY   API key (默认已内置)
@@ -214,7 +214,7 @@ def main():
 
     if mode == "download":
         if len(args) < 2:
-            sys.exit("usage: python seedance_demo.py download <task_id>")
+            sys.exit("usage: python examples/api/seedance_demo.py download <task_id>")
         task_id = args[1]
         final = _request(QUERY_URL_TMPL.format(task_id=task_id), "GET")
         if final.get("task_status") != "success":
@@ -229,15 +229,15 @@ def main():
         payload = payload_t2v()
     elif mode == "i2v":
         if len(args) < 2:
-            sys.exit("usage: python seedance_demo.py i2v <image_url>")
+            sys.exit("usage: python examples/api/seedance_demo.py i2v <image_url>")
         payload = payload_i2v(args[1])
     elif mode == "ff":
         if len(args) < 3:
-            sys.exit("usage: python seedance_demo.py ff <first_url> <last_url>")
+            sys.exit("usage: python examples/api/seedance_demo.py ff <first_url> <last_url>")
         payload = payload_first_last(args[1], args[2])
     elif mode == "multi":
         if len(args) < 2:
-            sys.exit("usage: python seedance_demo.py multi <image_url> [audio_url]")
+            sys.exit("usage: python examples/api/seedance_demo.py multi <image_url> [audio_url]")
         payload = payload_multimodal(args[1], args[2] if len(args) > 2 else None)
     else:
         sys.exit(f"unknown mode: {mode!r} (t2v | i2v | ff | multi | download)")

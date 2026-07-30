@@ -1,7 +1,7 @@
 """Cross-stage source-secret scan for all repository ``*.py`` files.
 
 Run: ``& $PY -m unittest tests.test_source_safety -v`` (see
-``docs/DEBUGGING.md``). The repository Python sources are the input and the test
+``docs/USAGE.md``). The repository Python sources are the input and the test
 produces no artifact. Passing means the scanned key pattern was absent; it is
 not a comprehensive secret audit, API test, or model-generation acceptance.
 """

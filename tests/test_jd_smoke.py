@@ -1,6 +1,6 @@
 """Stage 3 JD smoke-command safety/mechanics tests for ``videoactagent.jd_smoke``.
 
-Run: ``& $PY -m unittest tests.test_jd_smoke -v`` (see ``docs/DEBUGGING.md``).
+Run: ``& $PY -m unittest tests.test_jd_smoke -v`` (see ``docs/USAGE.md``).
 Inputs and run directories are temporary. Network transport and responses are
 patched/controlled, so these tests verify one-attempt behavior, recording, and
 secret handling only; they must not be reported as a real API submission.

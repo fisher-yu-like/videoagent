@@ -1,7 +1,7 @@
 """Stage 6 provenance-safe VACE input preparation tests for ``vace_inputs``.
 
 Run: ``& $PY -m unittest tests.test_vace_inputs -v`` (see
-``docs/DEBUGGING.md``). Real source media comes from
+``docs/USAGE.md``). Real source media comes from
 ``runs/stage2_control_bridge``; prepared proxy/mask/job outputs are exercised in
 temporary directories (persistent examples live in ``runs/stage6_vace_inputs``).
 Failure injections and patched ffmpeg pipes are mechanics tests; passing does

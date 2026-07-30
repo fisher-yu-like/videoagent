@@ -1,7 +1,7 @@
 """Stage 7 closed-loop evaluation tests for ``videoactagent.closed_loop``.
 
 Run: ``& $PY -m unittest tests.test_closed_loop -v`` (see
-``docs/DEBUGGING.md``). Inputs are the real Kling MP4, Stage 4 report, station
+``docs/USAGE.md``). Inputs are the real Kling MP4, Stage 4 report, station
 ShotScript, and ``examples/stage7_s01_inspection.json``; the user-facing CLI
 writes ``expectation.json``, ``feedback.json``, and ``revision.json`` under
 ``runs/stage7_closed_loop/kling_s01``. Temporary/tampered fixtures test binding

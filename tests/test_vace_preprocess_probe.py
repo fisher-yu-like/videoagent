@@ -1,7 +1,7 @@
 """Stage 6 VACE source-preprocessing probe contract/security tests.
 
 Run: ``& $PY -m unittest tests.test_vace_preprocess_probe -v`` (see
-``docs/DEBUGGING.md``). The function/CLI entry is
+``docs/USAGE.md``). The function/CLI entry is
 ``videoactagent.vace_preprocess_probe``; real job input is
 ``runs/stage6_vace_inputs/s01/vace_job.json`` and a real server run writes
 ``source_validation.json`` plus a separate ``vace_job.validated.json``. Tests

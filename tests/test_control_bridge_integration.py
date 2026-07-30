@@ -1,7 +1,7 @@
 """Stage 2 real Blender-to-control bridge integration test.
 
 Run: ``& $PY -m unittest tests.test_control_bridge_integration -v`` (see
-``docs/DEBUGGING.md``). Inputs: ``D:\\blender\\blender.exe`` and
+``docs/USAGE.md``). Inputs: ``D:\\blender\\blender.exe`` and
 ``examples/station_shotscript.json``; real proxy/control media is rendered and
 validated in a temporary directory. This tests Stage 2 media production, not a
 remote API or downstream VACE/video-model inference result.

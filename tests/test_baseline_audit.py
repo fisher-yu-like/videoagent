@@ -1,7 +1,7 @@
 """Stage 5 pinned-source audit tests for ``videoactagent.baseline_audit``.
 
 Run: ``& $PY -m unittest tests.test_baseline_audit -v`` (see
-``docs/DEBUGGING.md``). Inputs are ``baselines/manifest.json`` and the real
+``docs/USAGE.md``). Inputs are ``baselines/manifest.json`` and the real
 ``third_party/VACE``/``third_party/ReCamMaster`` checkouts; generated reports
 use temporary directories. This verifies source provenance, not model weights,
 CUDA inference, or generated-video quality.
