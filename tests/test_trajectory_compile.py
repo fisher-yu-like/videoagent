@@ -67,6 +67,23 @@ class TrajectoryCompileTests(unittest.TestCase):
             ["0.0-5.0s: actor A moves from the left-bottom region to the centre-middle region along a clockwise curve while facing actor B, arriving during 2.5-5.0s."],
         )
 
+    def test_legacy_station_snapshot_digest_stays_byte_contract_compatible(self) -> None:
+        legacy = compile_module._shotscript_dict(self.shotscript)
+        self.assertNotIn("environment_preset", legacy)
+        compiled = compile_trajectory(self.instruction, self.shotscript, "s01")
+        self.assertEqual(
+            compiled["canonical_shotscript_sha256"],
+            "ade0f8dedd55cd4e65b1595e4d20f51720a626cc91aa07d5be64da20be046dfb",
+        )
+
+        city = ShotScript.from_path(
+            ROOT / "examples" / "city_crosswalk_shotscript.json"
+        )
+        self.assertEqual(
+            compile_module._shotscript_dict(city)["environment_preset"],
+            "city_crosswalk",
+        )
+
     def test_sorts_real_validated_tracks_by_id_for_output(self) -> None:
         document = self.instruction.to_dict()
         document["tracks"] = list(reversed(document["tracks"]))

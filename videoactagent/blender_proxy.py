@@ -76,20 +76,123 @@ def add_cube(name: str, location, scale, material):
     return obj
 
 
-def create_environment():
+def add_cylinder(name: str, location, radius, depth, material, vertices=24):
+    bpy.ops.mesh.primitive_cylinder_add(
+        vertices=vertices, radius=radius, depth=depth, location=location
+    )
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.materials.append(material)
+    return obj
+
+
+def add_uv_sphere(name: str, location, radius, material):
+    bpy.ops.mesh.primitive_uv_sphere_add(
+        segments=20, ring_count=12, radius=radius, location=location
+    )
+    obj = bpy.context.object
+    obj.name = name
+    obj.data.materials.append(material)
+    return obj
+
+
+def create_action_axis():
+    axis_material = create_material(
+        "axis_mat", (0.85, 0.12, 0.12, 1.0), roughness=0.5
+    )
+    add_cube("action_axis", (0, 0, 0.035), (5.0, 0.025, 0.025), axis_material)
+
+
+def create_station_environment():
     platform_material = create_material("platform_mat", (0.32, 0.34, 0.37, 1.0), roughness=0.85)
     edge_material = create_material("safety_line_mat", (0.95, 0.72, 0.08, 1.0), roughness=0.65)
     rail_material = create_material("rail_mat", (0.08, 0.09, 0.11, 1.0), metallic=0.75, roughness=0.28)
     sleeper_material = create_material("sleeper_mat", (0.24, 0.13, 0.08, 1.0), roughness=0.9)
-    axis_material = create_material("axis_mat", (0.85, 0.12, 0.12, 1.0), roughness=0.5)
 
     add_cube("platform", (0, 0, -0.15), (5.5, 2.5, 0.15), platform_material)
     add_cube("safety_line", (0, 2.15, 0.02), (5.3, 0.07, 0.025), edge_material)
-    add_cube("action_axis", (0, 0, 0.035), (5.0, 0.025, 0.025), axis_material)
+    create_action_axis()
     for y in (3.0, 3.8):
         add_cube(f"rail_{y}", (0, y, -0.05), (6.0, 0.06, 0.06), rail_material)
     for index, x in enumerate(range(-5, 6)):
         add_cube(f"sleeper_{index}", (x, 3.4, -0.12), (0.08, 0.75, 0.05), sleeper_material)
+
+
+def create_city_crosswalk_environment():
+    asphalt = create_material("asphalt_mat", (0.075, 0.085, 0.095, 1.0), roughness=0.92)
+    stripe = create_material("crosswalk_mat", (0.86, 0.88, 0.84, 1.0), roughness=0.72)
+    curb = create_material("curb_mat", (0.38, 0.40, 0.42, 1.0), roughness=0.82)
+    building_a = create_material("building_a_mat", (0.27, 0.38, 0.48, 1.0), roughness=0.78)
+    building_b = create_material("building_b_mat", (0.48, 0.29, 0.24, 1.0), roughness=0.78)
+    window = create_emissive_material("window_mat", (0.95, 0.69, 0.22, 1.0))
+    pole = create_material("street_pole_mat", (0.07, 0.08, 0.09, 1.0), metallic=0.65, roughness=0.3)
+
+    add_cube("road", (0, 0, -0.14), (6.0, 3.2, 0.14), asphalt)
+    for index, x in enumerate((-3.6, -2.4, -1.2, 0.0, 1.2, 2.4, 3.6)):
+        add_cube(f"crosswalk_stripe_{index}", (x, 0, 0.012), (0.38, 2.4, 0.018), stripe)
+    add_cube("far_sidewalk", (0, 3.65, 0.02), (6.0, 0.45, 0.20), curb)
+    add_cube("city_building_left", (-3.7, 5.0, 2.0), (1.7, 1.0, 2.2), building_a)
+    add_cube("city_building_right", (3.2, 5.2, 2.6), (2.0, 1.1, 2.8), building_b)
+    for index, x in enumerate((-4.2, -3.2, 2.5, 3.5)):
+        add_cube(f"window_{index}", (x, 3.98, 2.7), (0.28, 0.03, 0.34), window)
+    for index, x in enumerate((-5.0, 5.0)):
+        add_cylinder(f"street_pole_{index}", (x, 2.9, 1.5), 0.07, 3.0, pole)
+        add_uv_sphere(f"street_lamp_{index}", (x, 2.9, 3.05), 0.18, window)
+    create_action_axis()
+
+
+def create_forest_path_environment():
+    grass = create_material("grass_mat", (0.12, 0.29, 0.10, 1.0), roughness=0.95)
+    path = create_material("path_mat", (0.40, 0.27, 0.14, 1.0), roughness=0.98)
+    trunk = create_material("trunk_mat", (0.20, 0.095, 0.035, 1.0), roughness=0.95)
+    foliage_a = create_material("foliage_a_mat", (0.07, 0.24, 0.055, 1.0), roughness=0.9)
+    foliage_b = create_material("foliage_b_mat", (0.13, 0.38, 0.08, 1.0), roughness=0.9)
+    stone = create_material("stone_mat", (0.28, 0.31, 0.29, 1.0), roughness=1.0)
+
+    add_cube("forest_ground", (0, 0.8, -0.16), (6.0, 4.0, 0.16), grass)
+    add_cube("forest_path", (0, 0, -0.005), (5.4, 1.15, 0.025), path)
+    tree_positions = ((-5.0, 2.4), (-3.6, 3.4), (3.4, 3.1), (5.0, 2.1))
+    for index, (x, y) in enumerate(tree_positions):
+        add_cylinder(f"tree_trunk_{index}", (x, y, 1.2), 0.22, 2.4, trunk, vertices=16)
+        foliage = foliage_a if index % 2 == 0 else foliage_b
+        add_uv_sphere(f"tree_crown_{index}", (x, y, 2.75), 1.05, foliage)
+    for index, x in enumerate((-4.2, -2.8, 2.6, 4.2)):
+        add_uv_sphere(f"path_stone_{index}", (x, -1.45, 0.12), 0.16, stone)
+    create_action_axis()
+
+
+def create_studio_room_environment():
+    floor = create_material("studio_floor_mat", (0.17, 0.18, 0.20, 1.0), roughness=0.7)
+    wall = create_material("studio_wall_mat", (0.30, 0.23, 0.35, 1.0), roughness=0.82)
+    panel = create_material("acoustic_panel_mat", (0.08, 0.10, 0.14, 1.0), roughness=0.9)
+    sofa = create_material("sofa_mat", (0.08, 0.28, 0.34, 1.0), roughness=0.75)
+    warm = create_emissive_material("studio_warm_mat", (1.0, 0.42, 0.12, 1.0))
+
+    add_cube("studio_floor", (0, 0.5, -0.14), (6.0, 4.0, 0.14), floor)
+    add_cube("studio_back_wall", (0, 4.0, 2.8), (6.0, 0.12, 3.0), wall)
+    add_cube("studio_left_wall", (-5.9, 1.0, 2.8), (0.12, 3.0, 3.0), wall)
+    for index, x in enumerate((-3.6, -1.2, 1.2, 3.6)):
+        add_cube(f"acoustic_panel_{index}", (x, 3.84, 2.8), (0.72, 0.05, 1.05), panel)
+    add_cube("studio_sofa_base", (3.7, 2.75, 0.48), (1.15, 0.42, 0.48), sofa)
+    add_cube("studio_sofa_back", (3.7, 3.08, 1.05), (1.15, 0.16, 0.72), sofa)
+    add_cube("studio_light_bar", (-3.8, 3.72, 2.75), (0.07, 0.05, 1.1), warm)
+    create_action_axis()
+
+
+ENVIRONMENT_BUILDERS = {
+    "station": create_station_environment,
+    "city_crosswalk": create_city_crosswalk_environment,
+    "forest_path": create_forest_path_environment,
+    "studio_room": create_studio_room_environment,
+}
+
+
+def create_environment(preset: str):
+    try:
+        builder = ENVIRONMENT_BUILDERS[preset]
+    except KeyError as exc:
+        raise ValueError(f"unsupported environment preset: {preset}") from exc
+    builder()
 
 
 def create_actor(actor: ActorPlan):
@@ -176,7 +279,7 @@ def configure_scene(script: ShotScript):
     scene.render.film_transparent = False
     scene.world.color = (0.035, 0.055, 0.09)
 
-    create_environment()
+    create_environment(script.environment_preset)
 
     actor_roots = {
         actor.actor_id: create_actor(actor)
@@ -515,6 +618,8 @@ def render_outputs(script: ShotScript, output_dir: Path):
 
     report = {
         "blender_version": bpy.app.version_string,
+        "scene_id": script.scene_id,
+        "environment_preset": script.environment_preset,
         "scene_frame_start": scene.frame_start,
         "scene_frame_end": scene.frame_end,
         "rendered_frames": scene.frame_end - scene.frame_start + 1,

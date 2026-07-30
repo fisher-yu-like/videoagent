@@ -1,0 +1,44 @@
+{
+  "scene_id": "city_crosswalk",
+  "environment_preset": "city_crosswalk",
+  "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [
+    {
+      "shot_id": "s01",
+      "duration": 5.0,
+      "prompt": "Wide shot of two people crossing paths at a city crosswalk.",
+      "camera": {
+        "shot_size": "wide",
+        "focal_length_mm": 35.0,
+        "motion": "truck_right",
+        "start": [-1.0, -10.0, 6.0],
+        "end": [1.0, -10.0, 6.0],
+        "look_at": "actors_midpoint"
+      },
+      "actors": [
+        {
+          "id": "actor_a",
+          "color": "#F28E2B",
+          "start": [-3.0, 0.0, 0.0],
+          "end": [-0.8, 0.0, 0.0],
+          "action": "walk",
+          "facing": "actor_b"
+        },
+        {
+          "id": "actor_b",
+          "color": "#4E79A7",
+          "start": [1.8, 0.0, 0.0],
+          "end": [1.8, 0.0, 0.0],
+          "action": "wait",
+          "facing": "actor_a"
+        }
+      ],
+      "continuity": {
+        "previous_shot": null,
+        "screen_direction": "left_to_right",
+        "axis_side": "north"
+      }
+    }
+  ]
+}

@@ -134,12 +134,18 @@ def _shot_dict(shot: Shot) -> dict[str, object]:
 
 
 def _shotscript_dict(shotscript: ShotScript) -> dict[str, object]:
-    return {
+    document = {
         "scene_id": shotscript.scene_id,
         "fps": shotscript.fps,
         "world_bounds": list(shotscript.world_bounds),
         "shots": [_shot_dict(shot) for shot in shotscript.shots],
     }
+    if not (
+        shotscript.scene_id == "station_platform"
+        and shotscript.environment_preset == "station"
+    ):
+        document["environment_preset"] = shotscript.environment_preset
+    return document
 
 
 def _instruction_digest(instruction: object) -> str:

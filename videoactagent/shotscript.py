@@ -150,6 +150,7 @@ class Shot:
 @dataclass(frozen=True)
 class ShotScript:
     scene_id: str
+    environment_preset: str
     fps: int
     world_bounds: tuple[float, float, float, float]
     shots: tuple[Shot, ...]
@@ -182,8 +183,26 @@ class ShotScript:
         shots_value = root.get("shots")
         if not isinstance(shots_value, list) or not shots_value:
             raise ShotScriptError("shots must be a non-empty list")
+        preset_value = root.get("environment_preset")
+        if preset_value is None and root.get("scene_id") == "station_platform":
+            # Preserve the byte-bound Stage 1-7 station evidence while new
+            # ShotScripts declare their environment explicitly.
+            environment_preset = "station"
+        else:
+            environment_preset = _string(preset_value, "environment_preset")
+        allowed_environment_presets = {
+            "station",
+            "city_crosswalk",
+            "forest_path",
+            "studio_room",
+        }
+        if environment_preset not in allowed_environment_presets:
+            raise ShotScriptError(
+                f"unsupported environment_preset: {environment_preset}"
+            )
         script = cls(
             scene_id=_string(root.get("scene_id"), "scene_id"),
+            environment_preset=environment_preset,
             fps=fps_value,
             world_bounds=tuple(float(item) for item in bounds_value),
             shots=tuple(Shot.from_dict(shot, index) for index, shot in enumerate(shots_value)),
