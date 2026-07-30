@@ -1,0 +1,14 @@
+{
+  "scene_id": "station_departure", "environment_preset": "station", "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [{
+    "shot_id": "whole", "duration": 5.0,
+    "prompt": "Two travelers separate in one unbroken platform shot.",
+    "camera": {"shot_size": "wide", "focal_length_mm": 38.0, "motion": "truck_left", "start": [1.2, -9.0, 5.5], "end": [-1.4, -9.0, 5.5], "look_at": "actors_midpoint"},
+    "actors": [
+      {"id": "actor_a", "color": "#F28E2B", "start": [-0.3, 0.0, 0.0], "end": [-3.1, 0.0, 0.0], "action": "walk", "facing": "left"},
+      {"id": "actor_b", "color": "#4E79A7", "start": [0.5, 0.0, 0.0], "end": [2.6, 0.0, 0.0], "action": "walk", "facing": "right"}
+    ],
+    "continuity": {"previous_shot": null, "screen_direction": "static", "axis_side": "north"}
+  }]
+}

@@ -244,6 +244,10 @@ def target_position(shot: Shot, frame_fraction: float, look_at: str) -> Vector:
             for actor in shot.actors
         ]
         target = sum(positions, Vector()) / len(positions)
+    elif look_at == "fixed_actors_midpoint":
+        target = sum((vec(actor.start) for actor in shot.actors), Vector()) / len(
+            shot.actors
+        )
     else:
         actor = actor_plan(shot, look_at)
         target = lerp(vec(actor.start), vec(actor.end), frame_fraction)
@@ -603,8 +607,10 @@ def render_outputs(script: ShotScript, output_dir: Path):
             }
         scene.frame_set(start_frame)
         camera_start = rounded_vector(camera.matrix_world.translation)
+        camera_rotation_start = rounded_vector(camera.rotation_euler)
         scene.frame_set(end_frame)
         camera_end = rounded_vector(camera.matrix_world.translation)
+        camera_rotation_end = rounded_vector(camera.rotation_euler)
         shot_reports.append(
             {
                 "shot_id": shot.shot_id,
@@ -612,6 +618,10 @@ def render_outputs(script: ShotScript, output_dir: Path):
                 "frame_end": end_frame,
                 "camera_motion": shot.camera.motion,
                 "camera_positions": {"start": camera_start, "end": camera_end},
+                "camera_rotations": {
+                    "start": camera_rotation_start,
+                    "end": camera_rotation_end,
+                },
                 "actor_positions": actor_positions,
             }
         )

@@ -1,0 +1,14 @@
+{
+  "scene_id": "crosswalk_opposite", "environment_preset": "city_crosswalk", "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [{
+    "shot_id": "whole", "duration": 5.0,
+    "prompt": "Two pedestrians approach each other across one crosswalk.",
+    "camera": {"shot_size": "wide", "focal_length_mm": 32.0, "motion": "dolly_in", "start": [0.0, -11.0, 6.2], "end": [0.0, -8.2, 5.2], "look_at": "actors_midpoint"},
+    "actors": [
+      {"id": "actor_a", "color": "#F28E2B", "start": [-3.3, 0.0, 0.0], "end": [-0.5, 0.0, 0.0], "action": "walk", "facing": "actor_b"},
+      {"id": "actor_b", "color": "#4E79A7", "start": [3.3, 0.0, 0.0], "end": [0.7, 0.0, 0.0], "action": "walk", "facing": "actor_a"}
+    ],
+    "continuity": {"previous_shot": null, "screen_direction": "static", "axis_side": "north"}
+  }]
+}

@@ -1,0 +1,15 @@
+{
+  "scene_id": "studio_formation", "environment_preset": "studio_room", "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [{
+    "shot_id": "whole", "duration": 5.0,
+    "prompt": "Three still performers hold a triangle as the camera moves in.",
+    "camera": {"shot_size": "wide", "focal_length_mm": 34.0, "motion": "dolly_in", "start": [0.0, -11.0, 6.0], "end": [0.0, -8.5, 5.0], "look_at": "actors_midpoint"},
+    "actors": [
+      {"id": "actor_a", "color": "#F28E2B", "start": [-0.8, -0.4, 0.0], "end": [-0.8, -0.4, 0.0], "action": "stand", "facing": "center"},
+      {"id": "actor_b", "color": "#4E79A7", "start": [0.8, -0.4, 0.0], "end": [0.8, -0.4, 0.0], "action": "stand", "facing": "center"},
+      {"id": "actor_c", "color": "#59A14F", "start": [0.0, 0.9, 0.0], "end": [0.0, 0.9, 0.0], "action": "stand", "facing": "center"}
+    ],
+    "continuity": {"previous_shot": null, "screen_direction": "static", "axis_side": "north"}
+  }]
+}

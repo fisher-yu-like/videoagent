@@ -1,0 +1,14 @@
+{
+  "scene_id": "forest_follow", "environment_preset": "forest_path", "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [{
+    "shot_id": "whole", "duration": 5.0,
+    "prompt": "One hiker follows another along a forest path in one take.",
+    "camera": {"shot_size": "wide", "focal_length_mm": 40.0, "motion": "parallel_track", "start": [-1.8, -9.0, 4.8], "end": [1.6, -9.0, 4.8], "look_at": "actors_midpoint"},
+    "actors": [
+      {"id": "actor_a", "color": "#F28E2B", "start": [-1.2, 0.5, 0.0], "end": [2.5, 0.5, 0.0], "action": "walk", "facing": "right"},
+      {"id": "actor_b", "color": "#4E79A7", "start": [-3.0, -0.4, 0.0], "end": [0.7, -0.4, 0.0], "action": "walk", "facing": "right"}
+    ],
+    "continuity": {"previous_shot": null, "screen_direction": "left_to_right", "axis_side": "north"}
+  }]
+}

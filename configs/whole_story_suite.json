@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "submit": false,
+  "max_api_calls": 0,
+  "blender": "D:\\blender\\blender.exe",
+  "output_dir": "runs/work/whole_story_v4",
+  "profile": {
+    "duration_seconds": 5.0,
+    "proxy_fps": 3,
+    "proxy_resolution": [960, 540],
+    "target_resolution": [1280, 720],
+    "seed": null,
+    "seed_support": "unsupported_by_gateway"
+  },
+  "cases": [
+    {"story_id": "station_reunion", "prompt": "prompts/station_reunion.txt", "shotscript": "stories/station_reunion.json"},
+    {"story_id": "station_departure", "prompt": "prompts/station_departure.txt", "shotscript": "stories/station_departure.json"},
+    {"story_id": "crosswalk_opposite", "prompt": "prompts/crosswalk_opposite.txt", "shotscript": "stories/crosswalk_opposite.json"},
+    {"story_id": "crosswalk_diagonal", "prompt": "prompts/crosswalk_diagonal.txt", "shotscript": "stories/crosswalk_diagonal.json"},
+    {"story_id": "forest_follow", "prompt": "prompts/forest_follow.txt", "shotscript": "stories/forest_follow.json"},
+    {"story_id": "forest_converge", "prompt": "prompts/forest_converge.txt", "shotscript": "stories/forest_converge.json"},
+    {"story_id": "studio_exchange", "prompt": "prompts/studio_exchange.txt", "shotscript": "stories/studio_exchange.json"},
+    {"story_id": "studio_formation", "prompt": "prompts/studio_formation.txt", "shotscript": "stories/studio_formation.json"}
+  ]
+}

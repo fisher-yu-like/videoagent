@@ -1,0 +1,14 @@
+{
+  "scene_id": "forest_converge", "environment_preset": "forest_path", "fps": 3,
+  "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+  "shots": [{
+    "shot_id": "whole", "duration": 5.0,
+    "prompt": "Two hikers converge in a clearing as the camera retreats.",
+    "camera": {"shot_size": "wide", "focal_length_mm": 36.0, "motion": "dolly_out", "start": [0.0, -7.5, 4.5], "end": [0.0, -10.5, 6.0], "look_at": "actors_midpoint"},
+    "actors": [
+      {"id": "actor_a", "color": "#F28E2B", "start": [-3.4, 0.8, 0.0], "end": [-0.4, 0.2, 0.0], "action": "walk", "facing": "actor_b"},
+      {"id": "actor_b", "color": "#4E79A7", "start": [3.0, -0.8, 0.0], "end": [0.5, -0.2, 0.0], "action": "walk", "facing": "actor_a"}
+    ],
+    "continuity": {"previous_shot": null, "screen_direction": "static", "axis_side": "north"}
+  }]
+}
