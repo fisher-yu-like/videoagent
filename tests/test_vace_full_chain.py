@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import imageio_ffmpeg
 
@@ -105,6 +106,42 @@ class VaceFullChainTests(unittest.TestCase):
             path.write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaisesRegex(VaceFullChainError, "inference"):
                 validate_vace_job(job_dir)
+
+    def test_decoder_closes_ffmpeg_pipes_when_decode_validation_fails(self):
+        from videoactagent.vace_full_chain import VaceFullChainError, _decode_video_contract
+
+        class Pipe:
+            closed = False
+
+            def close(self):
+                self.closed = True
+
+        class Process:
+            def __init__(self):
+                self.stdin = Pipe()
+                self.stdout = Pipe()
+                self.stderr = Pipe()
+
+        process = Process()
+
+        def fake_reader():
+            process  # retain this local for imageio-ffmpeg's generator convention
+            yield {"size": (1, 1), "fps": 16}
+            yield b"too short"
+
+        reader = fake_reader()
+        with mock.patch(
+            "videoactagent.vace_full_chain.imageio_ffmpeg.count_frames_and_secs",
+            return_value=(1, 1 / 16),
+        ), mock.patch(
+            "videoactagent.vace_full_chain.imageio_ffmpeg.read_frames",
+            return_value=reader,
+        ):
+            with self.assertRaisesRegex(VaceFullChainError, "frame payload"):
+                _decode_video_contract(Path("decoder.mp4"), (1, 1), 16, 1, "control")
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
 
     def test_runner_is_fail_closed_and_records_exact_vace_invocation_contract(self):
         script = (ROOT / "scripts" / "run_vace_full_chain.sh").read_text(encoding="utf-8")

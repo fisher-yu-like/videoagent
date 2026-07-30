@@ -206,6 +206,20 @@ def _mask_record(path: Path, dimensions: tuple[int, int]) -> dict[str, Any]:
     }
 
 
+def _close_media_reader(reader: object) -> None:
+    """Release imageio-ffmpeg's generator-owned Windows pipe handles."""
+    generator_frame = getattr(reader, "gi_frame", None)
+    process = generator_frame.f_locals.get("process") if generator_frame else None
+    try:
+        reader.close()  # type: ignore[attr-defined]
+    finally:
+        if process is not None:
+            for pipe_name in ("stdin", "stdout", "stderr"):
+                pipe = getattr(process, pipe_name, None)
+                if pipe is not None and not pipe.closed:
+                    pipe.close()
+
+
 def _decode_video_contract(
     path: Path,
     dimensions: tuple[int, int],
@@ -230,7 +244,7 @@ def _decode_video_contract(
                     raise VaceFullChainError(f"{label} frame payload is invalid")
                 decoded += 1
         finally:
-            reader.close()
+            _close_media_reader(reader)
     except (OSError, RuntimeError, StopIteration) as exc:
         raise VaceFullChainError(f"{label} cannot be decoded: {exc}") from exc
     if counted != frame_count or decoded != frame_count:
