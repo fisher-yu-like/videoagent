@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,26 +34,9 @@ class FullChainMatrixTests(unittest.TestCase):
                 shutil.copy2(source_case / "bundles" / f"{backend}.json", target_case / "bundles" / f"{backend}.json")
 
     def _config_document(self) -> dict[str, object]:
-        summary = json.loads((SOURCE_ROOT / "summary.json").read_text(encoding="utf-8"))
-        return {
-            "schema_version": "1.0",
-            "source_summary": "runs/work/whole_story_v4/summary.json",
-            "story_ids": [case["story_id"] for case in summary["cases"]],
-            "canary_story_ids": ["station_reunion", "studio_formation"],
-            "backends": ["kling", "seedance", "vace"],
-            "request": {"duration_seconds": 5.0, "query_limit": 4, "download_limit": 1},
-            "vace": {"frame_count": 81, "fps": 16, "seed": 2026},
-            "budgets": {
-                "generation_submissions": 16,
-                "status_queries": 64,
-                "downloads": 16,
-                "vace_inferences": 8,
-                "automatic_retries": 0,
-            },
-            "submit": False,
-            "release_policy": "explicit_matrix_bound_token",
-            "release_gates": {"canary_enabled": False, "remainder_enabled": False},
-        }
+        return json.loads(
+            (ROOT / "configs" / "full_chain_matrix.json").read_text(encoding="utf-8")
+        )
 
     def _temporary_config(self) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
@@ -101,6 +85,11 @@ class FullChainMatrixTests(unittest.TestCase):
         self.assertEqual(prepared["job_count"], 24)
         self.assertNotIn("release_token", prepared)
         self.assertTrue((Path(temporary.name) / "prepared" / "matrix.json").is_file())
+        snapshot_json = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (Path(temporary.name) / "prepared").rglob("*.json")
+        ]
+        self.assertTrue(all("release_token" not in json.dumps(document) for document in snapshot_json))
         self.assertGreaterEqual(len(prepared["snapshot_sha256"]), 35)
         self.assertTrue(any(name.endswith("station_reunion/sources/prompt.txt") for name in prepared["snapshot_sha256"]))
         with self.assertRaises(ValueError):
@@ -196,6 +185,113 @@ class FullChainMatrixTests(unittest.TestCase):
         )
         with self.assertRaises(ExperimentConfigError):
             compile_matrix(config_path)
+
+    def test_rejects_coordinated_tampering_despite_updated_metadata(self) -> None:
+        from videoactagent.full_chain import ExperimentConfigError, compile_matrix
+
+        temporary, config_path = self._temporary_config()
+        self.addCleanup(temporary.cleanup)
+        case_dir = Path(temporary.name) / "runs/work/whole_story_v4/station_reunion"
+        prompt_path = case_dir / "sources/prompt.txt"
+        prompt_path.write_text("A replaced whole-story prompt.", encoding="utf-8")
+        prompt_hash = hashlib.sha256(prompt_path.read_bytes()).hexdigest()
+        submitted_hash = hashlib.sha256(prompt_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        manifest_path = case_dir / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["source_hashes"]["prompt_file_sha256"] = prompt_hash
+        manifest["source_hashes"]["submitted_prompt_sha256"] = submitted_hash
+        for backend in ("kling", "seedance", "vace"):
+            bundle_path = case_dir / "bundles" / f"{backend}.json"
+            bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+            bundle["prompt"] = prompt_path.read_text(encoding="utf-8")
+            bundle["source_hashes"]["prompt_file_sha256"] = prompt_hash
+            bundle["source_hashes"]["submitted_prompt_sha256"] = submitted_hash
+            bundle_path.write_text(json.dumps(bundle), encoding="utf-8")
+            manifest["bundles"][backend] = bundle
+            manifest["bundle_files"][backend]["sha256"] = hashlib.sha256(bundle_path.read_bytes()).hexdigest()
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaises(ExperimentConfigError):
+            compile_matrix(config_path)
+
+    def test_rejects_workspace_local_summary_substitute(self) -> None:
+        from videoactagent.full_chain import ExperimentConfigError, compile_matrix
+
+        temporary, config_path = self._temporary_config()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        shutil.copytree(root / "runs/work/whole_story_v4", root / "runs/work/substitute_v4")
+        self._mutate_config(
+            config_path,
+            lambda document: document.update(source_summary="runs/work/substitute_v4/summary.json"),
+        )
+        with self.assertRaises(ExperimentConfigError):
+            compile_matrix(config_path)
+
+    def test_rejects_unknown_fields_release_tokens_and_noncanonical_canaries(self) -> None:
+        from videoactagent.full_chain import ExperimentConfigError, compile_matrix
+
+        for mutate in (
+            lambda document: document.update(unapproved_field=True),
+            lambda document: document["request"].update(unapproved_field=True),
+            lambda document: document.update(release_token="not-allowed"),
+            lambda document: document.update(release_canary="not-allowed"),
+            lambda document: document.update(release_remainder="not-allowed"),
+            lambda document: document.update(canary_story_ids=["station_departure", "studio_formation"]),
+        ):
+            temporary, config_path = self._temporary_config()
+            self.addCleanup(temporary.cleanup)
+            self._mutate_config(config_path, mutate)
+            with self.assertRaises(ExperimentConfigError):
+                compile_matrix(config_path)
+
+    def test_prepare_uses_private_staging_and_leaves_no_partial_publish_on_failure(self) -> None:
+        import videoactagent.full_chain as full_chain
+        from videoactagent.full_chain import compile_matrix, write_prepared_matrix
+
+        temporary, config_path = self._temporary_config()
+        self.addCleanup(temporary.cleanup)
+        output = Path(temporary.name) / "prepared"
+        copied_to: list[Path] = []
+        original_copyfile = shutil.copyfile
+
+        def fail_after_first(source, target, *args, **kwargs):
+            copied_to.append(Path(target))
+            if len(copied_to) > 1:
+                raise OSError("injected snapshot failure")
+            return original_copyfile(source, target, *args, **kwargs)
+
+        with patch.object(full_chain.shutil, "copyfile", side_effect=fail_after_first):
+            with self.assertRaises(OSError):
+                write_prepared_matrix(compile_matrix(config_path), output)
+        self.assertFalse(output.exists())
+        self.assertTrue(copied_to)
+        self.assertTrue(all(output not in path.parents for path in copied_to))
+        self.assertFalse(any(output.parent.glob(f".{output.name}.staging-*")))
+
+    def test_rejects_symlinked_case_source_even_with_matching_hash(self) -> None:
+        from videoactagent.full_chain import ExperimentConfigError, compile_matrix
+
+        temporary, config_path = self._temporary_config()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        prompt_path = root / "runs/work/whole_story_v4/station_reunion/sources/prompt.txt"
+        outside = root / "outside_prompt.txt"
+        shutil.copy2(prompt_path, outside)
+        prompt_path.unlink()
+        try:
+            prompt_path.symlink_to(outside)
+        except OSError as exc:
+            with patch.object(
+                Path,
+                "is_symlink",
+                autospec=True,
+                side_effect=lambda candidate: candidate == prompt_path,
+            ):
+                with self.assertRaises(ExperimentConfigError):
+                    compile_matrix(config_path)
+        else:
+            with self.assertRaises(ExperimentConfigError):
+                compile_matrix(config_path)
 
 
 if __name__ == "__main__":
