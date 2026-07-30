@@ -13,9 +13,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 from typing import Any, Mapping
 import uuid
 
+import imageio_ffmpeg
 from PIL import Image
 
 from videoactagent.full_chain import ExperimentJob, compile_matrix
@@ -40,6 +42,10 @@ _INFERENCE = {
 }
 _SERVER_CONTRACT = {"vace_commit": VACE_COMMIT, "wan_commit": WAN_COMMIT}
 _JOB_NAME = "vace_job.json"
+_CONTROL_PATH = "control/src_video.mp4"
+_FRAME_COUNT = 81
+_FPS = 16
+_CONTROL_DURATION = _FRAME_COUNT / _FPS
 
 
 class VaceFullChainError(ValueError):
@@ -191,13 +197,77 @@ def _mask_record(path: Path, dimensions: tuple[int, int]) -> dict[str, Any]:
         "path": "src_mask.mp4",
         "bytes": path.stat().st_size,
         "sha256": sha256_file(path),
-        "frame_count": 81,
+        "frame_count": _FRAME_COUNT,
         "dimensions": [dimensions[0], dimensions[1]],
-        "fps": 16,
+        "fps": _FPS,
         "mask_semantics": MASK_SEMANTICS,
         "mask_policy": MASK_POLICY,
         "actor_segmentation_claimed": False,
     }
+
+
+def _decode_video_contract(
+    path: Path,
+    dimensions: tuple[int, int],
+    fps: int,
+    frame_count: int,
+    label: str,
+) -> None:
+    try:
+        counted, _ = imageio_ffmpeg.count_frames_and_secs(str(path))
+        reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
+        try:
+            metadata = next(reader)
+            if tuple(metadata.get("size", ())) != dimensions:
+                raise VaceFullChainError(f"{label} dimensions are invalid")
+            decoded_fps = metadata.get("fps")
+            if not isinstance(decoded_fps, (int, float)) or abs(decoded_fps - fps) > 1e-6:
+                raise VaceFullChainError(f"{label} fps is invalid")
+            expected_bytes = dimensions[0] * dimensions[1] * 3
+            decoded = 0
+            for frame in reader:
+                if len(frame) != expected_bytes:
+                    raise VaceFullChainError(f"{label} frame payload is invalid")
+                decoded += 1
+        finally:
+            reader.close()
+    except (OSError, RuntimeError, StopIteration) as exc:
+        raise VaceFullChainError(f"{label} cannot be decoded: {exc}") from exc
+    if counted != frame_count or decoded != frame_count:
+        raise VaceFullChainError(
+            f"{label} must contain exactly {frame_count} frames, got {counted}/{decoded}"
+        )
+
+
+def _control_record(path: Path, dimensions: tuple[int, int], source_proxy_sha256: str) -> dict[str, Any]:
+    return {
+        **_record(path, _CONTROL_PATH),
+        "frame_count": _FRAME_COUNT,
+        "fps": _FPS,
+        "dimensions": [dimensions[0], dimensions[1]],
+        "timeline_duration_seconds": _CONTROL_DURATION,
+        "source_proxy_sha256": source_proxy_sha256,
+        "resampling": "ffmpeg_fps_duplicate_with_final_frame_clone",
+        "ai_interpolation": False,
+    }
+
+
+def _materialize_control(source: Path, target: Path, dimensions: tuple[int, int]) -> dict[str, Any]:
+    """Make an explicit 16fps control track without inventing motion frames."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-v", "error", "-i", str(source),
+        "-vf", "fps=16:round=near,tpad=stop_mode=clone:stop_duration=0.125,trim=end_frame=81,setpts=N/(16*TB)",
+        "-frames:v", str(_FRAME_COUNT), "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-r", str(_FPS), "-movflags", "+faststart", "-metadata", "creation_time=1970-01-01T00:00:00Z",
+        str(target),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise VaceFullChainError(f"cannot materialize full-length VACE control video: {exc}") from exc
+    _decode_video_contract(target, dimensions, _FPS, _FRAME_COUNT, "control video")
+    return _control_record(target, dimensions, sha256_file(source))
 
 
 def export_vace_job(job: ExperimentJob | Mapping[str, Any], output_dir: Path | str) -> dict[str, Any]:
@@ -224,8 +294,11 @@ def export_vace_job(job: ExperimentJob | Mapping[str, Any], output_dir: Path | s
             raise VaceFullChainError(f"snapshot first frame cannot be decoded: {exc}") from exc
         if dimensions[0] <= 0 or dimensions[1] <= 0:
             raise VaceFullChainError("snapshot first frame has invalid dimensions")
+        control = _materialize_control(
+            staging / snapshots["proxy_video"]["path"], staging / _CONTROL_PATH, dimensions
+        )
         mask_path = staging / "src_mask.mp4"
-        write_full_generation_mask(mask_path, dimensions, fps=16, frame_count=81)
+        write_full_generation_mask(mask_path, dimensions, fps=_FPS, frame_count=_FRAME_COUNT)
         document = {
             "schema_version": "1.0",
             "story_id": candidate.story_id,
@@ -233,12 +306,13 @@ def export_vace_job(job: ExperimentJob | Mapping[str, Any], output_dir: Path | s
             "conditioning_mode": "source_video",
             "source_hashes": candidate.document["source_hashes"],
             "snapshots": snapshots,
+            "control": control,
             "prompt": {
                 "text": candidate.prompt,
                 "sha256": hashlib.sha256(candidate.prompt.encode("utf-8")).hexdigest(),
             },
             "mapping": {
-                "src_video": "source/proxy.mp4",
+                "src_video": _CONTROL_PATH,
                 "src_mask": "src_mask.mp4",
                 "src_ref_images": ["source/first.png"],
                 "prompt": candidate.prompt,
@@ -283,7 +357,7 @@ def validate_vace_job(job_dir: Path | str) -> dict[str, Any]:
     document = _read_object(root / _JOB_NAME, "VACE job")
     required = {
         "schema_version", "story_id", "backend", "conditioning_mode", "source_hashes",
-        "snapshots", "prompt", "mapping", "mask", "inference", "server_contract", "evidence",
+        "snapshots", "control", "prompt", "mapping", "mask", "inference", "server_contract", "evidence",
     }
     if set(document) != required:
         raise VaceFullChainError("VACE job has unknown or missing fields")
@@ -319,8 +393,9 @@ def validate_vace_job(job_dir: Path | str) -> dict[str, Any]:
         raise VaceFullChainError("VACE snapshots are incomplete")
     for name, (_source, relative, digest) in expected_sources.items():
         _checked_snapshot(root, snapshots, name, relative, digest)
+    control_path = root / _CONTROL_PATH
     mapping = {
-        "src_video": "source/proxy.mp4", "src_mask": "src_mask.mp4",
+        "src_video": _CONTROL_PATH, "src_mask": "src_mask.mp4",
         "src_ref_images": ["source/first.png"], "prompt": canonical.prompt,
     }
     if document.get("mapping") != mapping:
@@ -329,12 +404,17 @@ def validate_vace_job(job_dir: Path | str) -> dict[str, Any]:
     with Image.open(first_path) as image:
         dimensions = image.size
         image.verify()
+    if not control_path.is_file() or document.get("control") != _control_record(
+        control_path, dimensions, snapshots["proxy_video"]["sha256"]
+    ):
+        raise VaceFullChainError("VACE control dimensions differ from first frame")
+    _decode_video_contract(control_path, dimensions, _FPS, _FRAME_COUNT, "control video")
     mask_path = root / "src_mask.mp4"
     expected_mask = _mask_record(mask_path, dimensions) if mask_path.is_file() else None
     if document.get("mask") != expected_mask:
         raise VaceFullChainError("VACE mask hash or metadata is invalid")
     try:
-        _verify_full_generation_mask(mask_path, dimensions, 16, 81)
+        _verify_full_generation_mask(mask_path, dimensions, _FPS, _FRAME_COUNT)
     except (OSError, RuntimeError) as exc:
         raise VaceFullChainError(f"VACE mask decode failed: {exc}") from exc
     return document

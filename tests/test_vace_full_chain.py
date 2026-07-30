@@ -20,7 +20,7 @@ class VaceFullChainTests(unittest.TestCase):
         matrix = compile_matrix(CONFIG)
         return next(job for job in matrix.jobs if job.backend == "vace")
 
-    def test_export_snapshots_whole_story_inputs_and_decodes_81_frame_mask(self):
+    def test_export_materializes_full_length_control_and_decodes_81_frame_inputs(self):
         from videoactagent.vace_full_chain import export_vace_job, validate_vace_job
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -56,9 +56,33 @@ class VaceFullChainTests(unittest.TestCase):
                 self.assertTrue(path.is_file())
                 self.assertEqual(record["bytes"], path.stat().st_size)
                 self.assertEqual(record["sha256"], sha256_file(path))
+            control = exported["control"]
+            control_path = job_dir / control["path"]
+            self.assertEqual(exported["mapping"]["src_video"], control["path"])
+            self.assertEqual(control["source_proxy_sha256"], exported["snapshots"]["proxy_video"]["sha256"])
+            self.assertEqual(control["frame_count"], 81)
+            self.assertEqual(control["fps"], 16)
+            self.assertEqual(control["timeline_duration_seconds"], 5.0625)
+            self.assertFalse(control["ai_interpolation"])
+            self.assertEqual(control["sha256"], sha256_file(control_path))
+            control_metadata, control_frames = self._decode_video(control_path)
+            self.assertEqual(control_metadata["size"], (960, 540))
+            self.assertEqual(control_metadata["fps"], 16.0)
+            self.assertEqual(len(control_frames), 81)
             mask = job_dir / "src_mask.mp4"
             self.assertEqual(exported["mask"]["sha256"], sha256_file(mask))
-            self.assertEqual(imageio_ffmpeg.count_frames_and_secs(str(mask))[0], 81)
+            mask_metadata, mask_frames = self._decode_video(mask)
+            self.assertEqual(mask_metadata["fps"], 16.0)
+            self.assertEqual(len(mask_frames), 81)
+
+    @staticmethod
+    def _decode_video(path: Path):
+        reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
+        try:
+            metadata = next(reader)
+            return metadata, list(reader)
+        finally:
+            reader.close()
 
     def test_validate_rejects_tampered_snapshot_hash_and_inference_contract(self):
         from videoactagent.vace_full_chain import VaceFullChainError, export_vace_job, validate_vace_job
@@ -94,6 +118,9 @@ class VaceFullChainTests(unittest.TestCase):
         self.assertIn("--query-gpu=timestamp,index,memory.used", script)
         self.assertIn("ffprobe", script)
         self.assertIn("sha256sum", script)
+        self.assertIn('int(video[0].get("nb_read_frames", 0)) == 81', script)
+        self.assertIn('video[0].get("avg_frame_rate") == "16/1"', script)
+        self.assertIn('duration_seconds - 5.0625', script)
         self.assertIn('if [ "$EXIT_CODE" -ne 0 ]; then', script)
         self.assertIn('exit 1', script)
         self.assertIn("trap - EXIT", script)

@@ -144,7 +144,7 @@ OUTPUT_VIDEO="$OUTPUT_DIR/out_video.mp4"
 DECODE_OK=false
 OUTPUT_SHA256=""
 if [ "$EXIT_CODE" -eq 0 ] && [ -s "$OUTPUT_VIDEO" ] && \
-  ffprobe -v error -count_frames -show_entries stream=codec_type,width,height,nb_read_frames \
+  ffprobe -v error -count_frames -show_entries stream=codec_type,width,height,avg_frame_rate,nb_read_frames:format=duration \
     -of json "$OUTPUT_VIDEO" >"$OUTPUT_DIR/output_decode.json"; then
   if "$VACE_PYTHON" - "$OUTPUT_DIR/output_decode.json" <<'PY'
 import json
@@ -152,7 +152,8 @@ import sys
 data = json.load(open(sys.argv[1], encoding="utf-8"))
 streams = data.get("streams", [])
 video = [item for item in streams if item.get("codec_type") == "video"]
-raise SystemExit(0 if len(video) == 1 and int(video[0].get("width", 0)) > 0 and int(video[0].get("height", 0)) > 0 and int(video[0].get("nb_read_frames", 0)) > 0 else 1)
+duration_seconds = float(data.get("format", {}).get("duration", 0))
+raise SystemExit(0 if len(video) == 1 and int(video[0].get("width", 0)) > 0 and int(video[0].get("height", 0)) > 0 and int(video[0].get("nb_read_frames", 0)) == 81 and video[0].get("avg_frame_rate") == "16/1" and abs(duration_seconds - 5.0625) <= 0.02 else 1)
 PY
   then
     DECODE_OK=true
