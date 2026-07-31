@@ -229,17 +229,45 @@ class SemanticStoryPlanTests(unittest.TestCase):
             with self.assertRaisesRegex(SemanticPlanError, "finite"):
                 SemanticStoryPlan.from_path(path)
 
-    def test_from_path_rejects_duplicate_keys_and_nonstandard_json_numbers(self):
-        invalid_texts = (
-            '{"schema_version":"1.0","schema_version":"1.0"}',
-            json.dumps(valid_document()).replace('"duration_seconds": 5.0', '"duration_seconds": NaN'),
+    def test_from_path_wraps_json_integer_digit_limit_error(self):
+        text = json.dumps(valid_document()).replace(
+            '"duration_seconds": 5.0',
+            f'"duration_seconds": {"9" * 5000}',
         )
-        for text in invalid_texts:
-            with self.subTest(text=text), tempfile.TemporaryDirectory() as directory:
-                path = Path(directory) / "plan.json"
-                path.write_text(text, encoding="utf-8")
-                with self.assertRaises(SemanticPlanError):
-                    SemanticStoryPlan.from_path(path)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "huge-json-integer.json"
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(SemanticPlanError, "cannot read semantic plan"):
+                SemanticStoryPlan.from_path(path)
+
+    def test_from_path_rejects_duplicate_key_in_otherwise_valid_document(self):
+        text = json.dumps(valid_document()).replace(
+            '"story_id": "example_story"',
+            '"story_id": "example_story", "story_id": "example_story"',
+            1,
+        )
+        self.assertEqual(
+            SemanticStoryPlan.from_dict(json.loads(text)).story_id,
+            "example_story",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "duplicate-key.json"
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(
+                SemanticPlanError, "duplicate JSON key: story_id"
+            ):
+                SemanticStoryPlan.from_path(path)
+
+    def test_from_path_rejects_nonstandard_json_numbers(self):
+        text = json.dumps(valid_document()).replace(
+            '"duration_seconds": 5.0', '"duration_seconds": NaN'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "nonstandard-number.json"
+            path.write_text(text, encoding="utf-8")
+            with self.assertRaises(SemanticPlanError):
+                SemanticStoryPlan.from_path(path)
 
     def test_station_reunion_pilot_has_five_locked_camera_states(self):
         plan = SemanticStoryPlan.from_path(PLAN_PATH)

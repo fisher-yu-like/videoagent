@@ -193,9 +193,9 @@ class SemanticStoryPlan:
                 object_pairs_hook=_reject_duplicate_keys,
                 parse_constant=_reject_json_constant,
             )
-        except (OSError, UnicodeError, json.JSONDecodeError, SemanticPlanError) as exc:
+            return cls.from_dict(data)
+        except (OSError, ValueError) as exc:
             raise SemanticPlanError(f"cannot read semantic plan {source}: {exc}") from exc
-        return cls.from_dict(data)
 
     @classmethod
     def from_dict(cls, value: Any) -> "SemanticStoryPlan":
