@@ -534,6 +534,9 @@ def _validate_trajectory_sources(
     trajectory_path: Path,
     authoring_path: Path,
     script: ShotScript,
+    semantic_plan: SemanticStoryPlan,
+    current_shotscript_path: Path,
+    current_semantic_path: Path,
 ) -> tuple[TrajectoryInstruction, dict[str, Any]]:
     try:
         instruction = TrajectoryInstruction.from_path(trajectory_path)
@@ -552,6 +555,74 @@ def _validate_trajectory_sources(
         or not str(authoring["author_id"]).strip()
     ):
         raise CodedDraftError("trajectory authoring evidence binding is invalid")
+    expected_bounds = [float(value) for value in script.world_bounds]
+    if authoring.get("world_bounds") != expected_bounds:
+        raise CodedDraftError("trajectory authoring world_bounds differ from ShotScript")
+    author_root = authoring_path.parent.resolve(strict=True)
+
+    def author_record(value: object, label: str) -> tuple[Path, dict[str, object]]:
+        if not isinstance(value, Mapping) or set(value) != {"path", "sha256", "bytes"}:
+            raise CodedDraftError(f"{label} record is invalid")
+        relative = value.get("path")
+        if not isinstance(relative, str) or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise CodedDraftError(f"{label} path is unsafe")
+        target = (author_root / relative).resolve(strict=True)
+        try:
+            target.relative_to(author_root)
+        except ValueError as exc:
+            raise CodedDraftError(f"{label} path escapes author workspace") from exc
+        if not target.is_file() or value.get("sha256") != _sha256(target) or value.get("bytes") != target.stat().st_size:
+            raise CodedDraftError(f"{label} record hash/size mismatch")
+        return target, dict(value)
+
+    source = authoring.get("source")
+    if not isinstance(source, Mapping) or set(source) != {"shotscript", "semantic_plan"}:
+        raise CodedDraftError("trajectory authoring source bindings are missing")
+    author_shot, shot_record = author_record(source["shotscript"], "authored ShotScript")
+    author_semantic, semantic_record = author_record(source["semantic_plan"], "authored semantic plan")
+    if shot_record["sha256"] != _sha256(current_shotscript_path):
+        raise CodedDraftError("authored ShotScript differs from current input")
+    if semantic_record["sha256"] != _sha256(current_semantic_path):
+        raise CodedDraftError("authored semantic plan differs from current input")
+    if ShotScript.from_path(author_shot).scene_id != script.scene_id:
+        raise CodedDraftError("authored ShotScript identity differs from current input")
+    if SemanticStoryPlan.from_path(author_semantic).to_dict() != semantic_plan.to_dict():
+        raise CodedDraftError("authored semantic plan differs from current input")
+    base_bundle_path, base_bundle_record = author_record(authoring.get("source_bundle"), "source bundle")
+    _base_manifest_path, base_manifest_record = author_record(authoring.get("source_manifest"), "source manifest")
+    author_manifest_path, author_manifest_record = author_record(
+        authoring.get("authoring_manifest"), "authoring manifest"
+    )
+    base_bundle = json.loads(base_bundle_path.read_text(encoding="utf-8"))
+    author_manifest = json.loads(author_manifest_path.read_text(encoding="utf-8"))
+    frames = authoring.get("source_frames")
+    base_frames = base_bundle.get("motion_semantics", {}).get("keyframes")
+    manifest_frames = author_manifest.get("keyframes")
+    semantic_frames = semantic_plan.semantic_keyframes
+    if not all(isinstance(value, list) for value in (frames, base_frames, manifest_frames)):
+        raise CodedDraftError("trajectory authoring frame bindings are missing")
+    if len(frames) != len(semantic_frames) or len(base_frames) != len(frames) or len(manifest_frames) != len(frames):
+        raise CodedDraftError("trajectory authoring frame counts differ")
+    verified_frames = []
+    for index, (frame, base, authored, semantic) in enumerate(
+        zip(frames, base_frames, manifest_frames, semantic_frames)
+    ):
+        if not all(isinstance(value, Mapping) for value in (frame, base, authored)):
+            raise CodedDraftError("trajectory authoring frame record is invalid")
+        _frame_path, frame_record = author_record(frame.get("diagnostic_frame"), f"K{index} frame")
+        if (
+            frame.get("id") != semantic.id
+            or frame.get("t") != semantic.t
+            or authored.get("id") != semantic.id
+            or authored.get("t") != semantic.t
+            or base.get("semantic_id") != semantic.id
+            or base.get("t") != semantic.t
+            or frame_record != authored.get("diagnostic_frame")
+            or frame_record.get("sha256") != base.get("diagnostic", {}).get("sha256")
+            or frame_record.get("bytes") != base.get("diagnostic", {}).get("bytes")
+        ):
+            raise CodedDraftError("trajectory authoring K/t/frame binding mismatch")
+        verified_frames.append(dict(frame))
     relative = authoring.get("trajectory_path")
     if relative != trajectory_path.name or trajectory_path.parent != authoring_path.parent:
         raise CodedDraftError("trajectory authoring path binding is invalid")
@@ -569,7 +640,13 @@ def _validate_trajectory_sources(
         or any(track.primitive != "polyline" or track.semantic != "move" for track in actor_tracks)
     ):
         raise CodedDraftError("trajectory must contain exactly one move track per actor")
-    return instruction, dict(authoring)
+    proof = dict(authoring)
+    proof["verified_bindings"] = {
+        "source_bundle": base_bundle_record, "source_manifest": base_manifest_record,
+        "authoring_manifest": author_manifest_record, "source_frames": verified_frames,
+        "shotscript": shot_record, "semantic_plan": semantic_record,
+    }
+    return instruction, proof
 
 
 def _validate_trajectory_render_manifest(
@@ -657,10 +734,44 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         explicit_authoring = None
         if trajectory is not None:
             explicit_instruction, explicit_authoring = _validate_trajectory_sources(
-                sources_dir / "trajectory.json",
-                sources_dir / "trajectory_authoring.json",
+                trajectory,
+                trajectory_authoring,
                 script,
+                snapshot_plan,
+                sources_dir / "shotscript.json",
+                sources_dir / "semantic_plan.json",
             )
+            binding_root = trajectory_authoring.parent.resolve(strict=True)
+            verified_bindings = explicit_authoring["verified_bindings"]
+            for key, filename in (
+                ("source_bundle", "trajectory_source_bundle.json"),
+                ("source_manifest", "trajectory_source_manifest.json"),
+                ("authoring_manifest", "trajectory_author_manifest.json"),
+            ):
+                source_records[f"trajectory_{key}"] = _snapshot(
+                    binding_root / verified_bindings[key]["path"],
+                    sources_dir / filename,
+                    f"trajectory {key}",
+                )
+            trajectory_frame_records = []
+            for frame in verified_bindings["source_frames"]:
+                key = frame["id"]
+                name = f"trajectory_reference_{key}.png"
+                record_key = f"trajectory_reference_{key}"
+                source_records[record_key] = _snapshot(
+                    binding_root / frame["diagnostic_frame"]["path"],
+                    sources_dir / name,
+                    f"trajectory reference {key}",
+                )
+                trajectory_frame_records.append({
+                    "id": frame["id"], "t": frame["t"],
+                    "frame_index": frame["frame_index"],
+                    "source": {
+                        "path": source_records[record_key]["snapshot_path"],
+                        "sha256": source_records[record_key]["snapshot_sha256"],
+                        "bytes": source_records[record_key]["bytes"],
+                    },
+                })
 
         for style in ("diagnostic", "clay"):
             _run_profile(
@@ -771,6 +882,32 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
                         },
                         "projection_policy": explicit_authoring["projection_policy"],
                         "camera_policy": explicit_authoring["camera_policy"],
+                        "authoring_bindings": {
+                            "shotscript": {
+                                "sha256": source_records["shotscript"]["snapshot_sha256"],
+                                "bytes": source_records["shotscript"]["bytes"],
+                            },
+                            "semantic_plan": {
+                                "sha256": source_records["semantic_plan"]["snapshot_sha256"],
+                                "bytes": source_records["semantic_plan"]["bytes"],
+                            },
+                            "source_bundle": {
+                                "path": source_records["trajectory_source_bundle"]["snapshot_path"],
+                                "sha256": source_records["trajectory_source_bundle"]["snapshot_sha256"],
+                                "bytes": source_records["trajectory_source_bundle"]["bytes"],
+                            },
+                            "source_manifest": {
+                                "path": source_records["trajectory_source_manifest"]["snapshot_path"],
+                                "sha256": source_records["trajectory_source_manifest"]["snapshot_sha256"],
+                                "bytes": source_records["trajectory_source_manifest"]["bytes"],
+                            },
+                            "authoring_manifest": {
+                                "path": source_records["trajectory_authoring_manifest"]["snapshot_path"],
+                                "sha256": source_records["trajectory_authoring_manifest"]["snapshot_sha256"],
+                                "bytes": source_records["trajectory_authoring_manifest"]["bytes"],
+                            },
+                            "source_frames": trajectory_frame_records,
+                        },
                     }
                     if explicit_instruction is not None and explicit_authoring is not None
                     else {

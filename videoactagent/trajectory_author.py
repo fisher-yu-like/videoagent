@@ -399,7 +399,19 @@ def save_authoring(manifest_path: Path | str, payload: Mapping[str, Any]) -> Pat
             "world_bounds": doc["world_bounds"], "projection_policy": PROJECTION_POLICY,
             "camera_policy": CAMERA_POLICY, "source_bundle": doc["source"]["coded_bundle"],
             "source_manifest": doc["source"]["coded_manifest"],
-            "source_frames": [item["diagnostic_frame"] for item in keyframes],
+            "source": {
+                "shotscript": doc["source"]["shotscript"],
+                "semantic_plan": doc["source"]["semantic_plan"],
+            },
+            "authoring_manifest": _record(manifest_path, root),
+            "source_frames": [
+                {
+                    "id": item["id"], "t": item["t"],
+                    "frame_index": item["frame_index"],
+                    "diagnostic_frame": item["diagnostic_frame"],
+                }
+                for item in keyframes
+            ],
             "point_count": len(captured), "auto_filled_points": 0,
         }
         authoring_tmp.write_bytes(_bytes(evidence))

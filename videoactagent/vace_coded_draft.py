@@ -481,9 +481,10 @@ def _verified_coded_draft(
     explicit_value = motion.get("explicit_trajectory_binding")
     explicit = None
     if isinstance(explicit_value, Mapping) and explicit_value.get("available") is True:
-        if set(explicit_value) != {
+        allowed_explicit = {
             "available", "trajectory", "authoring", "projection_policy", "camera_policy"
-        }:
+        }
+        if set(explicit_value) not in (allowed_explicit, allowed_explicit | {"authoring_bindings"}):
             raise VaceCodedDraftError("explicit trajectory binding fields are invalid")
         trajectory_path = _verify_record(root, explicit_value.get("trajectory"), "explicit trajectory")
         authoring_path = _verify_record(root, explicit_value.get("authoring"), "trajectory authoring")
@@ -506,9 +507,40 @@ def _verified_coded_draft(
             or authoring_doc.get("auto_filled_points") != 0
         ):
             raise VaceCodedDraftError("explicit trajectory authoring binding is invalid")
+        binding_evidence = explicit_value.get("authoring_bindings")
+        if binding_evidence is not None:
+            if not isinstance(binding_evidence, Mapping):
+                raise VaceCodedDraftError("trajectory authoring bindings are invalid")
+            for name in ("source_bundle", "source_manifest", "authoring_manifest"):
+                record = binding_evidence.get(name)
+                _verify_record(root, record, f"trajectory {name}")
+                if inventory.get(str(record.get("path"))) != record:
+                    raise VaceCodedDraftError(f"trajectory {name} is absent from inventory")
+            semantic_proof = binding_evidence.get("semantic_plan")
+            if (
+                not isinstance(semantic_proof, Mapping)
+                or semantic_proof.get("sha256") != semantic_binding.get("snapshot_sha256")
+                or semantic_proof.get("bytes") != semantic_binding.get("bytes")
+            ):
+                raise VaceCodedDraftError("trajectory semantic authoring proof mismatch")
+            frames = binding_evidence.get("source_frames")
+            if not isinstance(frames, list) or len(frames) != len(provenance["keyframes"]):
+                raise VaceCodedDraftError("trajectory authored frame evidence mismatch")
+            for frame, keyframe in zip(frames, provenance["keyframes"]):
+                if (
+                    not isinstance(frame, Mapping)
+                    or frame.get("id") != keyframe["semantic_id"]
+                    or frame.get("t") != keyframe["t"]
+                    or not isinstance(frame.get("source"), Mapping)
+                ):
+                    raise VaceCodedDraftError("trajectory authored K/t evidence mismatch")
+                _verify_record(root, frame["source"], "trajectory authored frame")
+                if inventory.get(str(frame["source"].get("path"))) != frame["source"]:
+                    raise VaceCodedDraftError("trajectory authored frame absent from inventory")
         explicit = {
             "trajectory_path": trajectory_path, "authoring_path": authoring_path,
             "policy": explicit_value["projection_policy"],
+            "authoring_bindings": binding_evidence,
         }
     elif explicit_value is not None and (
         not isinstance(explicit_value, Mapping) or explicit_value.get("available") is not False
@@ -720,6 +752,13 @@ def build_vace_coded_draft_job(
                         "authoring_path": authoring_record["path"],
                         "authoring_sha256": authoring_record["sha256"],
                         "policy": explicit["policy"],
+                        **(
+                            {"authoring_bindings_sha256": hashlib.sha256(
+                                json.dumps(explicit["authoring_bindings"], sort_keys=True,
+                                           separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                            ).hexdigest()}
+                            if explicit.get("authoring_bindings") is not None else {}
+                        ),
                     }
                     if explicit is not None else {
                         "available": False, "path": None, "sha256": None,
@@ -1002,6 +1041,13 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
             "authoring_path": "source/trajectory_authoring.json",
             "authoring_sha256": source["trajectory_authoring"]["sha256"],
             "policy": source_explicit["projection_policy"],
+            **(
+                {"authoring_bindings_sha256": hashlib.sha256(
+                    json.dumps(source_explicit["authoring_bindings"], sort_keys=True,
+                               separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                ).hexdigest()}
+                if source_explicit.get("authoring_bindings") is not None else {}
+            ),
         }
         if has_explicit_source else {
             "available": False,

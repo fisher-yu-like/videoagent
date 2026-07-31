@@ -169,6 +169,14 @@ class TrajectoryAuthorTests(unittest.TestCase):
             evidence = json.loads((trajectory.parent / "trajectory_authoring.json").read_text("utf-8"))
             self.assertEqual(evidence["author_id"], "human")
             self.assertEqual(evidence["trajectory_sha256"], _sha(trajectory))
+            self.assertEqual(evidence["source"]["shotscript"]["sha256"],
+                             _sha(trajectory.parent / "source" / "shotscript.json"))
+            self.assertEqual(evidence["source"]["semantic_plan"]["sha256"],
+                             _sha(trajectory.parent / "source" / "semantic_plan.json"))
+            self.assertEqual([item["id"] for item in evidence["source_frames"]],
+                             [f"K{i}" for i in range(5)])
+            self.assertEqual(evidence["authoring_manifest"]["sha256"],
+                             _sha(manifest))
 
     def test_save_rejects_duplicates_unknowns_out_of_range_and_blank_author(self):
         from videoactagent.trajectory_author import prepare_workspace, save_authoring

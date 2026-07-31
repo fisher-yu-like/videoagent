@@ -27,6 +27,11 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _record(path: Path, root: Path) -> dict[str, object]:
+    return {"path": path.relative_to(root).as_posix(), "sha256": _sha256(path),
+            "bytes": path.stat().st_size}
+
+
 def _write_video(
     path: Path,
     *,
@@ -200,6 +205,50 @@ class CodedDraftTests(unittest.TestCase):
         ]
 
     def _trajectory_inputs(self) -> tuple[Path, Path]:
+        author_root = self.root / "author"
+        source_dir = author_root / "source"
+        reference_dir = author_root / "reference"
+        source_dir.mkdir(parents=True)
+        reference_dir.mkdir()
+        (source_dir / "shotscript.json").write_bytes(self.shotscript.read_bytes())
+        (source_dir / "semantic_plan.json").write_bytes(self.semantic.read_bytes())
+        (source_dir / "bundle.json").write_text('{"story_id":"tiny_story"}', "utf-8")
+        (source_dir / "manifest.json").write_text('{"story_id":"tiny_story"}', "utf-8")
+        semantic_doc = json.loads(self.semantic.read_text("utf-8"))
+        frame_evidence = []
+        for index, item in enumerate(semantic_doc["semantic_keyframes"]):
+            frame = reference_dir / f"K{index}.png"
+            Image.new("RGB", (16, 9), (20 + index, 30, 40)).save(frame)
+            frame_evidence.append({
+                "id": item["id"], "t": item["t"],
+                "frame_index": round(item["t"] * 3),
+                "diagnostic_frame": _record(frame, author_root),
+            })
+        (source_dir / "bundle.json").write_text(json.dumps({
+            "story_id": "tiny_story",
+            "motion_semantics": {"keyframes": [
+                {"semantic_id": item["id"], "t": item["t"],
+                 "frame_index": item["frame_index"],
+                 "diagnostic": item["diagnostic_frame"]}
+                for item in frame_evidence
+            ]},
+        }), "utf-8")
+        source_records = {
+            "coded_bundle": _record(source_dir / "bundle.json", author_root),
+            "coded_manifest": _record(source_dir / "manifest.json", author_root),
+            "shotscript": _record(source_dir / "shotscript.json", author_root),
+            "semantic_plan": _record(source_dir / "semantic_plan.json", author_root),
+        }
+        author_manifest = author_root / "trajectory_author_manifest.json"
+        author_manifest.write_text(json.dumps({
+            "schema_version": "1.0", "story_id": "tiny_story", "shot_id": "whole",
+            "actors": ["actor_a", "actor_b"], "keyframes": frame_evidence,
+            "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+            "timeline": {"frame_count": 120, "fps": 24, "duration_seconds": 1.0},
+            "projection_policy": "top_down_world_bounds_linear_y_up_z0",
+            "camera_policy": "shotscript_locked", "source": source_records,
+            "artifact_inventory": [], "human_points_present": False,
+        }), "utf-8")
         instruction = TrajectoryInstruction(
             scene_id="tiny_story", shot_id="whole", duration_seconds=1.0,
             sample_count=120,
@@ -213,15 +262,21 @@ class CodedDraftTests(unittest.TestCase):
                 for j, actor in enumerate(("actor_a", "actor_b"))
             ),
         )
-        trajectory = self.root / "trajectory.json"
+        trajectory = author_root / "trajectory.json"
         trajectory.write_bytes(canonical_bytes(instruction))
-        authoring = self.root / "trajectory_authoring.json"
+        authoring = author_root / "trajectory_authoring.json"
         authoring.write_text(json.dumps({
             "schema_version": "1.0", "author_id": "real_human",
             "trajectory_path": "trajectory.json", "trajectory_sha256": _sha256(trajectory),
             "world_bounds": [-5.0, 5.0, -4.0, 4.0],
             "projection_policy": "top_down_world_bounds_linear_y_up_z0",
             "camera_policy": "shotscript_locked", "auto_filled_points": 0,
+            "source_bundle": source_records["coded_bundle"],
+            "source_manifest": source_records["coded_manifest"],
+            "source": {"shotscript": source_records["shotscript"],
+                       "semantic_plan": source_records["semantic_plan"]},
+            "authoring_manifest": _record(author_manifest, author_root),
+            "source_frames": frame_evidence,
         }), "utf-8")
         return trajectory, authoring
 
@@ -292,6 +347,41 @@ class CodedDraftTests(unittest.TestCase):
         self.assertEqual(result, 2)
         run.assert_not_called()
         self.assertFalse(self.output.exists())
+
+    def test_explicit_trajectory_rejects_stale_world_bounds(self):
+        from videoactagent.coded_draft import main
+
+        trajectory, authoring = self._trajectory_inputs()
+        evidence = json.loads(authoring.read_text("utf-8"))
+        evidence["world_bounds"] = [-50.0, 50.0, -40.0, 40.0]
+        authoring.write_text(json.dumps(evidence), "utf-8")
+        with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+            result = main(self._args("--trajectory", str(trajectory),
+                                     "--trajectory-authoring", str(authoring)))
+        self.assertEqual(result, 2)
+        run.assert_not_called()
+
+    def test_explicit_trajectory_rejects_replaced_reference_frame_even_if_records_are_rehashed(self):
+        from videoactagent.coded_draft import main
+
+        trajectory, authoring = self._trajectory_inputs()
+        author_root = authoring.parent
+        frame = author_root / "reference" / "K0.png"
+        Image.new("RGB", (16, 9), (250, 1, 2)).save(frame)
+        changed = _record(frame, author_root)
+        evidence = json.loads(authoring.read_text("utf-8"))
+        evidence["source_frames"][0]["diagnostic_frame"] = changed
+        manifest_path = author_root / "trajectory_author_manifest.json"
+        manifest = json.loads(manifest_path.read_text("utf-8"))
+        manifest["keyframes"][0]["diagnostic_frame"] = changed
+        manifest_path.write_text(json.dumps(manifest), "utf-8")
+        evidence["authoring_manifest"] = _record(manifest_path, author_root)
+        authoring.write_text(json.dumps(evidence), "utf-8")
+        with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+            result = main(self._args("--trajectory", str(trajectory),
+                                     "--trajectory-authoring", str(authoring)))
+        self.assertEqual(result, 2)
+        run.assert_not_called()
 
     @staticmethod
     def _successful_runner(command, **_kwargs):
