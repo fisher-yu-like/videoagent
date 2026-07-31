@@ -32,6 +32,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--fps", type=positive_int, default=3)
     parser.add_argument("--resolution", type=resolution_value, default=(960, 540))
+    parser.add_argument("--timeout", type=positive_int, default=180)
     return parser.parse_args(argv)
 
 
@@ -58,14 +59,27 @@ def main(argv: list[str] | None = None) -> int:
         "--resolution",
         f"{args.resolution[0]}x{args.resolution[1]}",
     ]
-    completed = subprocess.run(
-        command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=180,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=args.timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _output_text(exc.stdout)
+        stderr = _output_text(exc.stderr)
+        if stdout:
+            print(stdout, end="")
+        if stderr:
+            print(stderr, end="", file=sys.stderr)
+        print(
+            f"BLENDER_RUNNER_TIMEOUT timeout_seconds={args.timeout}",
+            file=sys.stderr,
+        )
+        return 124
     if completed.stdout:
         print(completed.stdout, end="")
     if completed.stderr:
@@ -77,6 +91,14 @@ def main(argv: list[str] | None = None) -> int:
         print("Blender exited without BLENDER_PROXY_OK", file=sys.stderr)
         return 1
     return 0
+
+
+def _output_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
 
 
 if __name__ == "__main__":

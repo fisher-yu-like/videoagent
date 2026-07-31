@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import FrozenInstanceError
 import importlib.util
 import inspect
@@ -66,6 +66,7 @@ class BlenderRunnerRenderProfileTests(unittest.TestCase):
         self.assertEqual(args.render_style, "diagnostic")
         self.assertEqual(args.fps, 3)
         self.assertEqual(args.resolution, (960, 540))
+        self.assertEqual(args.timeout, 180)
 
     def test_runner_forwards_effective_profile_to_blender_script(self):
         completed = types.SimpleNamespace(returncode=0, stdout="BLENDER_PROXY_OK\n", stderr="")
@@ -78,6 +79,8 @@ class BlenderRunnerRenderProfileTests(unittest.TestCase):
                     "12",
                     "--resolution",
                     "1280x720",
+                    "--timeout",
+                    "7",
                 )
             )
 
@@ -86,6 +89,22 @@ class BlenderRunnerRenderProfileTests(unittest.TestCase):
         self.assertEqual(command[command.index("--render-style") + 1], "clay")
         self.assertEqual(command[command.index("--fps") + 1], "12")
         self.assertEqual(command[command.index("--resolution") + 1], "1280x720")
+        self.assertEqual(run.call_args.kwargs["timeout"], 7)
+
+    def test_runner_timeout_returns_124_and_preserves_partial_output(self):
+        error = subprocess.TimeoutExpired(
+            ["blender.exe"], 7, output="partial stdout\n", stderr="partial stderr\n"
+        )
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(blender_runner.subprocess, "run", side_effect=error), \
+            redirect_stdout(stdout), redirect_stderr(stderr):
+            result = blender_runner.main(self.runner_args("--timeout", "7"))
+
+        self.assertEqual(result, 124)
+        self.assertIn("partial stdout", stdout.getvalue())
+        self.assertIn("partial stderr", stderr.getvalue())
+        self.assertIn("BLENDER_RUNNER_TIMEOUT", stderr.getvalue())
 
     def test_invalid_profile_is_rejected_before_blender_launch(self):
         invalid_cases = (
@@ -96,6 +115,7 @@ class BlenderRunnerRenderProfileTests(unittest.TestCase):
             ("--resolution", "1280"),
             ("--resolution", "0x720"),
             ("--resolution", "1280X720"),
+            ("--timeout", "0"),
         )
         for flag, value in invalid_cases:
             with self.subTest(flag=flag, value=value), mock.patch.object(

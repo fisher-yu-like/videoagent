@@ -20,6 +20,7 @@ import imageio_ffmpeg
 from PIL import Image
 
 from videoactagent.semantic_plan import SemanticPlanError, SemanticStoryPlan
+from videoactagent.shotscript import ShotScript, ShotScriptError
 
 
 class CodedDraftError(ValueError):
@@ -48,6 +49,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--fps", type=_positive_int, default=24)
     parser.add_argument("--resolution", type=_resolution, default=(960, 540))
+    parser.add_argument("--render-timeout", type=_positive_int, default=300)
     return parser.parse_args(argv)
 
 
@@ -61,7 +63,9 @@ def _sha256(path: Path) -> str:
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
-    payload = (json.dumps(value, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    payload = (
+        json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    ).encode("utf-8")
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)
@@ -131,6 +135,8 @@ def _run_profile(
     fps: int,
     resolution: tuple[int, int],
     log_path: Path,
+    failure_dir: Path,
+    timeout: int,
 ) -> None:
     command = [
         sys.executable,
@@ -148,27 +154,89 @@ def _run_profile(
         str(fps),
         "--resolution",
         f"{resolution[0]}x{resolution[1]}",
+        "--timeout",
+        str(timeout),
     ]
-    completed = subprocess.run(
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout + 10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        log = _render_log(
+            command,
+            timeout=timeout,
+            outcome="timeout",
+            returncode=None,
+            stdout=_subprocess_text(exc.stdout),
+            stderr=_subprocess_text(exc.stderr),
+        )
+        _publish_failure_log(failure_dir, style, log)
+        raise CodedDraftError(f"{style} Blender runner exceeded {timeout} seconds") from exc
+
+    log = _render_log(
         command,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=300,
+        timeout=timeout,
+        outcome="completed",
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(
-        f"COMMAND={json.dumps(command, ensure_ascii=False)}\n"
-        f"RETURN_CODE={completed.returncode}\n"
-        "--- STDOUT ---\n"
-        f"{completed.stdout or ''}"
-        "\n--- STDERR ---\n"
-        f"{completed.stderr or ''}",
-        encoding="utf-8",
-    )
+    log_path.write_text(log, encoding="utf-8")
     if completed.returncode != 0:
+        _publish_failure_log(failure_dir, style, log)
         raise CodedDraftError(f"{style} Blender render failed with exit code {completed.returncode}")
+
+
+def _subprocess_text(value: str | bytes | None) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _render_log(
+    command: list[str],
+    *,
+    timeout: int,
+    outcome: str,
+    returncode: int | None,
+    stdout: str,
+    stderr: str,
+) -> str:
+    return (
+        f"COMMAND={json.dumps(command, ensure_ascii=False)}\n"
+        f"TIMEOUT_SECONDS={timeout}\n"
+        f"OUTCOME={outcome}\n"
+        f"RETURN_CODE={returncode}\n"
+        "--- STDOUT ---\n"
+        f"{stdout}"
+        "\n--- STDERR ---\n"
+        f"{stderr}"
+    )
+
+
+def _publish_failure_log(failure_dir: Path, style: str, contents: str) -> None:
+    temporary = failure_dir.parent / f".{failure_dir.name}.{uuid4().hex}.tmp"
+    temporary.mkdir()
+    try:
+        log_path = temporary / f"{style}.log"
+        with log_path.open("xb") as handle:
+            handle.write(contents.encode("utf-8"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        if failure_dir.exists():
+            raise CodedDraftError(f"failure evidence already exists: {failure_dir}")
+        os.rename(temporary, failure_dir)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary, ignore_errors=True)
 
 
 def _close_reader(reader: object) -> None:
@@ -192,6 +260,7 @@ def _decode_video(
     reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
     selected: dict[int, Image.Image] = {}
     frame_count = 0
+    pixel_digest = hashlib.sha256()
     try:
         try:
             metadata = next(reader)
@@ -227,6 +296,7 @@ def _decode_video(
                 raise CodedDraftError(f"decoded frame {index} has an invalid byte count: {path}")
             if index in selected_indices:
                 selected[index] = Image.frombytes("RGB", actual_resolution, frame).copy()
+            pixel_digest.update(frame)
             frame_count += 1
     except (OSError, RuntimeError, ValueError) as exc:
         if isinstance(exc, CodedDraftError):
@@ -264,6 +334,7 @@ def _decode_video(
             "resolution": [actual_resolution[0], actual_resolution[1]],
             "codec": metadata.get("codec"),
             "bytes": path.stat().st_size,
+            "decoded_pixel_sha256": pixel_digest.hexdigest(),
         },
         selected,
     )
@@ -295,21 +366,124 @@ def _artifact_inventory(root: Path, below: Path) -> list[dict[str, object]]:
     ]
 
 
+def _verify_final_inventory(
+    root: Path, records: list[Mapping[str, object]], *, ignored: set[str]
+) -> None:
+    expected: dict[str, Mapping[str, object]] = {}
+    resolved_root = root.resolve(strict=True)
+    for record in records:
+        path_text = record.get("path")
+        if not isinstance(path_text, str) or not path_text:
+            raise CodedDraftError("inventory record has no safe path")
+        relative = Path(path_text)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise CodedDraftError(f"unsafe inventory path: {path_text}")
+        target = (resolved_root / relative).resolve(strict=False)
+        try:
+            target.relative_to(resolved_root)
+        except ValueError as exc:
+            raise CodedDraftError(f"inventory path escapes staging: {path_text}") from exc
+        canonical = relative.as_posix()
+        if canonical in expected:
+            raise CodedDraftError(f"duplicate inventory path: {canonical}")
+        expected[canonical] = record
+
+    actual = {
+        path.relative_to(root).as_posix(): path
+        for path in root.rglob("*")
+        if path.is_file() and path.relative_to(root).as_posix() not in ignored
+    }
+    if set(actual) != set(expected):
+        raise CodedDraftError(
+            "final staging inventory differs from the declared manifest inventory"
+        )
+    for relative, target in actual.items():
+        record = expected[relative]
+        if record.get("bytes") != target.stat().st_size or record.get("sha256") != _sha256(target):
+            raise CodedDraftError(f"final hash verification failed: {relative}")
+
+
+def _validate_semantic_ids(plan: SemanticStoryPlan) -> None:
+    ids = [keyframe.id for keyframe in plan.semantic_keyframes]
+    expected = [f"K{index}" for index in range(len(ids))]
+    if ids != expected:
+        raise CodedDraftError(
+            f"semantic keyframe ids must be the continuous sequence {expected}"
+        )
+
+
+def _safe_semantic_frame_path(root: Path, filename: str) -> Path:
+    resolved_root = root.resolve(strict=False)
+    target = (resolved_root / filename).resolve(strict=False)
+    try:
+        target.relative_to(resolved_root)
+    except ValueError as exc:
+        raise CodedDraftError("semantic frame path escapes its output directory") from exc
+    return target
+
+
+def _validate_shotscript(
+    path: Path, plan: SemanticStoryPlan, effective_fps: int
+) -> tuple[ShotScript, int]:
+    script = ShotScript.from_path(path)
+    if script.scene_id != plan.story_id:
+        raise CodedDraftError(
+            f"ShotScript scene_id {script.scene_id!r} does not match story_id {plan.story_id!r}"
+        )
+    if len(script.shots) != 1:
+        raise CodedDraftError("coded drafts require exactly one whole-story shot")
+    durations = [shot.duration for shot in script.shots]
+    if any(not math.isfinite(duration) or duration <= 0 for duration in durations):
+        raise CodedDraftError("every ShotScript duration must be finite and positive")
+    total_duration = math.fsum(durations)
+    if not math.isclose(
+        total_duration, plan.duration_seconds, rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise CodedDraftError(
+            f"ShotScript duration {total_duration} does not match semantic duration {plan.duration_seconds}"
+        )
+    frames = [round(duration * effective_fps) for duration in durations]
+    if any(frame_count <= 0 for frame_count in frames):
+        raise CodedDraftError("every ShotScript shot must round to at least one frame")
+    return script, sum(frames)
+
+
+def _validate_render_report(
+    path: Path,
+    *,
+    style: str,
+    fps: int,
+    resolution: tuple[int, int],
+) -> None:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CodedDraftError(f"cannot parse {style} render report: {exc}") from exc
+    if not isinstance(report, Mapping) or report.get("render_style") != style:
+        raise CodedDraftError(f"{style} render report has the wrong render_style")
+    profile = report.get("effective_profile")
+    if not isinstance(profile, Mapping):
+        raise CodedDraftError(f"{style} render report has no effective_profile")
+    if profile.get("fps") != fps or profile.get("resolution") != list(resolution):
+        raise CodedDraftError(f"{style} render report profile does not match the request")
+
+
 def build_coded_draft(args: argparse.Namespace) -> Path:
     blender = _existing_file(args.blender, "Blender executable")
     shotscript = _existing_file(args.shotscript, "ShotScript")
     prompt = _existing_file(args.prompt, "prompt")
     semantic_path = _existing_file(args.semantic_plan, "semantic plan")
     output = _output_path(args.output_dir)
+    failure_dir = output.with_name(f"{output.name}.failed")
+    if failure_dir.exists():
+        raise CodedDraftError(f"failure evidence already exists: {failure_dir}")
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = output.parent / f".{output.name}.{uuid4().hex}.staging"
     staging.mkdir()
 
     try:
         plan = SemanticStoryPlan.from_path(semantic_path)
-        expected_frames = round(plan.duration_seconds * args.fps)
-        if expected_frames <= 0:
-            raise CodedDraftError("semantic duration and fps produce zero frames")
+        _validate_semantic_ids(plan)
 
         sources_dir = staging / "sources"
         sources_dir.mkdir()
@@ -324,6 +498,9 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         snapshot_plan = SemanticStoryPlan.from_path(semantic_snapshot)
         if snapshot_plan.to_dict() != plan.to_dict():
             raise CodedDraftError("semantic plan snapshot changed meaning")
+        _script, expected_frames = _validate_shotscript(
+            sources_dir / "shotscript.json", snapshot_plan, args.fps
+        )
 
         for style in ("diagnostic", "clay"):
             _run_profile(
@@ -334,6 +511,8 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
                 fps=args.fps,
                 resolution=args.resolution,
                 log_path=staging / "logs" / f"{style}.log",
+                failure_dir=failure_dir,
+                timeout=args.render_timeout,
             )
 
         indices = [
@@ -345,6 +524,12 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         decoded: dict[str, dict[int, Image.Image]] = {}
         for style in ("diagnostic", "clay"):
             video = staging / "renders" / style / "station_proxy.mp4"
+            _validate_render_report(
+                staging / "renders" / style / "trajectory_report.json",
+                style=style,
+                fps=args.fps,
+                resolution=args.resolution,
+            )
             media, selected = _decode_video(
                 video,
                 expected_frames=expected_frames,
@@ -358,6 +543,13 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
 
         if videos["diagnostic"]["sha256"] == videos["clay"]["sha256"]:
             raise CodedDraftError("diagnostic and clay videos must not be identical")
+        if (
+            videos["diagnostic"]["media"]["decoded_pixel_sha256"]
+            == videos["clay"]["media"]["decoded_pixel_sha256"]
+        ):
+            raise CodedDraftError(
+                "diagnostic and clay videos decode to identical frame pixels"
+            )
 
         semantic_frames: list[dict[str, object]] = []
         sheet = Image.new(
@@ -372,7 +564,9 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
             }
             for column, style in enumerate(("diagnostic", "clay")):
                 image = decoded[style][index]
-                path = staging / "semantic_frames" / f"{keyframe.id}_{style}.png"
+                path = _safe_semantic_frame_path(
+                    staging / "semantic_frames", f"{keyframe.id}_{style}.png"
+                )
                 _save_png(image, path)
                 record[style] = _relative_record(path, staging)
                 sheet.paste(image, (column * args.resolution[0], row * args.resolution[1]))
@@ -418,6 +612,23 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
             if _sha256(source) != record["original_sha256"] or _sha256(snapshot) != record["snapshot_sha256"]:
                 raise CodedDraftError(f"{key} source binding changed during render")
 
+        inventory_records: list[Mapping[str, object]] = [
+            {
+                "path": record["snapshot_path"],
+                "sha256": record["snapshot_sha256"],
+                "bytes": record["bytes"],
+            }
+            for record in source_records.values()
+        ]
+        inventory_records.extend(render_artifacts)
+        inventory_records.extend(render_logs)
+        inventory_records.extend(
+            frame[style]
+            for frame in semantic_frames
+            for style in ("diagnostic", "clay")
+        )
+        inventory_records.extend((contact_sheet, _relative_record(bundle_path, staging)))
+
         manifest = {
             "schema_version": "1.0",
             "story_id": plan.story_id,
@@ -437,8 +648,10 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
                 "render_logs": render_logs,
             },
             "backend_consumed": False,
+            "artifact_inventory": inventory_records,
         }
         _atomic_json(staging / "manifest.json", manifest)
+        _verify_final_inventory(staging, inventory_records, ignored={"manifest.json"})
         os.replace(staging, output)
         return output
     except Exception:
@@ -456,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
     except (
         CodedDraftError,
         SemanticPlanError,
+        ShotScriptError,
         OSError,
         UnicodeError,
         json.JSONDecodeError,

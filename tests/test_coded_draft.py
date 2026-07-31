@@ -44,6 +44,29 @@ def _write_video(
         writer.close()
 
 
+def _write_report(
+    output_dir: Path,
+    *,
+    style: str,
+    fps: int = 4,
+    resolution: tuple[int, int] = (64, 48),
+    frames: int = 4,
+) -> None:
+    (output_dir / "trajectory_report.json").write_text(
+        json.dumps(
+            {
+                "render_style": style,
+                "effective_profile": {
+                    "fps": fps,
+                    "resolution": list(resolution),
+                },
+                "rendered_frames": frames,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def _semantic_document(duration: float = 1.0) -> dict[str, object]:
     times = (0.0, 0.25, 0.5, 1.0)
     keyframes = [
@@ -81,6 +104,53 @@ def _semantic_document(duration: float = 1.0) -> dict[str, object]:
     }
 
 
+def _shotscript_document() -> dict[str, object]:
+    return {
+        "scene_id": "tiny_story",
+        "environment_preset": "station",
+        "fps": 3,
+        "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+        "shots": [
+            {
+                "shot_id": "whole",
+                "duration": 1.0,
+                "prompt": "One continuous approach.",
+                "camera": {
+                    "shot_size": "wide",
+                    "focal_length_mm": 35.0,
+                    "motion": "static",
+                    "start": [0.0, -10.0, 6.0],
+                    "end": [0.0, -10.0, 6.0],
+                    "look_at": "actors_midpoint",
+                },
+                "actors": [
+                    {
+                        "id": "actor_a",
+                        "color": "#777777",
+                        "start": [-2.0, 0.0, 0.0],
+                        "end": [0.0, 0.0, 0.0],
+                        "action": "walk",
+                        "facing": "actor_b",
+                    },
+                    {
+                        "id": "actor_b",
+                        "color": "#999999",
+                        "start": [1.0, 0.0, 0.0],
+                        "end": [1.0, 0.0, 0.0],
+                        "action": "wait",
+                        "facing": "actor_a",
+                    },
+                ],
+                "continuity": {
+                    "previous_shot": None,
+                    "screen_direction": "left_to_right",
+                    "axis_side": "north",
+                },
+            }
+        ],
+    }
+
+
 class CodedDraftTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -89,13 +159,7 @@ class CodedDraftTests(unittest.TestCase):
         self.blender.write_bytes(b"test executable placeholder")
         self.shotscript = self.root / "story.json"
         self.shotscript.write_text(
-            json.dumps(
-                {
-                    "scene_id": "tiny_story",
-                    "fps": 3,
-                    "shots": [{"shot_id": "whole", "duration": 1.0}],
-                }
-            ),
+            json.dumps(_shotscript_document()),
             encoding="utf-8",
         )
         self.prompt = self.root / "prompt.txt"
@@ -139,6 +203,7 @@ class CodedDraftTests(unittest.TestCase):
             resolution=(64, 48),
             base_value=30 if style == "diagnostic" else 150,
         )
+        _write_report(output_dir, style=style)
         return types.SimpleNamespace(
             returncode=0,
             stdout=f"BLENDER_PROXY_OK {style}\n",
@@ -151,6 +216,7 @@ class CodedDraftTests(unittest.TestCase):
         args = parse_args(self._args()[:-4])
         self.assertEqual(args.fps, 24)
         self.assertEqual(args.resolution, (960, 540))
+        self.assertEqual(args.render_timeout, 300)
         pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
             encoding="utf-8"
         )
@@ -268,6 +334,66 @@ class CodedDraftTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual(marker.read_text("utf-8"), "untouched")
 
+    def test_semantic_keyframe_ids_cannot_escape_the_frame_directory(self):
+        from videoactagent.coded_draft import main
+
+        sentinel = self.root / "escaped_diagnostic.png"
+        sentinel.write_bytes(b"outside sentinel")
+        document = _semantic_document()
+        document["semantic_keyframes"][0]["id"] = "../../escaped"  # type: ignore[index]
+        document["transitions"][0]["from"] = "../../escaped"  # type: ignore[index]
+        self.semantic.write_text(json.dumps(document), encoding="utf-8")
+
+        with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+            result = main(self._args())
+
+        self.assertEqual(result, 2)
+        run.assert_not_called()
+        self.assertEqual(sentinel.read_bytes(), b"outside sentinel")
+        self.assertFalse(self.output.exists())
+
+    def test_shotscript_identity_duration_and_single_story_are_checked_before_render(self):
+        from videoactagent.coded_draft import main
+
+        invalid_documents: dict[str, dict[str, object]] = {}
+        wrong_story = _shotscript_document()
+        wrong_story["scene_id"] = "other_story"
+        invalid_documents["identity"] = wrong_story
+
+        wrong_duration = _shotscript_document()
+        wrong_duration["shots"][0]["duration"] = 0.75  # type: ignore[index]
+        invalid_documents["duration"] = wrong_duration
+
+        nonfinite = _shotscript_document()
+        nonfinite["shots"][0]["duration"] = float("nan")  # type: ignore[index]
+        invalid_documents["nonfinite"] = nonfinite
+
+        multiple = _shotscript_document()
+        second = json.loads(json.dumps(multiple["shots"][0]))  # type: ignore[index]
+        second["shot_id"] = "second"
+        second["duration"] = 0.5
+        second["continuity"]["previous_shot"] = "whole"
+        for actor in second["actors"]:
+            first_actor = next(
+                item
+                for item in multiple["shots"][0]["actors"]  # type: ignore[index]
+                if item["id"] == actor["id"]
+            )
+            actor["start"] = first_actor["end"]
+        multiple["shots"][0]["duration"] = 0.5  # type: ignore[index]
+        multiple["shots"].append(second)  # type: ignore[union-attr]
+        invalid_documents["multiple"] = multiple
+
+        for label, document in invalid_documents.items():
+            with self.subTest(label=label):
+                self.output = self.root / f"coded_{label}"
+                self.shotscript.write_text(json.dumps(document), encoding="utf-8")
+                with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+                    result = main(self._args())
+                self.assertEqual(result, 2)
+                run.assert_not_called()
+                self.assertFalse(self.output.exists())
+
     def test_wrong_frame_count_fails_without_publishing_output(self):
         from videoactagent.coded_draft import main
 
@@ -281,6 +407,7 @@ class CodedDraftTests(unittest.TestCase):
                 resolution=(64, 48),
                 base_value=50,
             )
+            _write_report(output_dir, style=style)
             return types.SimpleNamespace(returncode=0, stdout="BLENDER_PROXY_OK\n", stderr="")
 
         with mock.patch("videoactagent.coded_draft.subprocess.run", side_effect=short_runner):
@@ -308,6 +435,7 @@ class CodedDraftTests(unittest.TestCase):
                         resolution=(32, 48) if kind == "resolution" else (64, 48),
                         base_value=30 if style == "diagnostic" else 150,
                     )
+                _write_report(output_dir, style=style)
                 return types.SimpleNamespace(
                     returncode=0, stdout="BLENDER_PROXY_OK\n", stderr=""
                 )
@@ -340,6 +468,7 @@ class CodedDraftTests(unittest.TestCase):
                 resolution=(64, 48),
                 base_value=90,
             )
+            _write_report(output_dir, style=command[command.index("--render-style") + 1])
             return types.SimpleNamespace(returncode=0, stdout="BLENDER_PROXY_OK\n", stderr="")
 
         with mock.patch("videoactagent.coded_draft.subprocess.run", side_effect=identical_runner):
@@ -347,6 +476,56 @@ class CodedDraftTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
+
+    def test_same_decoded_pixels_with_different_container_bytes_are_rejected(self):
+        from videoactagent.coded_draft import main
+
+        def same_pixels_runner(command, **_kwargs):
+            style = command[command.index("--render-style") + 1]
+            output_dir = Path(command[command.index("--output-dir") + 1])
+            video = output_dir / "station_proxy.mp4"
+            _write_video(
+                video,
+                frame_count=4,
+                fps=4,
+                resolution=(64, 48),
+                base_value=90,
+            )
+            if style == "clay":
+                with video.open("ab") as handle:
+                    handle.write(b"different container bytes")
+            _write_report(output_dir, style=style)
+            return types.SimpleNamespace(
+                returncode=0, stdout="BLENDER_PROXY_OK\n", stderr=""
+            )
+
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run",
+            side_effect=same_pixels_runner,
+        ):
+            result = main(self._args())
+
+        self.assertEqual(result, 2)
+        self.assertFalse(self.output.exists())
+
+    def test_render_report_must_identify_the_matching_profile(self):
+        from videoactagent.coded_draft import main
+
+        def wrong_report(command, **kwargs):
+            completed = self._successful_runner(command, **kwargs)
+            style = command[command.index("--render-style") + 1]
+            if style == "clay":
+                output_dir = Path(command[command.index("--output-dir") + 1])
+                _write_report(output_dir, style="diagnostic")
+            return completed
+
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run", side_effect=wrong_report
+        ):
+            result = main(self._args())
+
+        self.assertEqual(result, 2)
+        self.assertFalse(self.output.exists())
 
     def test_runner_failure_is_logged_and_not_published(self):
         from videoactagent.coded_draft import main
@@ -357,6 +536,84 @@ class CodedDraftTests(unittest.TestCase):
         self.assertEqual(result, 2)
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
+        failure_log = self.root / "coded.failed" / "diagnostic.log"
+        log = failure_log.read_text(encoding="utf-8")
+        self.assertIn("RETURN_CODE=9", log)
+        self.assertIn("render started", log)
+        self.assertIn("fatal", log)
+
+    def test_timeout_persists_command_limit_and_partial_output_outside_staging(self):
+        from videoactagent.coded_draft import main
+
+        def timed_out(command, **kwargs):
+            self.assertEqual(kwargs["timeout"], 17)
+            self.assertEqual(command[command.index("--timeout") + 1], "7")
+            raise subprocess.TimeoutExpired(
+                command, 7, output="partial stdout\n", stderr="partial stderr\n"
+            )
+
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run", side_effect=timed_out
+        ):
+            result = main(self._args("--render-timeout", "7"))
+
+        self.assertEqual(result, 2)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
+        log = (self.root / "coded.failed" / "diagnostic.log").read_text("utf-8")
+        self.assertIn("OUTCOME=timeout", log)
+        self.assertIn("TIMEOUT_SECONDS=7", log)
+        self.assertIn("partial stdout", log)
+        self.assertIn("partial stderr", log)
+        self.assertIn("videoactagent.blender_runner", log)
+
+    def test_existing_failure_evidence_is_never_overwritten(self):
+        from videoactagent.coded_draft import main
+
+        failure_dir = self.root / "coded.failed"
+        failure_dir.mkdir()
+        marker = failure_dir / "diagnostic.log"
+        marker.write_text("prior failure evidence", encoding="utf-8")
+
+        with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+            result = main(self._args())
+
+        self.assertEqual(result, 2)
+        run.assert_not_called()
+        self.assertEqual(marker.read_text("utf-8"), "prior failure evidence")
+
+    def test_late_output_mutation_is_rejected_by_final_hash_verification(self):
+        import videoactagent.coded_draft as coded_draft
+
+        original_atomic_json = coded_draft._atomic_json
+
+        def mutate_after_manifest(path, value):
+            original_atomic_json(path, value)
+            if path.name == "manifest.json":
+                target = path.parent / "renders" / "diagnostic" / "station_proxy.mp4"
+                with target.open("ab") as handle:
+                    handle.write(b"late mutation")
+
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run",
+            side_effect=self._successful_runner,
+        ), mock.patch(
+            "videoactagent.coded_draft._atomic_json",
+            side_effect=mutate_after_manifest,
+        ):
+            result = coded_draft.main(self._args())
+
+        self.assertEqual(result, 2)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
+
+    def test_atomic_json_refuses_nonstandard_nan_values(self):
+        from videoactagent.coded_draft import _atomic_json
+
+        target = self.root / "nan.json"
+        with self.assertRaises(ValueError):
+            _atomic_json(target, {"duration": float("nan")})
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":
