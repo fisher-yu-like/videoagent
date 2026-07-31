@@ -19,6 +19,7 @@ from videoactagent.director_loop import (
     session_document,
     verify_workspace,
 )
+from videoactagent.trajectory_prompt import PROMPT_COMPILER_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,7 +110,9 @@ class DirectorLoopTests(unittest.TestCase):
             }
             self.assertEqual(after, before)
             self.assertEqual((manifest.parent / "state.json").read_bytes(), state_before)
-            self.assertEqual(preview["prompt_compiler_version"], "trajectory-facts-v1")
+            self.assertEqual(
+                preview["prompt_compiler_version"], PROMPT_COMPILER_VERSION
+            )
             job = prepare_iteration(manifest, payload_value)
             compiled = (job.parent / "input" / "compiled_prompt.txt").read_text(encoding="utf-8").strip()
             self.assertEqual(compiled, preview["prompt"])

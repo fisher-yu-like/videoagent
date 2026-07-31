@@ -91,6 +91,26 @@ class TrajectoryPromptTests(unittest.TestCase):
         self.assertIn("K0 to K1, actor_a moves right and down", prompt)
         self.assertIn("K1 to K2, actor_a holds position", prompt)
 
+    def test_actor_order_is_sorted_and_exact_tolerance_holds(self) -> None:
+        frames = keyframes()
+        for frame in frames:
+            actors = frame["actors"]
+            frame["actors"] = {
+                "actor_b": actors["actor_b"],
+                "actor_a": actors["actor_a"],
+            }
+        frames[0]["actors"]["actor_a"] = {"x": 0.0, "y": 0.0}
+        frames[1]["actors"]["actor_a"] = {"x": 0.01, "y": 0.01}
+
+        prompt = compile_prompt(frames)
+
+        actor_a = "K0 to K1, actor_a holds position"
+        actor_b = "K0 to K1, actor_b holds position"
+        spacing = "K0 to K1, actor_a and actor_b move closer"
+        self.assertIn(actor_a, prompt)
+        self.assertLess(prompt.index(actor_a), prompt.index(actor_b))
+        self.assertLess(prompt.index(actor_b), prompt.index(spacing))
+
     def test_moving_camera_and_enums_are_explicit(self) -> None:
         frames = keyframes()
         frames[-1]["camera"]["position"][0] = 1.0
