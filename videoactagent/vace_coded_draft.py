@@ -38,7 +38,7 @@ _CONTROL_FRAMES = 81
 _CONTROL_FPS = 16
 _CONTROL_RESOLUTION = (832, 480)
 _CONTROL_PATH = "control/src_video.mp4"
-_RESAMPLING = "ffmpeg_scale_fps_final_frame_clone"
+_RESAMPLING = "ffmpeg_scale_source_last_hold_then_fps"
 _JOB_ARTIFACT_PATHS = (
     "control/src_mask.mp4",
     "control/src_video.mp4",
@@ -500,8 +500,8 @@ def _materialize_control(source: Path, target: Path) -> dict[str, Any]:
     target.parent.mkdir(parents=True, exist_ok=True)
     filter_graph = (
         "scale=832:480:flags=lanczos,"
+        "tpad=stop_mode=clone:stop_duration=0.5,"
         "fps=16:round=near,"
-        "tpad=stop_mode=clone:stop_duration=0.25,"
         "trim=end_frame=81,"
         "setpts=N/(16*TB)"
     )
@@ -535,6 +535,7 @@ def _materialize_control(source: Path, target: Path) -> dict[str, Any]:
         **media,
         "source_clay_sha256": _sha256(source),
         "resampling": _RESAMPLING,
+        "endpoint_policy": "frame_80_from_source_last_frame",
         "ai_interpolation": False,
     }
 
@@ -859,6 +860,7 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         **control_media,
         "source_clay_sha256": clay["sha256"],
         "resampling": _RESAMPLING,
+        "endpoint_policy": "frame_80_from_source_last_frame",
         "ai_interpolation": False,
     }
     if (

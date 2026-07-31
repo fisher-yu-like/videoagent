@@ -86,9 +86,18 @@ fi
 mkdir -p "$OUTPUT_DIR"
 mv "$VALIDATION_LOG" "$OUTPUT_DIR/input_validation.json"
 trap - EXIT
-cp -- "$JOB_JSON" "$OUTPUT_DIR/job_input.json"
+SNAPSHOT_DIR="$OUTPUT_DIR/input_snapshot"
+mkdir "$SNAPSHOT_DIR"
+cp -R -- "$JOB_DIR"/. "$SNAPSHOT_DIR"/
+CONSUMED_JOB_JSON="$SNAPSHOT_DIR/vace_job.json"
+if [ "$JOB_SCHEMA" = coded_draft ]; then
+  "$VACE_PYTHON" -m videoactagent.vace_coded_draft verify --job "$CONSUMED_JOB_JSON" >>"$OUTPUT_DIR/input_validation.json"
+else
+  "$VACE_PYTHON" -m videoactagent.vace_full_chain validate "$SNAPSHOT_DIR" >>"$OUTPUT_DIR/input_validation.json"
+fi
+JOB_DIR="$SNAPSHOT_DIR"
 
-mapfile -t VALUES < <("$VACE_PYTHON" - "$JOB_JSON" <<'PY'
+mapfile -t VALUES < <("$VACE_PYTHON" - "$CONSUMED_JOB_JSON" <<'PY'
 import base64
 import json
 import sys
@@ -105,16 +114,37 @@ elif (
     reference = references[0]
 else:
     raise SystemExit("src_ref_images must be null or a one-item string list")
+settings = job.get("vace") if job.get("control_mode") == "source_video_edit" else job.get("inference")
+if not isinstance(settings, dict):
+    raise SystemExit("verified job model settings are missing")
+model_name = settings.get("model_name")
+size = settings.get("size")
+frame_num = settings.get("frame_num")
+fps = settings.get("fps")
+seed = settings.get("seed")
+if (
+    not isinstance(model_name, str)
+    or not isinstance(size, str)
+    or isinstance(frame_num, bool) or not isinstance(frame_num, int) or frame_num <= 0
+    or isinstance(fps, bool) or not isinstance(fps, (int, float)) or fps <= 0
+    or isinstance(seed, bool) or not isinstance(seed, int) or seed < 0
+):
+    raise SystemExit("verified job model settings are invalid")
 for value in (
     job["mapping"]["src_video"],
     job["mapping"]["src_mask"],
     reference,
     job["mapping"]["prompt"],
+    model_name,
+    size,
+    str(frame_num),
+    str(fps),
+    str(seed),
 ):
     print(base64.b64encode(value.encode("utf-8")).decode("ascii"))
 PY
 )
-if [ "${#VALUES[@]}" -ne 4 ]; then
+if [ "${#VALUES[@]}" -ne 9 ]; then
   echo "validated job settings could not be materialized" >&2
   exit 72
 fi
@@ -126,12 +156,52 @@ if [ -n "$REF_IMAGE" ]; then
   REF_IMAGE="$JOB_DIR/$REF_IMAGE"
 fi
 PROMPT=$(decode_base64 "${VALUES[3]}")
+MODEL_NAME=$(decode_base64 "${VALUES[4]}")
+MODEL_SIZE=$(decode_base64 "${VALUES[5]}")
+FRAME_NUM=$(decode_base64 "${VALUES[6]}")
+RUNNER_FPS=$(decode_base64 "${VALUES[7]}")
+BASE_SEED=$(decode_base64 "${VALUES[8]}")
+if [ "$RUNNER_FPS" != 16 ] && [ "$RUNNER_FPS" != 16.0 ]; then
+  echo "verified job fps is unsupported by pinned VACE-Wan: $RUNNER_FPS" >&2
+  exit 72
+fi
+
+"$VACE_PYTHON" - "$CONSUMED_JOB_JSON" "$OUTPUT_DIR/consumed_inputs.json" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import sys
+
+job_path = Path(sys.argv[1]).resolve()
+job = json.loads(job_path.read_text(encoding="utf-8"))
+root = job_path.parent
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+control_path = root / job["mapping"]["src_video"]
+mask_path = root / job["mapping"]["src_mask"]
+consumed_inputs = {
+    "job_path": str(job_path),
+    "job_sha256": sha256(job_path),
+    "control_path": str(control_path),
+    "control_sha256": sha256(control_path),
+    "mask_path": str(mask_path),
+    "mask_sha256": sha256(mask_path),
+    "prompt_sha256": hashlib.sha256(job["mapping"]["prompt"].encode("utf-8")).hexdigest(),
+}
+with open(sys.argv[2], "w", encoding="utf-8", newline="\n") as handle:
+    json.dump(consumed_inputs, handle, sort_keys=True, indent=2)
+    handle.write("\n")
+PY
 
 COMMAND=(
   "$VACE_PYTHON" "$INFERENCE"
-  --model_name vace-1.3B
-  --size 480p
-  --frame_num 81
+  --model_name "$MODEL_NAME"
+  --size "$MODEL_SIZE"
+  --frame_num "$FRAME_NUM"
   --ckpt_dir "$VACE_CKPT_DIR"
   --src_video "$SRC_VIDEO"
   --src_mask "$SRC_MASK"
@@ -142,7 +212,7 @@ fi
 COMMAND+=(
   --prompt "$PROMPT"
   --use_prompt_extend plain
-  --base_seed 2026
+  --base_seed "$BASE_SEED"
   --sample_steps 20
   --offload_model true
   --t5_cpu
@@ -165,6 +235,7 @@ stop_monitor() {
     wait "$MONITOR_PID" 2>/dev/null || true
   fi
 }
+trap stop_monitor EXIT
 
 START_EPOCH=$SECONDS
 "${COMMAND[@]}" >"$OUTPUT_DIR/stdout.log" 2>"$OUTPUT_DIR/stderr.log" &
@@ -183,6 +254,7 @@ EXIT_CODE=$?
 set -e
 WALL_SECONDS=$((SECONDS - START_EPOCH))
 stop_monitor
+trap - EXIT
 
 PEAK_MEMORY_MIB=$(awk -F, '
   $3 ~ /[0-9]/ { value=$3; gsub(/[^0-9.]/, "", value); if (value + 0 > peak) peak=value + 0 }
@@ -209,14 +281,16 @@ PY
   fi
 fi
 
-export EXIT_CODE WALL_SECONDS PEAK_MEMORY_MIB DECODE_OK OUTPUT_SHA256 JOB_JSON OUTPUT_VIDEO
-"$VACE_PYTHON" - "$OUTPUT_DIR/run_report.json" <<'PY'
+export EXIT_CODE WALL_SECONDS PEAK_MEMORY_MIB DECODE_OK OUTPUT_SHA256 CONSUMED_JOB_JSON OUTPUT_VIDEO
+"$VACE_PYTHON" - "$OUTPUT_DIR/run_report.json" "$OUTPUT_DIR/consumed_inputs.json" <<'PY'
 import json
 import os
 import sys
+consumed_inputs = json.load(open(sys.argv[2], encoding="utf-8"))
 report = {
     "schema_version": 1,
-    "job_json": os.environ["JOB_JSON"],
+    "job_json": os.environ["CONSUMED_JOB_JSON"],
+    "consumed_inputs": consumed_inputs,
     "command": "command.txt",
     "stdout": "stdout.log",
     "stderr": "stderr.log",

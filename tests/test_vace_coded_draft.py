@@ -9,6 +9,7 @@ import tempfile
 import unittest
 
 import imageio_ffmpeg
+from PIL import Image, ImageChops, ImageStat
 
 
 def _sha256(path: Path) -> str:
@@ -62,6 +63,20 @@ def _record(path: Path, root: Path) -> dict[str, object]:
         "bytes": path.stat().st_size,
         "sha256": _sha256(path),
     }
+
+
+def _decoded_images(path: Path) -> list[Image.Image]:
+    reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
+    metadata = next(reader)
+    size = tuple(metadata["size"])
+    try:
+        return [Image.frombytes("RGB", size, frame).copy() for frame in reader]
+    finally:
+        reader.close()
+
+
+def _mean_absolute_error(left: Image.Image, right: Image.Image) -> float:
+    return sum(ImageStat.Stat(ImageChops.difference(left, right)).mean) / 3
 
 
 def _make_coded_draft(root: Path) -> tuple[Path, Path]:
@@ -196,7 +211,11 @@ class VaceCodedDraftTests(unittest.TestCase):
                 control["source_clay_sha256"],
                 _sha256(root / "coded" / "renders" / "clay" / "proxy.mp4"),
             )
-            self.assertEqual(control["resampling"], "ffmpeg_scale_fps_final_frame_clone")
+            self.assertEqual(
+                control["resampling"],
+                "ffmpeg_scale_source_last_hold_then_fps",
+            )
+            self.assertEqual(control["endpoint_policy"], "frame_80_from_source_last_frame")
             self.assertFalse(control["ai_interpolation"])
             self.assertEqual(job["mask"]["frame_count"], 81)
             self.assertEqual(job["mask"]["fps"], 16.0)
@@ -258,6 +277,19 @@ class VaceCodedDraftTests(unittest.TestCase):
                 job["evidence"],
                 {"source_validation_passed": True, "inference_success": False},
             )
+
+            source_frames = _decoded_images(output / "source" / "clay.mp4")
+            control_frames = _decoded_images(output / "control" / "src_video.mp4")
+            source_last = source_frames[-1].resize((832, 480), Image.Resampling.LANCZOS)
+            source_minus_two = source_frames[-3].resize(
+                (832, 480), Image.Resampling.LANCZOS
+            )
+            endpoint_error = _mean_absolute_error(control_frames[80], source_last)
+            wrong_endpoint_error = _mean_absolute_error(
+                control_frames[80], source_minus_two
+            )
+            self.assertLess(endpoint_error, 4.0)
+            self.assertLess(endpoint_error + 5.0, wrong_endpoint_error)
 
     def test_output_directory_must_be_new_and_failed_attempt_leaves_no_staging(self):
         from videoactagent.vace_coded_draft import (

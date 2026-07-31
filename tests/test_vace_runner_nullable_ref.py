@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 
-from tests.test_vace_coded_draft import _make_coded_draft
+from tests.test_vace_coded_draft import _make_coded_draft, _sha256
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,39 @@ class VaceRunnerNullableRefTests(unittest.TestCase):
             self.assertIn("--src_video", command)
             self.assertIn("--src_mask", command)
             self.assertNotIn("--src_ref_images", command)
+            self.assertIn("--base_seed 2025", command)
+            self.assertIn("--frame_num 81", command)
+            self.assertIn("--size 480p", command)
+            self.assertIn("--model_name vace-1.3B", command)
+            self.assertIn("input_snapshot/control/src_video.mp4", command)
+            snapshot = output / "input_snapshot"
+            self.assertEqual(
+                {
+                    path.relative_to(snapshot).as_posix()
+                    for path in snapshot.rglob("*")
+                    if path.is_file()
+                },
+                {
+                    "vace_job.json",
+                    "control/src_mask.mp4",
+                    "control/src_video.mp4",
+                    "source/clay.mp4",
+                    "source/coded_draft_bundle.json",
+                    "source/coded_draft_manifest.json",
+                    "source/prompt.txt",
+                    "source/semantic_plan.json",
+                },
+            )
+            consumed = json.loads(
+                (output / "consumed_inputs.json").read_text(encoding="utf-8")
+            )
+            snapshot_job = json.loads(
+                (snapshot / "vace_job.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(consumed["job_sha256"], _sha256(snapshot / "vace_job.json"))
+            self.assertEqual(consumed["control_sha256"], snapshot_job["control"]["sha256"])
+            self.assertEqual(consumed["mask_sha256"], snapshot_job["mask"]["sha256"])
+            self.assertEqual(consumed["prompt_sha256"], snapshot_job["prompt"]["sha256"])
             self.assertIn("VACE_DRY_RUN_OK", completed.stdout)
 
     def test_script_keeps_legacy_reference_but_never_indexes_null_mapping(self):
@@ -62,6 +96,7 @@ class VaceRunnerNullableRefTests(unittest.TestCase):
         self.assertIn("videoactagent.vace_full_chain validate", script)
         self.assertNotIn('job["mapping"]["src_ref_images"][0]', script)
         self.assertIn('if [ -n "$REF_IMAGE" ]; then', script)
+        self.assertIn('"consumed_inputs": consumed_inputs', script)
 
 
 if __name__ == "__main__":
