@@ -21,6 +21,8 @@ from uuid import uuid4
 import imageio_ffmpeg
 
 from videoactagent.trajectory import TrajectoryInstruction
+from videoactagent.director_annotation import camera_trajectory_from_path
+from videoactagent.director_loop import export_approved_iteration, verify_workspace
 
 from videoactagent.vace_inputs import (
     MASK_POLICY,
@@ -628,6 +630,371 @@ def _write_json(path: Path, document: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
+def _director_source_path(root: Path, record: Mapping[str, Any], label: str) -> Path:
+    path = record.get("path")
+    if not isinstance(path, str):
+        raise VaceCodedDraftError(f"approved {label} path is invalid")
+    target = (root / path).resolve(strict=True)
+    try:
+        target.relative_to(root.resolve(strict=True))
+    except ValueError as exc:
+        raise VaceCodedDraftError(f"approved {label} escapes director workspace") from exc
+    if record.get("sha256") != _sha256(target) or record.get("bytes") != target.stat().st_size:
+        raise VaceCodedDraftError(f"approved {label} hash/size mismatch")
+    return target
+
+
+def build_vace_director_job(
+    director_manifest: Path | str, output_dir: Path | str
+) -> Path:
+    """Build one VACE job from an exact human-approved director iteration."""
+    workspace = verify_workspace(director_manifest)
+    exported = export_approved_iteration(director_manifest)
+    source_root = workspace["root"]
+    destination = Path(output_dir).resolve(strict=False)
+    if destination.exists():
+        raise VaceCodedDraftError(f"VACE job output already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / f".{destination.name}.{uuid4().hex}.staging"
+    staging.mkdir()
+    try:
+        doc = workspace["document"]
+        sources = doc["source"]
+        source_specs = {
+            "director_loop_manifest": (Path(director_manifest).resolve(strict=True), "source/director_loop_manifest.json"),
+            "director_state": (source_root / "state.json", "source/director_state.json"),
+            "approval": (_director_source_path(source_root, exported["approval"], "approval"), "source/approval.json"),
+            "iteration_manifest": (_director_source_path(source_root, exported["iteration_manifest"], "iteration"), "source/iteration.json"),
+            "annotation": (_director_source_path(source_root, exported["annotation"], "annotation"), "source/annotation.json"),
+            "actor_trajectory": (_director_source_path(source_root, exported["actor_trajectory"], "actor trajectory"), "source/actor_trajectory.json"),
+            "camera_trajectory": (_director_source_path(source_root, exported["camera_trajectory"], "camera trajectory"), "source/camera_trajectory.json"),
+            "prompt_snapshot": (_director_source_path(source_root, exported["compiled_prompt"], "compiled prompt"), "source/compiled_prompt.txt"),
+            "semantic_plan": (_director_source_path(source_root, sources["semantic_plan"], "semantic plan"), "source/semantic_plan.json"),
+            "shotscript": (_director_source_path(source_root, sources["shotscript"], "ShotScript"), "source/shotscript.json"),
+            "diagnostic_video": (_director_source_path(source_root, exported["diagnostic"], "diagnostic"), "source/diagnostic.mp4"),
+        }
+        copied = {
+            name: _copy_snapshot(path, staging / relative, relative)
+            for name, (path, relative) in source_specs.items()
+        }
+        clay_source = _director_source_path(source_root, exported["clay"], "clay")
+        clay_base = _copy_snapshot(clay_source, staging / "source" / "clay.mp4", "source/clay.mp4")
+        clay_media = _probe_media(staging / "source" / "clay.mp4")
+        clay_record = {
+            **clay_base, "media": clay_media, "role": "clay_only",
+            "resampling": "none", "ai_interpolation": False,
+            "source_sha256": exported["clay"]["sha256"],
+        }
+        diagnostic_path = staging / "source" / "diagnostic.mp4"
+        diagnostic_media = _probe_media(diagnostic_path)
+        if diagnostic_media["decoded_pixel_sha256"] == clay_media["decoded_pixel_sha256"]:
+            raise VaceCodedDraftError("approved diagnostic and clay videos are pixel-identical")
+        diagnostic_record = {
+            **copied["diagnostic_video"], "media": diagnostic_media,
+            "role": "evidence_only",
+        }
+        copied["diagnostic_video"] = diagnostic_record
+        control = _materialize_control(
+            staging / "source" / "clay.mp4", staging / "control" / "src_video.mp4"
+        )
+        mask_path = staging / "control" / "src_mask.mp4"
+        mask = write_full_generation_mask(
+            mask_path, _CONTROL_RESOLUTION, _CONTROL_FPS, _CONTROL_FRAMES
+        )
+        mask["path"] = "control/src_mask.mp4"
+        prompt_text = (staging / "source" / "compiled_prompt.txt").read_text(
+            encoding="utf-8"
+        ).strip()
+        if not prompt_text:
+            raise VaceCodedDraftError("approved compiled prompt is empty")
+        source = {**copied, "conditioning_video": clay_record}
+        inventory = sorted(
+            (_artifact_projection(record) for record in [*source.values(), control, mask]),
+            key=lambda record: record["path"],
+        )
+        keyframes = [
+            {
+                "semantic_id": frame["id"], "t": frame["t"],
+                "source_frame_index": frame["frame_index"],
+                "control_frame_index": round(float(frame["t"]) * (_CONTROL_FRAMES - 1)),
+            }
+            for frame in doc["keyframes"]
+        ]
+        binding = {
+            "approved": True, "iteration_id": exported["iteration_id"],
+            "approval_sha256": exported["approval"]["sha256"],
+            "iteration_sha256": exported["iteration_manifest"]["sha256"],
+            "annotation_sha256": exported["annotation"]["sha256"],
+            "actor_trajectory_sha256": exported["actor_trajectory"]["sha256"],
+            "camera_trajectory_sha256": exported["camera_trajectory"]["sha256"],
+            "diagnostic_sha256": exported["diagnostic"]["sha256"],
+            "clay_sha256": exported["clay"]["sha256"],
+            "compiled_prompt_sha256": exported["compiled_prompt"]["sha256"],
+        }
+        job = {
+            "schema_version": _SCHEMA_VERSION, "story_id": doc["story_id"],
+            "backend": "vace", "conditioning_mode": "source_video_edit",
+            "control_mode": "source_video_edit", "source": source,
+            "control": control, "inventory": inventory,
+            "prompt": {
+                "text": prompt_text,
+                "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+                "components": {"director_compiled_prompt": prompt_text},
+                "normalization": "utf8_snapshot_strip_outer_whitespace",
+            },
+            "motion_semantics": {"director_binding": binding, "keyframes": keyframes},
+            "director_binding": binding,
+            "mapping": {"src_video": _CONTROL_PATH, "src_mask": "control/src_mask.mp4",
+                        "src_ref_images": None, "prompt": prompt_text},
+            "mask": mask,
+            "vace": {"commit": VACE_COMMIT, "model_name": VACE_MODEL_NAME,
+                     "size": VACE_SIZE, "seed": VACE_SEED,
+                     "frame_num": _CONTROL_FRAMES, "fps": _CONTROL_FPS,
+                     "resolution": list(_CONTROL_RESOLUTION)},
+            "timeline": {
+                "source": {"frame_count": clay_media["frame_count"],
+                           "fps": clay_media["fps"],
+                           "duration_seconds": clay_media["duration_seconds"],
+                           "preserved_snapshot": True},
+                "control": {"frame_count": _CONTROL_FRAMES, "fps": float(_CONTROL_FPS),
+                            "duration_seconds": _CONTROL_FRAMES / _CONTROL_FPS,
+                            "resolution": list(_CONTROL_RESOLUTION),
+                            "resampling": _RESAMPLING},
+                "ai_interpolation": False,
+            },
+            "server_contract": {"reference_images_nullable": True,
+                                "consume_pinned_control_timeline": True},
+            "api_calls": 0,
+            "evidence": {"source_validation_passed": True, "inference_success": False},
+        }
+        _write_json(staging / _JOB_NAME, job)
+        verify_vace_coded_draft_job(staging / _JOB_NAME)
+        os.replace(staging, destination)
+        return destination / _JOB_NAME
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def _verify_vace_director_job(
+    path: Path, root: Path, job: dict[str, Any]
+) -> dict[str, Any]:
+    required = {
+        "schema_version", "story_id", "backend", "conditioning_mode", "control_mode",
+        "source", "control", "inventory", "prompt", "motion_semantics",
+        "director_binding", "mapping", "mask", "vace", "timeline",
+        "server_contract", "api_calls", "evidence",
+    }
+    if set(job) != required:
+        raise VaceCodedDraftError("director VACE job has unknown or missing fields")
+    if (
+        job.get("schema_version") != _SCHEMA_VERSION
+        or job.get("backend") != "vace"
+        or job.get("conditioning_mode") != "source_video_edit"
+        or job.get("control_mode") != "source_video_edit"
+        or job.get("api_calls") != 0
+    ):
+        raise VaceCodedDraftError("director VACE identity contract is invalid")
+    inventory_value = job.get("inventory")
+    if not isinstance(inventory_value, list) or not inventory_value:
+        raise VaceCodedDraftError("director VACE inventory is missing")
+    inventory: dict[str, Mapping[str, Any]] = {}
+    for record in inventory_value:
+        if not isinstance(record, Mapping) or set(record) != {"path", "bytes", "sha256"}:
+            raise VaceCodedDraftError("director VACE inventory record is not canonical")
+        record_path = record.get("path")
+        if not isinstance(record_path, str) or record_path in inventory:
+            raise VaceCodedDraftError("director VACE inventory path is invalid")
+        _verify_record(root, record, f"director inventory {record_path}")
+        inventory[record_path] = record
+    if list(inventory) != sorted(inventory):
+        raise VaceCodedDraftError("director VACE inventory is not sorted")
+    actual = {
+        item.relative_to(root).as_posix() for item in root.rglob("*") if item.is_file()
+    }
+    if actual != set(inventory) | {_JOB_NAME}:
+        raise VaceCodedDraftError("director VACE job files differ from closed inventory")
+
+    source = job.get("source")
+    expected_paths = {
+        "director_loop_manifest": "source/director_loop_manifest.json",
+        "director_state": "source/director_state.json",
+        "approval": "source/approval.json",
+        "iteration_manifest": "source/iteration.json",
+        "annotation": "source/annotation.json",
+        "actor_trajectory": "source/actor_trajectory.json",
+        "camera_trajectory": "source/camera_trajectory.json",
+        "prompt_snapshot": "source/compiled_prompt.txt",
+        "semantic_plan": "source/semantic_plan.json",
+        "shotscript": "source/shotscript.json",
+        "diagnostic_video": "source/diagnostic.mp4",
+        "conditioning_video": "source/clay.mp4",
+    }
+    if not isinstance(source, Mapping) or set(source) != set(expected_paths):
+        raise VaceCodedDraftError("director VACE source contract is invalid")
+    source_paths = {}
+    for name, expected_path in expected_paths.items():
+        source_paths[name] = _verify_record(
+            root, source[name], name, expected_path=expected_path
+        )
+        if inventory.get(expected_path) != _artifact_projection(source[name]):
+            raise VaceCodedDraftError(f"director source {name} differs from inventory")
+
+    binding = job.get("director_binding")
+    expected_binding_fields = {
+        "approved", "iteration_id", "approval_sha256", "iteration_sha256",
+        "annotation_sha256", "actor_trajectory_sha256", "camera_trajectory_sha256",
+        "diagnostic_sha256", "clay_sha256", "compiled_prompt_sha256",
+    }
+    if (
+        not isinstance(binding, Mapping) or set(binding) != expected_binding_fields
+        or binding.get("approved") is not True
+        or not isinstance(binding.get("iteration_id"), str)
+    ):
+        raise VaceCodedDraftError("director approval binding is invalid")
+    hash_bindings = {
+        "approval_sha256": "approval", "iteration_sha256": "iteration_manifest",
+        "annotation_sha256": "annotation", "actor_trajectory_sha256": "actor_trajectory",
+        "camera_trajectory_sha256": "camera_trajectory", "diagnostic_sha256": "diagnostic_video",
+        "clay_sha256": "conditioning_video", "compiled_prompt_sha256": "prompt_snapshot",
+    }
+    for binding_name, source_name in hash_bindings.items():
+        if binding[binding_name] != source[source_name]["sha256"]:
+            raise VaceCodedDraftError(f"director {binding_name} mismatch")
+    state = _read_object(source_paths["director_state"], "director state")
+    approval = _read_object(source_paths["approval"], "director approval")
+    iteration = _read_object(source_paths["iteration_manifest"], "director iteration")
+    annotation = _read_object(source_paths["annotation"], "director annotation")
+    if (
+        state.get("approved_iteration") != binding["iteration_id"]
+        or approval.get("approved") is not True
+        or approval.get("iteration_id") != binding["iteration_id"]
+        or iteration.get("iteration_id") != binding["iteration_id"]
+        or iteration.get("status") != "succeeded"
+        or iteration.get("human_authored") is not True
+        or annotation.get("iteration_id") != binding["iteration_id"]
+        or annotation.get("auto_filled_values") != 0
+    ):
+        raise VaceCodedDraftError("director approval/iteration documents disagree")
+    approval_expected = {
+        "annotation": "annotation", "diagnostic": "diagnostic_video", "clay": "conditioning_video"
+    }
+    for approval_name, source_name in approval_expected.items():
+        record = approval.get(approval_name)
+        if not isinstance(record, Mapping) or any(
+            record.get(field) != source[source_name].get(field)
+            for field in ("sha256", "bytes")
+        ):
+            raise VaceCodedDraftError(f"director approval {approval_name} binding mismatch")
+    iteration_expected = {
+        "annotation": "annotation", "actor_trajectory": "actor_trajectory",
+        "camera_trajectory": "camera_trajectory", "compiled_prompt": "prompt_snapshot",
+    }
+    for iteration_name, source_name in iteration_expected.items():
+        record = iteration.get("inputs", {}).get(iteration_name)
+        if not isinstance(record, Mapping) or any(
+            record.get(field) != source[source_name].get(field)
+            for field in ("sha256", "bytes")
+        ):
+            raise VaceCodedDraftError(f"director iteration {iteration_name} mismatch")
+    TrajectoryInstruction.from_path(source_paths["actor_trajectory"])
+    camera_trajectory_from_path(
+        source_paths["camera_trajectory"], scene_id=job.get("story_id"),
+        duration_seconds=float(job["timeline"]["source"]["duration_seconds"]),
+    )
+
+    clay = source["conditioning_video"]
+    clay_media = _probe_media(source_paths["conditioning_video"])
+    if (
+        clay.get("role") != "clay_only" or clay.get("resampling") != "none"
+        or clay.get("ai_interpolation") is not False
+        or clay.get("source_sha256") != clay.get("sha256")
+    ):
+        raise VaceCodedDraftError("director clay source contract is invalid")
+    _verify_media_record(clay_media, clay.get("media"))
+    diagnostic = source["diagnostic_video"]
+    diagnostic_media = _probe_media(source_paths["diagnostic_video"])
+    if diagnostic.get("role") != "evidence_only":
+        raise VaceCodedDraftError("director diagnostic role is invalid")
+    _verify_media_record(diagnostic_media, diagnostic.get("media"))
+    if diagnostic_media["decoded_pixel_sha256"] == clay_media["decoded_pixel_sha256"]:
+        raise VaceCodedDraftError("director source profiles are pixel-identical")
+
+    prompt_text = source_paths["prompt_snapshot"].read_text(encoding="utf-8").strip()
+    expected_prompt = {
+        "text": prompt_text,
+        "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
+        "components": {"director_compiled_prompt": prompt_text},
+        "normalization": "utf8_snapshot_strip_outer_whitespace",
+    }
+    if not prompt_text or job.get("prompt") != expected_prompt:
+        raise VaceCodedDraftError("director compiled prompt binding is invalid")
+    if job.get("mapping") != {
+        "src_video": _CONTROL_PATH, "src_mask": "control/src_mask.mp4",
+        "src_ref_images": None, "prompt": prompt_text,
+    }:
+        raise VaceCodedDraftError("director VACE mapping is invalid")
+
+    control = job.get("control")
+    control_path = _verify_record(root, control, "director VACE control", expected_path=_CONTROL_PATH)
+    control_media = _probe_media(control_path)
+    expected_control = {
+        **_record(control_path, _CONTROL_PATH), **control_media,
+        "source_clay_sha256": clay["sha256"], "resampling": _RESAMPLING,
+        "endpoint_policy": "frame_80_from_source_last_frame", "ai_interpolation": False,
+    }
+    if control != expected_control:
+        raise VaceCodedDraftError("director VACE control contract is invalid")
+    mask = job.get("mask")
+    mask_path = _verify_record(root, mask, "director VACE mask", expected_path="control/src_mask.mp4")
+    expected_mask = {
+        "path": "control/src_mask.mp4", "bytes": mask_path.stat().st_size,
+        "sha256": _sha256(mask_path), "frame_count": _CONTROL_FRAMES,
+        "dimensions": list(_CONTROL_RESOLUTION), "fps": _CONTROL_FPS,
+        "mask_semantics": MASK_SEMANTICS, "mask_policy": MASK_POLICY,
+        "actor_segmentation_claimed": False,
+    }
+    if mask != expected_mask:
+        raise VaceCodedDraftError("director VACE mask metadata mismatch")
+    try:
+        _verify_full_generation_mask(mask_path, _CONTROL_RESOLUTION, _CONTROL_FPS, _CONTROL_FRAMES)
+    except (OSError, RuntimeError) as exc:
+        raise VaceCodedDraftError(f"director VACE mask decode failed: {exc}") from exc
+
+    motion = job.get("motion_semantics")
+    if (
+        not isinstance(motion, Mapping) or set(motion) != {"director_binding", "keyframes"}
+        or motion.get("director_binding") != binding
+        or not isinstance(motion.get("keyframes"), list) or len(motion["keyframes"]) != 5
+    ):
+        raise VaceCodedDraftError("director motion semantics are invalid")
+    expected_vace = {
+        "commit": VACE_COMMIT, "model_name": VACE_MODEL_NAME, "size": VACE_SIZE,
+        "seed": VACE_SEED, "frame_num": _CONTROL_FRAMES, "fps": _CONTROL_FPS,
+        "resolution": list(_CONTROL_RESOLUTION),
+    }
+    if job.get("vace") != expected_vace:
+        raise VaceCodedDraftError("director VACE model contract is invalid")
+    expected_timeline = {
+        "source": {"frame_count": clay_media["frame_count"], "fps": clay_media["fps"],
+                   "duration_seconds": clay_media["duration_seconds"],
+                   "preserved_snapshot": True},
+        "control": {"frame_count": _CONTROL_FRAMES, "fps": float(_CONTROL_FPS),
+                    "duration_seconds": _CONTROL_FRAMES / _CONTROL_FPS,
+                    "resolution": list(_CONTROL_RESOLUTION), "resampling": _RESAMPLING},
+        "ai_interpolation": False,
+    }
+    if job.get("timeline") != expected_timeline:
+        raise VaceCodedDraftError("director VACE timeline is invalid")
+    if job.get("server_contract") != {
+        "reference_images_nullable": True, "consume_pinned_control_timeline": True
+    } or job.get("evidence") != {
+        "source_validation_passed": True, "inference_success": False
+    }:
+        raise VaceCodedDraftError("director VACE evidence/server contract is invalid")
+    return job
+
+
 def build_vace_coded_draft_job(
     bundle_path: Path | str,
     manifest_path: Path | str,
@@ -833,6 +1200,8 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         raise VaceCodedDraftError(f"job file must be named {_JOB_NAME}")
     root = path.parent
     job = _read_object(path, "clay-only VACE job")
+    if "director_binding" in job:
+        return _verify_vace_director_job(path, root, job)
     required = {
         "schema_version", "story_id", "backend", "conditioning_mode",
         "control_mode", "source", "control", "inventory", "prompt", "motion_semantics", "mapping",
@@ -1166,8 +1535,9 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
-    prepare.add_argument("--bundle", type=Path, required=True)
-    prepare.add_argument("--manifest", type=Path, required=True)
+    prepare.add_argument("--bundle", type=Path)
+    prepare.add_argument("--manifest", type=Path)
+    prepare.add_argument("--director-manifest", type=Path)
     prepare.add_argument("--output-dir", type=Path, required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--job", type=Path, required=True)
@@ -1178,9 +1548,20 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "prepare":
-            job_path = build_vace_coded_draft_job(
-                args.bundle, args.manifest, args.output_dir
-            )
+            if args.director_manifest is not None:
+                if args.bundle is not None or args.manifest is not None:
+                    raise VaceCodedDraftError(
+                        "--director-manifest cannot be combined with --bundle/--manifest"
+                    )
+                job_path = build_vace_director_job(args.director_manifest, args.output_dir)
+            else:
+                if args.bundle is None or args.manifest is None:
+                    raise VaceCodedDraftError(
+                        "prepare requires --bundle/--manifest or --director-manifest"
+                    )
+                job_path = build_vace_coded_draft_job(
+                    args.bundle, args.manifest, args.output_dir
+                )
             result = {"job": str(job_path), "sha256": _sha256(job_path), "api_calls": 0}
             print("VACE_CODED_DRAFT_PREPARED", json.dumps(result, ensure_ascii=False))
         else:

@@ -109,6 +109,25 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn("camera-position", html)
         self.assertIn("camera-look-at", html)
 
+    def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
+        from videoactagent.vace_coded_draft import (
+            build_vace_director_job,
+            verify_vace_coded_draft_job,
+        )
+
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job = prepare_iteration(manifest, payload())
+            d0 = manifest.parent / "iterations" / "D0"
+            publish_iteration(manifest, job, d0 / "diagnostic.mp4", d0 / "clay.mp4")
+            approve_iteration(manifest, "D1", "sy")
+            vace_job = build_vace_director_job(manifest, Path(root) / "vace_job")
+            verified = verify_vace_coded_draft_job(vace_job)
+
+        self.assertTrue(verified["director_binding"]["approved"])
+        self.assertEqual(verified["mapping"]["src_video"], "control/src_video.mp4")
+        self.assertIsNone(verified["mapping"]["src_ref_images"])
+
 
 if __name__ == "__main__":
     unittest.main()
