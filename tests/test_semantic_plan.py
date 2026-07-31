@@ -216,6 +216,19 @@ class SemanticStoryPlanTests(unittest.TestCase):
             with self.subTest(document=document), self.assertRaises(SemanticPlanError):
                 SemanticStoryPlan.from_dict(document)
 
+    def test_unrepresentably_large_numbers_raise_semantic_plan_error(self):
+        document = valid_document()
+        document["duration_seconds"] = 10**400
+
+        with self.assertRaisesRegex(SemanticPlanError, "finite"):
+            SemanticStoryPlan.from_dict(document)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "huge-duration.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(SemanticPlanError, "finite"):
+                SemanticStoryPlan.from_path(path)
+
     def test_from_path_rejects_duplicate_keys_and_nonstandard_json_numbers(self):
         invalid_texts = (
             '{"schema_version":"1.0","schema_version":"1.0"}',
