@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Human video comparison annotator</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; background: #10151d; color: #edf2f7; }
+    main { width: min(1180px, 96vw); margin: 18px auto; }
+    .notice { color: #ffd166; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; margin: 10px 0; }
+    select, input, button { padding: 7px; background: #233044; color: white; border: 1px solid #5b708c; border-radius: 4px; }
+    button:disabled, select:disabled { opacity: .45; }
+    canvas { width: min(100%, 960px); height: auto; border: 1px solid #5b708c; cursor: crosshair; }
+    #status { white-space: pre-wrap; min-height: 2em; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Human comparison annotation</h1>
+  <p class="notice">No automatic tracking. Mark every actor in every sampled frame. Camera labels describe only observable background motion, never a recovered 3D pose.</p>
+  <div class="toolbar">
+    <label>Video <select id="target"></select></label>
+    <label>Actor <select id="actor"></select></label>
+    <button id="previous">Previous frame</button>
+    <strong id="progress"></strong>
+    <button id="next">Next frame</button>
+  </div>
+  <canvas id="canvas"></canvas>
+  <div class="toolbar">
+    <label>Visibility
+      <select id="visibility">
+        <option value="">Choose manually</option>
+        <option value="visible">visible</option>
+        <option value="occluded">occluded</option>
+        <option value="out_of_frame">out_of_frame</option>
+        <option value="ambiguous">ambiguous</option>
+      </select>
+    </label>
+    <label>Identity
+      <select id="identity">
+        <option value="">Choose manually</option>
+        <option value="confirmed">confirmed</option>
+        <option value="probable">probable</option>
+        <option value="ambiguous">ambiguous</option>
+        <option value="unknown">unknown</option>
+      </select>
+    </label>
+    <button id="clear">Clear current sample</button>
+  </div>
+  <h2>Observable camera/background motion</h2>
+  <div class="toolbar">
+    <label>Category
+      <select id="camera-category">
+        <option value="">Choose manually</option>
+        <option>static</option><option>pan_left</option><option>pan_right</option>
+        <option>tilt_up</option><option>tilt_down</option><option>dolly_in</option>
+        <option>dolly_out</option><option>truck_left</option><option>truck_right</option>
+        <option>pedestal_up</option><option>pedestal_down</option><option>zoom_in</option>
+        <option>zoom_out</option><option>handheld_or_complex</option><option>ambiguous</option>
+      </select>
+    </label>
+    <label>Intensity
+      <select id="camera-intensity">
+        <option value="">Choose manually</option>
+        <option>none</option><option>low</option><option>medium</option><option>high</option><option>ambiguous</option>
+      </select>
+    </label>
+    <label>Confidence <input id="camera-confidence" type="number" min="0" max="1" step="0.05" placeholder="0..1"></label>
+    <label>Status
+      <select id="annotation-status">
+        <option value="draft">draft</option>
+        <option value="reviewed">reviewed</option>
+        <option value="adjudicated">adjudicated</option>
+      </select>
+    </label>
+    <button id="save">Save human annotation</button>
+  </div>
+  <div id="status"></div>
+</main>
+<script>
+"use strict";
+var session = null;
+var targets = [];
+var currentTarget = null;
+var currentActor = null;
+var currentFrame = 0;
+var currentImage = null;
+var decisions = new Map();
+var referenceHashes = new Map();
+var loadToken = 0;
+var canvas = document.querySelector("#canvas");
+var context = canvas.getContext("2d");
+var statusNode = document.querySelector("#status");
+
+function decisionKey(targetId, actorId, frame) {
+  return targetId + "|" + actorId + "|" + String(frame);
+}
+function frameRecord() { return currentTarget.video.frames[currentFrame]; }
+function setStatus(message) { statusNode.textContent = message; }
+function draw() {
+  if (!currentImage || !currentTarget || !currentActor) return;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(currentImage, 0, 0, canvas.width, canvas.height);
+  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  var value = decisions.get(key);
+  if (value && value.footpoint) {
+    context.beginPath();
+    context.arc(value.footpoint.x * canvas.width, value.footpoint.y * canvas.height, 8, 0, Math.PI * 2);
+    context.strokeStyle = "#ff3158";
+    context.lineWidth = 3;
+    context.stroke();
+  }
+  document.querySelector("#visibility").value = value ? value.visibility : "";
+  document.querySelector("#identity").value = value ? value.identity : "";
+  document.querySelector("#progress").textContent = "Frame " + String(currentFrame + 1) + " / " + String(currentTarget.video.frames.length) + " (source " + String(frameRecord().frame) + ")";
+}
+function showFrame(index) {
+  if (!currentTarget || index < 0 || index >= currentTarget.video.frames.length) return;
+  currentFrame = index;
+  var record = frameRecord();
+  var token = ++loadToken;
+  var image = new Image();
+  setStatus("Loading real decoded frame " + String(record.frame) + "...");
+  image.onload = function () {
+    if (token !== loadToken) return;
+    currentImage = image;
+    canvas.width = record.width;
+    canvas.height = record.height;
+    setStatus("Frame loaded. Click the actor footpoint only when visibility is visible.");
+    draw();
+  };
+  image.onerror = function () { if (token === loadToken) setStatus("Frame failed to load; nothing was recorded."); };
+  image.src = "/" + record.path;
+}
+function selectTarget() {
+  var index = Number(document.querySelector("#target").value);
+  currentTarget = targets[index];
+  currentFrame = 0;
+  var actorSelect = document.querySelector("#actor");
+  actorSelect.textContent = "";
+  currentTarget.actor_ids.forEach(function (actorId) {
+    var option = document.createElement("option");
+    option.value = actorId;
+    option.textContent = actorId;
+    actorSelect.appendChild(option);
+  });
+  currentActor = currentTarget.actor_ids[0];
+  showFrame(0);
+}
+function updateCurrentLabels() {
+  if (!currentTarget || !currentActor) return;
+  var visibility = document.querySelector("#visibility").value;
+  var identity = document.querySelector("#identity").value;
+  if (!visibility || !identity) return;
+  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  var previous = decisions.get(key);
+  decisions.set(key, {
+    frame: frameRecord().frame,
+    t: frameRecord().t,
+    footpoint: visibility === "visible" && previous ? previous.footpoint : null,
+    visibility: visibility,
+    identity: identity
+  });
+  draw();
+}
+canvas.addEventListener("click", function (event) {
+  if (!currentTarget || !currentActor || document.querySelector("#visibility").value !== "visible") {
+    setStatus("Choose visible and an identity label before clicking a footpoint.");
+    return;
+  }
+  if (!document.querySelector("#identity").value) {
+    setStatus("Choose an identity label before clicking.");
+    return;
+  }
+  var bounds = canvas.getBoundingClientRect();
+  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  decisions.set(key, {
+    frame: frameRecord().frame,
+    t: frameRecord().t,
+    footpoint: {
+      x: Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height))
+    },
+    visibility: "visible",
+    identity: document.querySelector("#identity").value
+  });
+  draw();
+});
+document.querySelector("#visibility").onchange = updateCurrentLabels;
+document.querySelector("#identity").onchange = updateCurrentLabels;
+document.querySelector("#clear").onclick = function () {
+  decisions.delete(decisionKey(currentTarget.target_id, currentActor, frameRecord().frame));
+  draw();
+};
+document.querySelector("#previous").onclick = function () { showFrame(currentFrame - 1); };
+document.querySelector("#next").onclick = function () { showFrame(currentFrame + 1); };
+document.querySelector("#actor").onchange = function (event) { currentActor = event.target.value; draw(); };
+document.querySelector("#target").onchange = selectTarget;
+
+async function sha256Hex(bytes) {
+  var digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map(function (item) { return item.toString(16).padStart(2, "0"); }).join("");
+}
+async function referenceHash(referenceId) {
+  if (referenceHashes.has(referenceId)) return referenceHashes.get(referenceId);
+  var response = await fetch("/annotations/reference__" + encodeURIComponent(referenceId) + ".json", {cache: "no-store"});
+  if (!response.ok) throw new Error("Save and review the story reference annotation first.");
+  var bytes = await response.arrayBuffer();
+  var value = JSON.parse(new TextDecoder().decode(bytes));
+  if (value.annotation_status !== "reviewed" && value.annotation_status !== "adjudicated") throw new Error("Reference annotation must be reviewed or adjudicated.");
+  var digest = await sha256Hex(bytes);
+  referenceHashes.set(referenceId, digest);
+  return digest;
+}
+document.querySelector("#save").onclick = async function () {
+  try {
+    var actors = {};
+    currentTarget.actor_ids.forEach(function (actorId) {
+      actors[actorId] = currentTarget.video.frames.map(function (frame) {
+        var value = decisions.get(decisionKey(currentTarget.target_id, actorId, frame.frame));
+        if (!value || (value.visibility === "visible" && !value.footpoint)) throw new Error("Every actor/frame needs a complete manual decision.");
+        return value;
+      });
+    });
+    var category = document.querySelector("#camera-category").value;
+    var intensity = document.querySelector("#camera-intensity").value;
+    var confidenceText = document.querySelector("#camera-confidence").value;
+    if (!category || !intensity || confidenceText === "") throw new Error("Complete the observable camera labels.");
+    var referenceSha = null;
+    if (currentTarget.target_type === "result") referenceSha = await referenceHash(currentTarget.reference_id);
+    var payload = {
+      schema_version: "1.0",
+      target_type: currentTarget.target_type,
+      target_id: currentTarget.target_id,
+      annotation_status: document.querySelector("#annotation-status").value,
+      reference_annotation_sha256: referenceSha,
+      actors: actors,
+      camera: {category: category, intensity: intensity, confidence: Number(confidenceText)}
+    };
+    var response = await fetch("/annotation", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)});
+    var responseBytes = await response.arrayBuffer();
+    var saved = JSON.parse(new TextDecoder().decode(responseBytes));
+    if (!response.ok) throw new Error(saved.error && saved.error.message ? saved.error.message : "Save rejected");
+    if (currentTarget.target_type === "reference") referenceHashes.set(currentTarget.reference_id, await sha256Hex(responseBytes));
+    setStatus("Human annotation saved. Paper eligibility: " + String(saved.eligible_for_paper));
+  } catch (error) {
+    setStatus("Save failed: " + String(error));
+  }
+};
+
+fetch("/session", {cache: "no-store"}).then(function (response) {
+  if (!response.ok) throw new Error("Session manifest unavailable");
+  return response.json();
+}).then(function (value) {
+  session = value;
+  Object.keys(session.references).forEach(function (referenceId) {
+    var reference = session.references[referenceId];
+    targets.push(Object.assign({}, reference, {target_type: "reference", target_id: referenceId, disabled: false}));
+  });
+  session.items.forEach(function (item) { targets.push(Object.assign({}, item, {target_type: "result", target_id: item.job_id})); });
+  var targetSelect = document.querySelector("#target");
+  targets.forEach(function (target, index) {
+    var option = document.createElement("option");
+    option.value = String(index);
+    option.disabled = Boolean(target.disabled);
+    option.textContent = target.target_type + ": " + target.target_id + (target.disabled ? " [FAILED - no annotation]" : "");
+    targetSelect.appendChild(option);
+  });
+  selectTarget();
+}).catch(function (error) { setStatus(String(error)); });
+</script>
+</body>
+</html>

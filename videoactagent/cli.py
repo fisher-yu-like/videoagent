@@ -14,6 +14,7 @@ COMMANDS = {
     "control-bridge": "videoactagent.control_bridge",
     "jd-smoke": "videoactagent.jd_smoke",
     "module-io": "videoactagent.module_io",
+    "annotate": "videoactagent.manual_annotation",
     "stage3-audit": "videoactagent.stage3_audit",
     "stage6-debug": "videoactagent.stage6_debug",
     "trajectory": "videoactagent.trajectory",
