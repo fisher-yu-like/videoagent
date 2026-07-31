@@ -328,7 +328,10 @@ def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
         frames = annotation.get("keyframes")
         if not isinstance(frames, list) or len(frames) != 5:
             raise DirectorLoopError("current annotation must contain K0--K4")
-        inherited = json.loads(json.dumps(frames))
+        inherited = [
+            {key: value for key, value in frame.items() if key != "camera_source"}
+            for frame in json.loads(json.dumps(frames))
+        ]
         source = {
             "iteration": _record(directory / "iteration.json", root),
             "annotation": _record(annotation_path, root),

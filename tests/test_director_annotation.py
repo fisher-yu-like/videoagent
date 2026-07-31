@@ -61,6 +61,8 @@ def payload_keyframes(keys: list[dict]) -> list[dict]:
 def payload() -> dict:
     expected = contract()
     frames = payload_keyframes(expected["keyframes"])
+    for frame in frames:
+        frame["camera_source"] = "inherited"
     return {
         "schema_version": "1.0",
         "author_id": "sy",
@@ -69,7 +71,7 @@ def payload() -> dict:
         "auto_filled_values": 0,
         "frozen_through_keyframe": "K0",
         "inheritance_sha256": expected["inheritance_sha256"],
-        "inherited_locked_values": deepcopy(frames[:1]),
+        "inherited_locked_values": deepcopy(expected["inherited_keyframes"][:1]),
         "keyframes": frames,
     }
 
@@ -179,6 +181,28 @@ class DirectorAnnotationTests(unittest.TestCase):
         value["frozen_through_keyframe"] = "K4"
         value["inherited_locked_values"] = deepcopy(contract()["inherited_keyframes"])
         with self.assertRaisesRegex(DirectorAnnotationError, "editable suffix"):
+            compile_director_annotation(value, contract())
+
+    def test_changed_editable_camera_accepts_human_modified_source(self) -> None:
+        value = payload()
+        value["keyframes"][3]["camera"]["position"][0] += 0.5
+        value["keyframes"][3]["camera_source"] = "human_modified"
+        result = compile_director_annotation(value, contract())
+        self.assertEqual(
+            json.loads(result.canonical_annotation)["keyframes"][3]["camera_source"],
+            "human_modified",
+        )
+
+    def test_rejects_inherited_claim_for_changed_camera(self) -> None:
+        value = payload()
+        value["keyframes"][3]["camera"]["position"][0] += 0.5
+        with self.assertRaisesRegex(DirectorAnnotationError, "camera_source"):
+            compile_director_annotation(value, contract())
+
+    def test_rejects_human_modified_claim_for_unchanged_camera(self) -> None:
+        value = payload()
+        value["keyframes"][3]["camera_source"] = "human_modified"
+        with self.assertRaisesRegex(DirectorAnnotationError, "camera_source"):
             compile_director_annotation(value, contract())
 
 

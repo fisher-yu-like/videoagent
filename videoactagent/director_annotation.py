@@ -29,7 +29,8 @@ _PAYLOAD_FIELDS = frozenset({
     "auto_filled_values", "frozen_through_keyframe", "inheritance_sha256",
     "inherited_locked_values", "keyframes",
 })
-_KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera", "visible_state"})
+_INHERITED_KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera", "visible_state"})
+_KEYFRAME_FIELDS = _INHERITED_KEYFRAME_FIELDS | {"camera_source"}
 _CAMERA_FIELDS = frozenset({
     "position", "look_at", "focal_length_mm", "shot_size", "interpolation",
     "roll_degrees",
@@ -121,11 +122,16 @@ def _canonical(value: object) -> bytes:
 
 
 def _normalize_frame(
-    raw: object, schedule: Mapping[str, object], actors: Sequence[str], label: str
+    raw: object, schedule: Mapping[str, object], actors: Sequence[str], label: str,
+    *, require_camera_source: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise DirectorAnnotationError(f"{label} must be an object")
-    _exact(raw, _KEYFRAME_FIELDS, label)
+    _exact(
+        raw,
+        _KEYFRAME_FIELDS if require_camera_source else _INHERITED_KEYFRAME_FIELDS,
+        label,
+    )
     time = _unit(raw.get("t"), f"{label}.t")
     if raw.get("id") != schedule["id"] or time != schedule["t"]:
         raise DirectorAnnotationError("annotation keyframe schedule differs from contract")
@@ -275,7 +281,19 @@ def compile_director_annotation(
     prompts: list[str] = []
     normalized_frames = []
     for index, (raw, schedule) in enumerate(zip(frames_value, expected["keyframes"])):
-        normalized = _normalize_frame(raw, schedule, expected["actors"], f"K{index}")
+        normalized = _normalize_frame(
+            raw, schedule, expected["actors"], f"K{index}", require_camera_source=True
+        )
+        if index <= boundary_index and normalized != expected["inherited_keyframes"][index]:
+            raise DirectorAnnotationError("locked inherited keyframes were modified")
+        source = raw.get("camera_source") if isinstance(raw, Mapping) else None
+        is_inherited = normalized["camera"] == expected["inherited_keyframes"][index]["camera"]
+        required_source = "inherited" if is_inherited else "human_modified"
+        if source != required_source:
+            raise DirectorAnnotationError(
+                f"K{index}.camera_source must be {required_source} for the submitted camera"
+            )
+        normalized["camera_source"] = source
         time = normalized["t"]
         for actor in expected["actors"]:
             point = normalized["actors"][actor]
@@ -303,7 +321,11 @@ def compile_director_annotation(
         )
         normalized_frames.append(normalized)
 
-    if normalized_frames[:boundary_index + 1] != expected["inherited_keyframes"][:boundary_index + 1]:
+    locked_frames = [
+        {key: value for key, value in frame.items() if key != "camera_source"}
+        for frame in normalized_frames[:boundary_index + 1]
+    ]
+    if locked_frames != expected["inherited_keyframes"][:boundary_index + 1]:
         raise DirectorAnnotationError("locked inherited keyframes were modified")
 
     tracks = tuple(

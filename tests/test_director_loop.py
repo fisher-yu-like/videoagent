@@ -34,6 +34,9 @@ class DirectorLoopTests(unittest.TestCase):
     def director_payload(self, manifest: Path, boundary: str = "K0") -> dict:
         session = session_document(manifest)
         boundary_index = int(boundary[1:])
+        frames = deepcopy(session["inherited_keyframes"])
+        for frame in frames:
+            frame["camera_source"] = "inherited"
         return {
             "schema_version": "1.0",
             "author_id": "sy",
@@ -45,7 +48,7 @@ class DirectorLoopTests(unittest.TestCase):
             "inherited_locked_values": deepcopy(
                 session["inherited_keyframes"][:boundary_index + 1]
             ),
-            "keyframes": deepcopy(session["inherited_keyframes"]),
+            "keyframes": frames,
         }
 
     def test_prepare_exposes_complete_real_d0_video_and_five_markers(self) -> None:
@@ -112,10 +115,13 @@ class DirectorLoopTests(unittest.TestCase):
                 exported["approval"]["sha256"],
                 hashlib.sha256(approval.read_bytes()).hexdigest(),
             )
-            self.assertEqual(
-                inherited,
-                json.loads((manifest.parent / exported["annotation"]["path"]).read_text(encoding="utf-8"))["keyframes"],
-            )
+            saved = json.loads(
+                (manifest.parent / exported["annotation"]["path"]).read_text(encoding="utf-8")
+            )["keyframes"]
+            self.assertEqual(inherited, [
+                {key: value for key, value in frame.items() if key != "camera_source"}
+                for frame in saved
+            ])
             diagnostic = manifest.parent / exported["diagnostic"]["path"]
             diagnostic.write_bytes(diagnostic.read_bytes() + b"tamper")
             with self.assertRaisesRegex(DirectorLoopError, "hash"):
