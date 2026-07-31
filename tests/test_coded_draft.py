@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import subprocess
 import tempfile
@@ -607,13 +609,98 @@ class CodedDraftTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
         self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
 
+    def test_mutation_between_media_decode_and_inventory_cannot_publish_stale_hashes(self):
+        import videoactagent.coded_draft as coded_draft
+
+        original_inventory = coded_draft._artifact_inventory
+
+        def mutate_before_inventory(root, below):
+            if below.name == "renders":
+                clay = below / "clay" / "station_proxy.mp4"
+                with clay.open("ab") as handle:
+                    handle.write(b"changed after media record")
+            return original_inventory(root, below)
+
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run",
+            side_effect=self._successful_runner,
+        ), mock.patch(
+            "videoactagent.coded_draft._artifact_inventory",
+            side_effect=mutate_before_inventory,
+        ):
+            result = coded_draft.main(self._args())
+
+        self.assertEqual(result, 2)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.root.glob(".coded.*.staging")), [])
+
     def test_atomic_json_refuses_nonstandard_nan_values(self):
-        from videoactagent.coded_draft import _atomic_json
+        from videoactagent.coded_draft import CodedDraftError, _atomic_json
 
         target = self.root / "nan.json"
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(CodedDraftError, "serialize JSON"):
             _atomic_json(target, {"duration": float("nan")})
         self.assertFalse(target.exists())
+
+    def test_decode_rejects_nonfinite_stream_duration_from_real_video(self):
+        import videoactagent.coded_draft as coded_draft
+
+        video = self.root / "duration.mp4"
+        _write_video(
+            video,
+            frame_count=4,
+            fps=4,
+            resolution=(64, 48),
+            base_value=20,
+        )
+        real_read_frames = imageio_ffmpeg.read_frames
+
+        def frames_with_nan_duration(*args, **kwargs):
+            reader = real_read_frames(*args, **kwargs)
+            try:
+                metadata = dict(next(reader))
+                metadata["duration"] = float("nan")
+                yield metadata
+                yield from reader
+            finally:
+                reader.close()
+
+        with mock.patch(
+            "videoactagent.coded_draft.imageio_ffmpeg.read_frames",
+            side_effect=frames_with_nan_duration,
+        ), self.assertRaisesRegex(coded_draft.CodedDraftError, "duration"):
+            coded_draft._decode_video(
+                video,
+                expected_frames=4,
+                expected_fps=4,
+                expected_duration=1.0,
+                expected_resolution=(64, 48),
+                selected_indices={0, 3},
+            )
+
+    def test_cli_reports_json_serialization_failure_without_traceback(self):
+        import videoactagent.coded_draft as coded_draft
+
+        real_decode = coded_draft._decode_video
+
+        def inject_nan(*args, **kwargs):
+            media, frames = real_decode(*args, **kwargs)
+            media["codec"] = float("nan")
+            return media, frames
+
+        stderr = io.StringIO()
+        with mock.patch(
+            "videoactagent.coded_draft.subprocess.run",
+            side_effect=self._successful_runner,
+        ), mock.patch(
+            "videoactagent.coded_draft._decode_video", side_effect=inject_nan
+        ), redirect_stderr(stderr):
+            result = coded_draft.main(self._args())
+
+        self.assertEqual(result, 2)
+        self.assertIn("CODED_DRAFT_FAILED: CodedDraftError", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

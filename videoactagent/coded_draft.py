@@ -63,9 +63,12 @@ def _sha256(path: Path) -> str:
 
 def _atomic_json(path: Path, value: Mapping[str, Any]) -> None:
     temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
-    payload = (
-        json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
-    ).encode("utf-8")
+    try:
+        payload = (
+            json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise CodedDraftError(f"cannot serialize JSON: {exc}") from exc
     try:
         with temporary.open("xb") as handle:
             handle.write(payload)
@@ -319,7 +322,12 @@ def _decode_video(
             f"decoded duration {decoded_duration} does not match {expected_duration}: {path}"
         )
     stream_duration = metadata.get("duration")
-    if isinstance(stream_duration, bool) or not isinstance(stream_duration, (int, float)):
+    if (
+        isinstance(stream_duration, bool)
+        or not isinstance(stream_duration, (int, float))
+        or not math.isfinite(float(stream_duration))
+        or float(stream_duration) <= 0
+    ):
         raise CodedDraftError(f"video stream duration is unavailable: {path}")
     if abs(float(stream_duration) - expected_duration) > duration_tolerance:
         raise CodedDraftError(
@@ -401,6 +409,51 @@ def _verify_final_inventory(
         record = expected[relative]
         if record.get("bytes") != target.stat().st_size or record.get("sha256") != _sha256(target):
             raise CodedDraftError(f"final hash verification failed: {relative}")
+
+
+def _canonicalize_video_records(
+    videos: dict[str, dict[str, object]],
+    render_artifacts: list[dict[str, object]],
+) -> None:
+    canonical = {str(record["path"]): record for record in render_artifacts}
+    for style in ("diagnostic", "clay"):
+        current = videos[style]
+        record = canonical.get(str(current["path"]))
+        if record is None or any(
+            current[field] != record[field] for field in ("path", "bytes", "sha256")
+        ):
+            raise CodedDraftError(
+                f"{style} video changed between media decode and artifact inventory"
+            )
+        videos[style] = {**record, "media": current["media"]}
+
+
+def _verify_json_artifact_references(
+    documents: list[Mapping[str, object]],
+    canonical_records: list[Mapping[str, object]],
+) -> None:
+    canonical = {str(record["path"]): record for record in canonical_records}
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            if {"path", "bytes", "sha256"}.issubset(value):
+                path = value.get("path")
+                record = canonical.get(str(path))
+                if record is None or any(
+                    value.get(field) != record.get(field)
+                    for field in ("path", "bytes", "sha256")
+                ):
+                    raise CodedDraftError(
+                        f"JSON artifact reference differs from canonical inventory: {path}"
+                    )
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    for document in documents:
+        visit(document)
 
 
 def _validate_semantic_ids(plan: SemanticStoryPlan) -> None:
@@ -575,6 +628,7 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         _save_png(sheet, sheet_path)
 
         render_artifacts = _artifact_inventory(staging, staging / "renders")
+        _canonicalize_video_records(videos, render_artifacts)
         render_logs = _artifact_inventory(staging, staging / "logs")
         contact_sheet = _relative_record(sheet_path, staging)
         bundle = {
@@ -650,8 +704,18 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
             "backend_consumed": False,
             "artifact_inventory": inventory_records,
         }
-        _atomic_json(staging / "manifest.json", manifest)
+        manifest_path = staging / "manifest.json"
+        _atomic_json(manifest_path, manifest)
         _verify_final_inventory(staging, inventory_records, ignored={"manifest.json"})
+        persisted_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        persisted_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(persisted_bundle, Mapping) or not isinstance(
+            persisted_manifest, Mapping
+        ):
+            raise CodedDraftError("persisted bundle and manifest must be JSON objects")
+        _verify_json_artifact_references(
+            [persisted_bundle, persisted_manifest], inventory_records
+        )
         os.replace(staging, output)
         return output
     except Exception:
