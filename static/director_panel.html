@@ -2,77 +2,111 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>VideoActAgent Director Loop</title>
+<title>VideoActAgent 人工导演循环</title>
 <style>
-:root{color-scheme:dark;font:14px system-ui;background:#0b1020;color:#eef2ff}body{margin:0}header{padding:16px 22px;background:#111827;display:flex;justify-content:space-between;align-items:center}h1{font-size:20px;margin:0}.badge{padding:6px 10px;border-radius:16px;background:#334155}.layout{display:grid;grid-template-columns:minmax(520px,1.35fr) minmax(430px,1fr);gap:14px;padding:14px}.panel{background:#111827;border:1px solid #334155;border-radius:10px;padding:12px}video,canvas{width:100%;background:#020617;border:1px solid #475569;border-radius:8px}video{max-height:50vh}.timeline,.toolbar,.actions,.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.timeline{justify-content:space-between;margin:10px 0}.k{flex:1;min-width:55px}.active{outline:2px solid #60a5fa}.done{background:#166534}button,input,select,textarea{font:inherit;color:#eef2ff;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:8px}button{cursor:pointer}button:disabled{opacity:.45;cursor:not-allowed}textarea{width:100%;box-sizing:border-box;min-height:76px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.field label{display:block;color:#a5b4fc;font-size:12px;margin-bottom:4px}.field input,.field select{width:100%;box-sizing:border-box}.mode{font-size:12px}.selected{background:#0369a1}.actions{margin-top:12px}.actions button{flex:1;padding:12px}.render{background:#6d28d9}.approve{background:#15803d}.status{white-space:pre-wrap;color:#bfdbfe;min-height:38px;margin:8px 0 0}.hint{color:#94a3b8;font-size:12px}.legend span{margin-right:12px}.orange{color:#f59e0b}.blue{color:#3b82f6}.cyan{color:#22d3ee}.green{color:#4ade80}@media(max-width:980px){.layout{grid-template-columns:1fr}}
+:root{color-scheme:dark;font:14px system-ui;background:#0b1020;color:#eef2ff}body{margin:0}header{padding:16px 22px;background:#111827;display:flex;justify-content:space-between;align-items:center}h1{font-size:20px;margin:0}h2{margin:8px 0 12px}.badge{padding:6px 10px;border-radius:16px;background:#334155}.layout{display:grid;grid-template-columns:minmax(520px,1.35fr) minmax(430px,1fr);gap:14px;padding:14px}.panel,.guide{background:#111827;border:1px solid #334155;border-radius:10px;padding:14px}.guide{margin:0 14px 18px;line-height:1.7}.guide h2{color:#bfdbfe}.guide h3{margin-bottom:2px}.guide p{margin-top:2px}.guide code{color:#fcd34d}.boundary{padding:10px;background:#172033;border-radius:8px;margin:10px 0}.boundary select{min-width:170px}video,canvas{width:100%;background:#020617;border:1px solid #475569;border-radius:8px}video{max-height:50vh}.timeline,.toolbar,.actions,.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.timeline{justify-content:space-between;margin:10px 0}.k{flex:1;min-width:64px}.k.locked{border-style:dashed;color:#cbd5e1}.active{outline:2px solid #60a5fa}.done{background:#166534}button,input,select,textarea{font:inherit;color:#eef2ff;background:#1e293b;border:1px solid #475569;border-radius:6px;padding:8px}button{cursor:pointer}button:disabled,input:disabled,select:disabled,textarea:disabled{opacity:.5;cursor:not-allowed}textarea{width:100%;box-sizing:border-box;min-height:80px}.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.field{margin:8px 0}.field label{display:block;color:#a5b4fc;font-size:12px;margin-bottom:4px}.field input,.field select{width:100%;box-sizing:border-box}.mode{font-size:12px}.selected{background:#0369a1}.actions{margin-top:12px}.actions button{flex:1;padding:12px}.render{background:#6d28d9}.approve{background:#15803d}.status{white-space:pre-wrap;color:#bfdbfe;min-height:38px;margin:8px 0 0}.hint{color:#94a3b8;font-size:12px}.warning{color:#fbbf24}.legend span{margin-right:12px}.orange{color:#f59e0b}.blue{color:#3b82f6}.cyan{color:#22d3ee}.green{color:#4ade80}details{border:1px solid #334155;border-radius:8px;padding:10px;margin-top:10px}summary{cursor:pointer;color:#bfdbfe;font-weight:600}@media(max-width:980px){.layout{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-<header><h1>Human Director Loop</h1><div><span id="version" class="badge">loading</span> <span id="approval" class="badge">未批准</span></div></header>
+<header><h1>人工导演循环</h1><div><span id="version" class="badge">载入中</span> <span id="approval" class="badge">未批准</span></div></header>
 <div class="layout">
   <section class="panel">
-    <h2>完整 Blender Proxy</h2>
+    <h2>完整 Blender Proxy 视频</h2>
     <video id="proxy" controls preload="metadata"></video>
+    <div class="boundary">
+      <label for="frozen-boundary"><strong>锁定起点：</strong></label>
+      <select id="frozen-boundary" required>
+        <option value="">请选择</option><option value="K0">K0</option><option value="K1">K1</option><option value="K2">K2</option><option value="K3">K3</option>
+      </select>
+      <span id="boundary-note" class="hint">先选一个保持不变的最后关键帧。</span>
+    </div>
     <div id="timeline" class="timeline"></div>
-    <p class="hint">必须播放或拖动完整视频检查连续运动；点击 K0–K4 会跳转到对应时刻。</p>
-    <h2>俯视轨迹</h2>
+    <p class="hint">请先检查完整视频。选择 K2 表示 K0–K2 全部锁定，从 K3 开始修改。</p>
+    <h2>俯视轨迹图</h2>
     <div id="modes" class="toolbar"></div>
     <canvas id="plane" width="960" height="540"></canvas>
-    <p class="legend"><span class="orange">● actor_a</span><span class="blue">● actor_b</span><span class="cyan">▲ 摄像机</span><span class="green">＋ 朝向点</span></p>
+    <p class="legend"><span class="orange">● actor_a</span><span class="blue">● actor_b</span><span class="cyan">▲ 摄像机位置</span><span class="green">＋ 摄像机注视点</span></p>
+    <p class="hint">细灰线是当前 Proxy 的参考轨迹；锁定段不可修改；彩色线是你新画的后续轨迹。</p>
   </section>
   <section class="panel">
     <h2 id="key-title">K0 导演参数</h2>
-    <div class="row"><label>Author <input id="author" autocomplete="off" placeholder="你的名字"></label><button id="semantic">使用该帧语义描述</button><button id="camera-reference">使用当前镜头作为起点</button></div>
-    <div class="field"><label>该帧具体 Prompt</label><textarea id="prompt" placeholder="描述这一时刻画面中必须看见的动作与状态"></textarea></div>
-    <h3>摄像机（位置与朝向需在左侧网格分别点击）</h3>
-    <div class="grid">
-      <div class="field"><label>Camera X</label><input id="camera-x" readonly></div>
-      <div class="field"><label>Camera Y</label><input id="camera-y" readonly></div>
-      <div class="field"><label>Camera Z / 高度</label><input id="camera-z" type="number" step="0.1" placeholder="例如 6"></div>
-      <div class="field"><label>Look-at X</label><input id="look-x" readonly></div>
-      <div class="field"><label>Look-at Y</label><input id="look-y" readonly></div>
-      <div class="field"><label>Look-at Z</label><input id="look-z" type="number" step="0.1" placeholder="例如 1.25"></div>
-      <div class="field"><label>焦距 mm</label><input id="focal" type="number" min="1" max="300" step="1" placeholder="例如 35"></div>
-      <div class="field"><label>景别</label><select id="shot"><option value="">请选择</option><option value="extreme_wide">Extreme wide</option><option value="wide">Wide</option><option value="medium">Medium</option><option value="close">Close</option><option value="extreme_close">Extreme close</option></select></div>
-      <div class="field"><label>插值</label><select id="interpolation"><option value="">请选择</option><option value="linear">Linear</option><option value="bezier">Bezier</option><option value="constant">Constant</option></select></div>
-      <div class="field"><label>Roll degrees</label><input id="roll" type="number" min="-180" max="180" step="1" placeholder="例如 0"></div>
-    </div>
-    <div class="actions"><button id="previous">← 上一帧</button><button id="save-key">保存当前 K</button><button id="next">下一帧 →</button></div>
-    <div class="actions"><button id="generate" class="render">Generate next proxy</button><button id="approve-button" class="approve">Approve current proxy</button></div>
+    <div class="row"><label>标注人 <input id="author" autocomplete="off" placeholder="你的名字"></label><button id="semantic">沿用该时刻语义</button><button id="camera-reference">沿用该时刻镜头</button></div>
+    <div class="field"><label>该时刻必须看见什么</label><textarea id="prompt" placeholder="例如：橙衣人物走到画面中央，蓝衣人物保持原地，两人仍有明显距离。"></textarea></div>
+    <div class="field"><label>景别</label><select id="shot"><option value="">请选择</option><option value="extreme_wide">大远景</option><option value="wide">全景</option><option value="medium">中景</option><option value="close">近景</option><option value="extreme_close">特写</option></select></div>
+    <details>
+      <summary>高级镜头参数</summary>
+      <p class="hint">先在左侧选择“摄像机位置”或“摄像机注视点”，再在轨迹图点击。一般保持线性插值、画面倾斜 0°。</p>
+      <div class="grid">
+        <div class="field"><label>摄像机 X</label><input id="camera-x" readonly></div>
+        <div class="field"><label>摄像机 Y</label><input id="camera-y" readonly></div>
+        <div class="field"><label>摄像机高度 Z</label><input id="camera-z" type="number" step="0.1"></div>
+        <div class="field"><label>注视点 X</label><input id="look-x" readonly></div>
+        <div class="field"><label>注视点 Y</label><input id="look-y" readonly></div>
+        <div class="field"><label>注视点高度 Z</label><input id="look-z" type="number" step="0.1"></div>
+        <div class="field"><label>焦距（毫米）</label><input id="focal" type="number" min="1" max="300" step="1"></div>
+        <div class="field"><label>插值方式</label><select id="interpolation"><option value="">请选择</option><option value="linear">线性（推荐）</option><option value="bezier">缓入缓出</option><option value="constant">瞬间跳变</option></select></div>
+        <div class="field"><label>画面倾斜 Roll（度）</label><input id="roll" type="number" min="-180" max="180" step="1"></div>
+      </div>
+    </details>
+    <div class="actions"><button id="previous">← 上一个 K</button><button id="save-key">保存当前 K</button><button id="next">下一个 K →</button></div>
+    <div class="actions"><button id="generate" class="render">生成下一版 Proxy <span hidden>Generate next proxy</span></button><button id="approve-button" class="approve">批准当前 Proxy <span hidden>Approve current proxy</span></button></div>
     <pre id="status" class="status"></pre>
   </section>
 </div>
+<section class="guide">
+  <h2>中文使用说明</h2>
+  <h3>1. 怎么修改一段轨迹？</h3>
+  <p>先看完整 Proxy，再选择“锁定起点”。选择 K2 时，K0、K1、K2 都保持原样，系统会自动显示 K2 的人物位置、摄像机位置和注视点；你只需要从 K3 继续画。<strong>要修改 K2，请把锁定起点选为 K1</strong>。K4 不能选，因为它后面没有可修改内容。</p>
+  <h3>2. 什么是景别？</h3>
+  <p>景别就是人物在画面里有多大：全景能看到人物和环境，中景更关注上半身与动作，近景和特写更关注表情。第一次建议沿用原镜头。</p>
+  <h3>3. 什么是焦距和注视点？</h3>
+  <p>注视点是摄像机朝向的位置。焦距越大，视野越窄、人物看起来越近；35 mm 通常是较自然的广角起点。</p>
+  <h3>4. 什么是插值？</h3>
+  <p>插值决定两个 K 点之间如何移动：线性是匀速连续移动（推荐）；缓入缓出会在两端放慢；瞬间跳变会直接切换，通常不要用。</p>
+  <h3>5. 什么是画面倾斜？</h3>
+  <p>画面倾斜（Roll）是地平线左右歪斜的角度。普通镜头保持 0°；只有明确需要摇晃或倾斜构图时才修改。</p>
+  <h3>6. 什么时候交给 VACE？</h3>
+  <p>点击“生成下一版 Proxy”只会调用本机 Blender。必须播放并确认整段新 Proxy 后，再点击“批准当前 Proxy”；只有批准后才开放 VACE，不会自动调用付费 API。</p>
+</section>
 <script>
 'use strict';
-let session=null,current=0,mode=null,pollTimer=null;
+let session=null,current=0,mode=null,pollTimer=null,boundaryIndex=null;
 const frames=new Map(),plane=document.getElementById('plane'),ctx=plane.getContext('2d');
 const colors=['#f59e0b','#3b82f6','#a78bfa'];
 const $=id=>document.getElementById(id);
+const clone=value=>JSON.parse(JSON.stringify(value));
+const editableControls=['semantic','camera-reference','prompt','shot','camera-z','look-z','focal','interpolation','roll','save-key'];
 function world(nx,ny){const b=session.world_bounds;return [b[0]+nx*(b[1]-b[0]),b[3]-ny*(b[3]-b[2])];}
 function normalized(x,y){const b=session.world_bounds;return [(x-b[0])/(b[1]-b[0]),(b[3]-y)/(b[3]-b[2])];}
+function fromFrame(item){return{actors:Object.fromEntries(Object.entries(item.actors).map(([a,p])=>[a,[p.x,p.y]])),camera:clone(item.camera),visible_state:item.visible_state};}
 function dataFor(i){if(!frames.has(i))frames.set(i,{actors:{},camera:{}});return frames.get(i);}
+function locked(i){return boundaryIndex!==null&&i<=boundaryIndex;}
 function finite(v){return v!==''&&Number.isFinite(Number(v));}
-function persistFields(){const d=dataFor(current);d.visible_state=$('prompt').value;d.camera.position=d.camera.position||[null,null,null];d.camera.look_at=d.camera.look_at||[null,null,null];d.camera.position[2]=finite($('camera-z').value)?Number($('camera-z').value):null;d.camera.look_at[2]=finite($('look-z').value)?Number($('look-z').value):null;d.camera.focal_length_mm=finite($('focal').value)?Number($('focal').value):null;d.camera.shot_size=$('shot').value;d.camera.interpolation=$('interpolation').value;d.camera.roll_degrees=finite($('roll').value)?Number($('roll').value):null;}
-function loadFields(){const d=dataFor(current),c=d.camera||{};$('key-title').textContent=session.keyframes[current].id+' 导演参数';$('prompt').value=d.visible_state||'';$('camera-x').value=c.position&&c.position[0]!=null?c.position[0].toFixed(3):'';$('camera-y').value=c.position&&c.position[1]!=null?c.position[1].toFixed(3):'';$('camera-z').value=c.position&&c.position[2]!=null?c.position[2]:'';$('look-x').value=c.look_at&&c.look_at[0]!=null?c.look_at[0].toFixed(3):'';$('look-y').value=c.look_at&&c.look_at[1]!=null?c.look_at[1].toFixed(3):'';$('look-z').value=c.look_at&&c.look_at[2]!=null?c.look_at[2]:'';$('focal').value=c.focal_length_mm??'';$('shot').value=c.shot_size||'';$('interpolation').value=c.interpolation||'';$('roll').value=c.roll_degrees??'';renderTimeline();draw();}
-function complete(i){const d=dataFor(i),c=d.camera||{};return session.actors.every(a=>d.actors[a])&&d.visible_state&&c.position&&c.position.every(Number.isFinite)&&c.look_at&&c.look_at.every(Number.isFinite)&&Number.isFinite(c.focal_length_mm)&&c.shot_size&&c.interpolation&&Number.isFinite(c.roll_degrees);}
-function renderTimeline(){const box=$('timeline');box.innerHTML='';session.keyframes.forEach((k,i)=>{const b=document.createElement('button');b.className='k '+(i===current?'active ':'')+(complete(i)?'done':'');b.textContent=k.id+' · '+(k.t*session.timeline.duration_seconds).toFixed(1)+'s';b.onclick=()=>selectKey(i,true);box.appendChild(b);});}
+function persistFields(){if(!session||locked(current))return;const d=dataFor(current);d.visible_state=$('prompt').value;d.camera.position=d.camera.position||[null,null,null];d.camera.look_at=d.camera.look_at||[null,null,null];d.camera.position[2]=finite($('camera-z').value)?Number($('camera-z').value):null;d.camera.look_at[2]=finite($('look-z').value)?Number($('look-z').value):null;d.camera.focal_length_mm=finite($('focal').value)?Number($('focal').value):null;d.camera.shot_size=$('shot').value;d.camera.interpolation=$('interpolation').value;d.camera.roll_degrees=finite($('roll').value)?Number($('roll').value):null;}
+function loadFields(){const d=dataFor(current),c=d.camera||{},isLocked=locked(current);$('key-title').textContent=session.keyframes[current].id+' 导演参数'+(isLocked?'（已锁定）':'');$('prompt').value=d.visible_state||'';$('camera-x').value=c.position&&c.position[0]!=null?Number(c.position[0]).toFixed(3):'';$('camera-y').value=c.position&&c.position[1]!=null?Number(c.position[1]).toFixed(3):'';$('camera-z').value=c.position&&c.position[2]!=null?c.position[2]:'';$('look-x').value=c.look_at&&c.look_at[0]!=null?Number(c.look_at[0]).toFixed(3):'';$('look-y').value=c.look_at&&c.look_at[1]!=null?Number(c.look_at[1]).toFixed(3):'';$('look-z').value=c.look_at&&c.look_at[2]!=null?c.look_at[2]:'';$('focal').value=c.focal_length_mm??'';$('shot').value=c.shot_size||'';$('interpolation').value=c.interpolation||'';$('roll').value=c.roll_degrees??'';editableControls.forEach(id=>$(id).disabled=isLocked);renderTimeline();draw();}
+function complete(i){const d=dataFor(i),c=d.camera||{};return session.actors.every(a=>Array.isArray(d.actors[a]))&&Boolean(d.visible_state&&d.visible_state.trim())&&c.position&&c.position.every(Number.isFinite)&&c.look_at&&c.look_at.every(Number.isFinite)&&Number.isFinite(c.focal_length_mm)&&Boolean(c.shot_size)&&Boolean(c.interpolation)&&Number.isFinite(c.roll_degrees);}
+function renderTimeline(){const box=$('timeline');box.innerHTML='';session.keyframes.forEach((k,i)=>{const b=document.createElement('button');b.className='k '+(i===current?'active ':'')+(complete(i)?'done ':'')+(locked(i)?'locked ':'');b.textContent=k.id+' · '+(k.t*session.timeline.duration_seconds).toFixed(1)+'s'+(i===boundaryIndex?' · 锁定起点':'');b.onclick=()=>selectKey(i,true);box.appendChild(b);});}
 function selectKey(i,seek){persistFields();current=Math.max(0,Math.min(4,i));if(seek)$('proxy').currentTime=session.keyframes[current].t*session.timeline.duration_seconds;loadFields();}
-function renderModes(){const box=$('modes');box.innerHTML='';session.actors.forEach((a,i)=>addMode(box,'actor:'+a,a,colors[i%colors.length]));addMode(box,'camera-position','camera-position','#22d3ee');addMode(box,'camera-look-at','camera-look-at','#4ade80');}
+function applyBoundary(value){persistFields();frames.clear();boundaryIndex=value===''?null:Number(value.slice(1));if(boundaryIndex!==null){for(let i=0;i<=boundaryIndex;i++)frames.set(i,fromFrame(session.inherited_keyframes[i]));current=Math.min(boundaryIndex+1,4);$('boundary-note').textContent='锁定起点 '+value+'；从 K'+(boundaryIndex+1)+' 开始修改。';}else{$('boundary-note').textContent='先选一个保持不变的最后关键帧。';current=0;}loadFields();}
+$('frozen-boundary').onchange=e=>applyBoundary(e.target.value);
+function renderModes(){const box=$('modes');box.innerHTML='';session.actors.forEach((a,i)=>addMode(box,'actor:'+a,a,colors[i%colors.length]));addMode(box,'camera-position','摄像机位置','#22d3ee');addMode(box,'camera-look-at','摄像机注视点','#4ade80');}
 function addMode(box,value,label,color){const b=document.createElement('button');b.className='mode';b.dataset.mode=value;b.textContent=label;b.style.borderColor=color;b.onclick=()=>{mode=value;document.querySelectorAll('.mode').forEach(x=>x.classList.toggle('selected',x===b));};box.appendChild(b);}
-function drawPath(points,color,dash=[]){const valid=points.filter(Boolean);if(valid.length<2)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=4;ctx.setLineDash(dash);ctx.beginPath();valid.forEach((p,i)=>{const x=p[0]*plane.width,y=p[1]*plane.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.restore();}
-function draw(){ctx.clearRect(0,0,plane.width,plane.height);ctx.strokeStyle='#334155';ctx.lineWidth=1;for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*plane.width/10,0);ctx.lineTo(i*plane.width/10,plane.height);ctx.stroke();ctx.beginPath();ctx.moveTo(0,i*plane.height/10);ctx.lineTo(plane.width,i*plane.height/10);ctx.stroke();}session.actors.forEach((a,j)=>{const pts=session.keyframes.map((_,i)=>dataFor(i).actors[a]);drawPath(pts,colors[j%colors.length]);pts.forEach((p,i)=>dot(p,colors[j%colors.length],i===current?10:6));});const cameras=session.keyframes.map((_,i)=>{const p=dataFor(i).camera.position;return p&&p[0]!=null?normalized(p[0],p[1]):null});const looks=session.keyframes.map((_,i)=>{const p=dataFor(i).camera.look_at;return p&&p[0]!=null?normalized(p[0],p[1]):null});drawPath(cameras,'#22d3ee',[10,6]);cameras.forEach((p,i)=>dot(p,'#22d3ee',i===current?11:7));looks.forEach((p,i)=>dot(p,'#4ade80',i===current?9:5));}
-function dot(p,color,r){if(!p)return;ctx.fillStyle=color;ctx.beginPath();ctx.arc(p[0]*plane.width,p[1]*plane.height,r,0,Math.PI*2);ctx.fill();}
-plane.onclick=e=>{if(!mode){$('status').textContent='请先选择人物、camera-position 或 camera-look-at';return}const r=plane.getBoundingClientRect(),nx=(e.clientX-r.left)/r.width,ny=(e.clientY-r.top)/r.height,d=dataFor(current),w=world(nx,ny);if(mode.startsWith('actor:'))d.actors[mode.slice(6)]=[nx,ny];else if(mode==='camera-position'){d.camera.position=d.camera.position||[null,null,null];d.camera.position[0]=w[0];d.camera.position[1]=w[1];}else{d.camera.look_at=d.camera.look_at||[null,null,null];d.camera.look_at[0]=w[0];d.camera.look_at[1]=w[1];}loadFields();};
-$('semantic').onclick=()=>{$('prompt').value=session.keyframes[current].semantic_description;persistFields();renderTimeline();};
-$('camera-reference').onclick=()=>{const c=session.camera_reference,d=dataFor(current);d.camera.position=[...c.start];const b=session.world_bounds;d.camera.look_at=[(b[0]+b[1])/2,(b[2]+b[3])/2,1.25];d.camera.focal_length_mm=c.focal_length_mm;d.camera.shot_size=c.shot_size;d.camera.interpolation='linear';d.camera.roll_degrees=0;loadFields();};
+function drawPath(points,color,dash=[],width=4){const valid=points.filter(Boolean);if(valid.length<2)return;ctx.save();ctx.strokeStyle=color;ctx.lineWidth=width;ctx.setLineDash(dash);ctx.beginPath();valid.forEach((p,i)=>{const x=p[0]*plane.width,y=p[1]*plane.height;i?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();ctx.restore();}
+function dot(p,color,r,label=''){if(!p)return;ctx.fillStyle=color;ctx.beginPath();ctx.arc(p[0]*plane.width,p[1]*plane.height,r,0,Math.PI*2);ctx.fill();if(label){ctx.font='bold 14px system-ui';ctx.fillText(label,p[0]*plane.width+10,p[1]*plane.height-10);}}
+function inheritedActor(actor){return session.inherited_keyframes.map(k=>[k.actors[actor].x,k.actors[actor].y]);}
+function inheritedCamera(field){return session.inherited_keyframes.map(k=>normalized(k.camera[field][0],k.camera[field][1]));}
+function draw(){ctx.clearRect(0,0,plane.width,plane.height);ctx.strokeStyle='#334155';ctx.lineWidth=1;for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*plane.width/10,0);ctx.lineTo(i*plane.width/10,plane.height);ctx.stroke();ctx.beginPath();ctx.moveTo(0,i*plane.height/10);ctx.lineTo(plane.width,i*plane.height/10);ctx.stroke();}session.actors.forEach(a=>drawPath(inheritedActor(a),'#64748b',[4,8],2));drawPath(inheritedCamera('position'),'#64748b',[4,8],2);session.actors.forEach((a,j)=>{const pts=session.keyframes.map((_,i)=>frames.has(i)?dataFor(i).actors[a]:null);const lockedPts=pts.map((p,i)=>locked(i)?p:null);const editPts=pts.map((p,i)=>i===boundaryIndex||!locked(i)?p:null);drawPath(lockedPts,'#94a3b8',[7,7],3);drawPath(editPts,colors[j%colors.length],[],4);pts.forEach((p,i)=>dot(p,locked(i)?'#94a3b8':colors[j%colors.length],i===current?10:6,i===boundaryIndex?'锁定起点':''));});const cameras=session.keyframes.map((_,i)=>{if(!frames.has(i))return null;const p=dataFor(i).camera.position;return p&&p[0]!=null?normalized(p[0],p[1]):null});const looks=session.keyframes.map((_,i)=>{if(!frames.has(i))return null;const p=dataFor(i).camera.look_at;return p&&p[0]!=null?normalized(p[0],p[1]):null});drawPath(cameras,'#22d3ee',[10,6]);drawPath(looks,'#4ade80',[3,7],3);cameras.forEach((p,i)=>dot(p,locked(i)?'#94a3b8':'#22d3ee',i===current?11:7,i===boundaryIndex?'锁定起点':''));looks.forEach((p,i)=>dot(p,locked(i)?'#94a3b8':'#4ade80',i===current?9:5));}
+plane.onclick=e=>{if(boundaryIndex===null){$('status').textContent='请先选择锁定起点';return}if(locked(current)){$('status').textContent='该 K 已锁定；要修改它，请选择前一个 K 作为锁定起点';return}if(!mode){$('status').textContent='请先选择人物、摄像机位置或摄像机注视点';return}const r=plane.getBoundingClientRect(),nx=(e.clientX-r.left)/r.width,ny=(e.clientY-r.top)/r.height,d=dataFor(current),w=world(nx,ny);if(mode.startsWith('actor:'))d.actors[mode.slice(6)]=[nx,ny];else if(mode==='camera-position'){d.camera.position=d.camera.position||[null,null,null];d.camera.position[0]=w[0];d.camera.position[1]=w[1];}else{d.camera.look_at=d.camera.look_at||[null,null,null];d.camera.look_at[0]=w[0];d.camera.look_at[1]=w[1];}loadFields();};
+$('semantic').onclick=()=>{if(locked(current))return;$('prompt').value=session.inherited_keyframes[current].visible_state;persistFields();renderTimeline();};
+$('camera-reference').onclick=()=>{if(locked(current))return;const c=session.inherited_keyframes[current].camera,d=dataFor(current);d.camera=clone(c);loadFields();};
 $('save-key').onclick=()=>{persistFields();$('status').textContent=complete(current)?session.keyframes[current].id+' 已完整保存':'当前 K 仍缺少人物点、摄像机点或参数';renderTimeline();};
 $('previous').onclick=()=>selectKey(current-1,true);$('next').onclick=()=>selectKey(current+1,true);
-function buildPayload(){persistFields();const missing=session.keyframes.filter((_,i)=>!complete(i)).map(k=>k.id);if(missing.length)throw new Error('尚未完整标注: '+missing.join(', '));const author=$('author').value.trim();if(!author)throw new Error('Author 必填');return{schema_version:'1.0',author_id:author,iteration_id:session.next_iteration_id,parent_iteration_id:session.current.iteration_id,auto_filled_values:0,keyframes:session.keyframes.map((k,i)=>{const d=dataFor(i);return{id:k.id,t:k.t,actors:Object.fromEntries(session.actors.map(a=>[a,{x:d.actors[a][0],y:d.actors[a][1]}])),camera:d.camera,visible_state:d.visible_state.trim()}})};}
+function payloadFrame(i){if(locked(i))return clone(session.inherited_keyframes[i]);const k=session.keyframes[i],d=dataFor(i);return{id:k.id,t:k.t,actors:Object.fromEntries(session.actors.map(a=>[a,{x:d.actors[a][0],y:d.actors[a][1]}])),camera:clone(d.camera),visible_state:d.visible_state.trim()};}
+function buildPayload(){persistFields();if(boundaryIndex===null)throw new Error('请先选择锁定起点');const missing=session.keyframes.filter((_,i)=>!complete(i)).map(k=>k.id);if(missing.length)throw new Error('尚未完整标注: '+missing.join(', '));const author=$('author').value.trim();if(!author)throw new Error('标注人必填');return{schema_version:'1.0',author_id:author,iteration_id:session.next_iteration_id,parent_iteration_id:session.current.iteration_id,auto_filled_values:0,frozen_through_keyframe:'K'+boundaryIndex,inheritance_sha256:session.inheritance_sha256,inherited_locked_values:clone(session.inherited_keyframes.slice(0,boundaryIndex+1)),keyframes:session.keyframes.map((_,i)=>payloadFrame(i))};}
 $('generate').onclick=async()=>{try{const response=await fetch('/api/iterations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())});const body=await response.json();if(!response.ok)throw new Error(body.error||'提交失败');$('status').textContent='真实 Blender 作业已排队: '+body.job_id;$('generate').disabled=true;poll(body.job_id);}catch(e){$('status').textContent=e.message;}};
 async function poll(job){clearTimeout(pollTimer);const response=await fetch('/api/jobs/'+job),body=await response.json();$('status').textContent='Blender 状态: '+body.status+(body.error?'\n'+body.error:'');if(body.status==='succeeded'){await loadSession();return}if(body.status==='failed'){$('generate').disabled=false;return}pollTimer=setTimeout(()=>poll(job),1200);}
-$('approve-button').onclick=async()=>{const author=$('author').value.trim();if(!author){$('status').textContent='Author 必填';return}if(!confirm('确认已经检查完整视频，并锁定 '+session.current.iteration_id+' 给 VACE？'))return;const response=await fetch('/api/iterations/'+session.current.iteration_id+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author_id:author})}),body=await response.json();$('status').textContent=response.ok?'已批准，VACE 门禁已开放':body.error;await loadSession();};
-function loadExisting(){frames.clear();if(!session.current_annotation)return;session.current_annotation.keyframes.forEach((item,i)=>{frames.set(i,{actors:Object.fromEntries(Object.entries(item.actors).map(([a,p])=>[a,[p.x,p.y]])),camera:JSON.parse(JSON.stringify(item.camera)),visible_state:item.visible_state});});}
-async function loadSession(){session=await (await fetch('/api/session')).json();$('version').textContent=session.story_id+' · '+session.current.iteration_id;$('approval').textContent=session.approved_iteration?'已批准 '+session.approved_iteration:'未批准';$('proxy').src=session.current.diagnostic_url+'?sha='+session.current.media.diagnostic.decoded_pixel_sha256;$('approve-button').disabled=session.current.iteration_id==='D0'||Boolean(session.approved_iteration);$('generate').disabled=Boolean(session.approved_iteration)||Boolean(session.pending_job&&session.pending_job.status!=='failed');loadExisting();renderModes();loadFields();if(session.pending_job&& !['succeeded','failed'].includes(session.pending_job.status))poll(session.pending_job.job_id);}
+$('approve-button').onclick=async()=>{const author=$('author').value.trim();if(!author){$('status').textContent='标注人必填';return}if(!confirm('确认已经检查完整视频，并锁定 '+session.current.iteration_id+' 给 VACE？'))return;const response=await fetch('/api/iterations/'+session.current.iteration_id+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author_id:author})}),body=await response.json();$('status').textContent=response.ok?'已批准，VACE 门禁已开放':body.error;await loadSession();};
+async function loadSession(){session=await (await fetch('/api/session')).json();$('version').textContent=session.story_id+' · '+session.current.iteration_id;$('approval').textContent=session.approved_iteration?'已批准 '+session.approved_iteration:'未批准';$('proxy').src=session.current.diagnostic_url+'?sha='+session.current.media.diagnostic.decoded_pixel_sha256;$('approve-button').disabled=session.current.iteration_id==='D0'||Boolean(session.approved_iteration);$('generate').disabled=Boolean(session.approved_iteration)||Boolean(session.pending_job&&session.pending_job.status!=='failed');$('frozen-boundary').value='';boundaryIndex=null;frames.clear();renderModes();loadFields();if(session.pending_job&&!['succeeded','failed'].includes(session.pending_job.status))poll(session.pending_job.job_id);}
 loadSession().catch(e=>$('status').textContent=e.message);
 </script>
 </body></html>

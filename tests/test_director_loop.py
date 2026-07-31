@@ -140,6 +140,16 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn("camera-position", html)
         self.assertIn("camera-look-at", html)
 
+    def test_panel_explains_boundary_and_camera_terms_in_chinese(self) -> None:
+        html = (ROOT / "static" / "director_panel.html").read_text(encoding="utf-8")
+        self.assertIn('id="frozen-boundary"', html)
+        self.assertIn("锁定起点", html)
+        self.assertIn("什么是景别", html)
+        self.assertIn("什么是插值", html)
+        self.assertIn("什么是画面倾斜", html)
+        self.assertIn("高级镜头参数", html)
+        self.assertIn("要修改 K2，请把锁定起点选为 K1", html)
+
     def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
         from videoactagent.vace_coded_draft import (
             build_vace_director_job,
