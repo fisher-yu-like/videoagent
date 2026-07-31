@@ -268,6 +268,31 @@ class CodedDraftTests(unittest.TestCase):
         self.assertEqual(bundle["conditioning_video"]["path"],
                          "renders/clay/trajectory_proxy.mp4")
 
+    def test_explicit_trajectory_rejects_extra_camera_track_to_keep_shotscript_locked(self):
+        from videoactagent.coded_draft import main
+
+        trajectory, authoring = self._trajectory_inputs()
+        instruction = TrajectoryInstruction.from_path(trajectory)
+        extra = TrajectoryTrack(
+            track_id="forbidden_camera", target=TrajectoryTarget("camera", "main_camera"),
+            primitive="polyline", semantic="pan_left",
+            points=(TrajectoryPoint(0, .4, .5, True), TrajectoryPoint(1, .6, .5, True)),
+        )
+        trajectory.write_bytes(canonical_bytes(TrajectoryInstruction(
+            scene_id=instruction.scene_id, shot_id=instruction.shot_id,
+            duration_seconds=instruction.duration_seconds,
+            sample_count=instruction.sample_count, tracks=(*instruction.tracks, extra),
+        )))
+        evidence = json.loads(authoring.read_text("utf-8"))
+        evidence["trajectory_sha256"] = _sha256(trajectory)
+        authoring.write_text(json.dumps(evidence), "utf-8")
+        with mock.patch("videoactagent.coded_draft.subprocess.run") as run:
+            result = main(self._args("--trajectory", str(trajectory),
+                                     "--trajectory-authoring", str(authoring)))
+        self.assertEqual(result, 2)
+        run.assert_not_called()
+        self.assertFalse(self.output.exists())
+
     @staticmethod
     def _successful_runner(command, **_kwargs):
         style = command[command.index("--render-style") + 1]

@@ -563,7 +563,8 @@ def _validate_trajectory_sources(
     expected_actors = {actor.actor_id for actor in script.shots[0].actors}
     actor_tracks = [track for track in instruction.tracks if track.target_type == "actor"]
     if (
-        len(actor_tracks) != len(expected_actors)
+        len(instruction.tracks) != len(expected_actors)
+        or len(actor_tracks) != len(expected_actors)
         or {track.target_id for track in actor_tracks} != expected_actors
         or any(track.primitive != "polyline" or track.semantic != "move" for track in actor_tracks)
     ):
