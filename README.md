@@ -1,57 +1,48 @@
 # VideoActAgent
 
-VideoActAgent 把人工配对的完整 story prompt 与 ShotScript 渲染为可执行的 Blender 预演，再为视频生成后端准备可追溯输入。当前版本尚不自动把自然语言编译成 ShotScript；它专注 whole-story：一次运行一个连续故事，不拆镜头提交、不把未发送的 proxy 写成模型条件。
+VideoActAgent 是一个 whole-story 视频代理原型：先把人工规划的连续故事变成 Blender coded draft，再准备可追溯的视频编辑输入。当前借鉴 VideoCoCo 的是流程边界，而不是其模型代码或 80GB GPU 推理：
 
-## 当前能做什么
+`SemanticStoryPlan → diagnostic/clay Blender proxy → source_video_edit bundle`
 
-- 读取 8 组不同的 story prompt 与 ShotScript；
-- 用本机 Blender 真实渲染 8 个 5 秒连续 proxy；
-- 检查帧数、时长、分辨率、首/中/末帧与 SHA-256；
-- 为 Kling / Seedance 写出诚实的 `prompt_only` 离线输入清单；
-- 为 VACE 写出实际引用 proxy 的 `source_video` 离线输入清单；
-- 在输出不完整时，先禁止轨迹与相机评分。
+- `diagnostic` 使用人物颜色、标签和轨迹辅助线，只供人检查调度；
+- `clay` 使用灰度材质并隐藏标签/辅助线，才是未来后端的候选条件视频；
+- `bundle.json` 绑定 prompt、ShotScript、语义关键帧、视频和 SHA-256。
 
-轨迹修订、ATI、ReCamMaster/CamTrol 和正式 API 矩阵暂时冻结，待 whole-story 输入验收后再继续。
+语义计划目前由人编写，尚未从自然语言自动生成。bundle 也尚未接入生成后端：真实 pilot 中 `backend_consumed=false`，VACE、Kling、Seedance 都没有消费这次新生成的 clay proxy。
 
-## 运行
+## 最短运行
 
-需要 Python 3.10+、项目依赖和 `D:\blender\blender.exe`：
+需要 Python 3.10+、项目依赖和 `D:\blender\blender.exe`。安装后为新输出目录运行：
 
 ```powershell
 python -m pip install -e .
-python run.py configs/whole_story_suite.json
+python -m videoactagent.coded_draft --blender D:\blender\blender.exe --shotscript stories/station_reunion.json --prompt prompts/station_reunion.txt --semantic-plan plans/station_reunion.semantic.json --output-dir runs/work/coded_draft_v2/station_reunion
 ```
 
-结果写入 `runs/work/whole_story_v4/`。运行目录不可覆盖；需要重跑时请在配置中换一个新目录。
+当前唯一完成真实 Blender 验收的 coded-draft pilot 位于 [runs/work/coded_draft_v1/station_reunion](runs/work/coded_draft_v1/station_reunion)：两种 proxy 都是 120 帧、24 fps、5 秒、960×540。重点查看：
 
-这些后端 JSON 是 hash-bound 离线输入清单，尚未接入现有逐镜头提交器/VACE 预处理器，不能当作可直接提交的 payload 或 preprocess job。
+- [语义关键帧对照图](runs/work/coded_draft_v1/station_reunion/semantic_contact_sheet.png)
+- [diagnostic proxy](runs/work/coded_draft_v1/station_reunion/renders/diagnostic/station_proxy.mp4)
+- [clay proxy](runs/work/coded_draft_v1/station_reunion/renders/clay/station_proxy.mp4)
+- [bundle](runs/work/coded_draft_v1/station_reunion/bundle.json) 与 [manifest](runs/work/coded_draft_v1/station_reunion/manifest.json)
+
+这次 pilot 只证明了本地规划、双 profile 渲染和证据绑定成立，不证明生成视频质量已经改善。本阶段的 coded-draft 与人工标注命令只读写本地文件，不调用 API、服务器或云端 GPU。
+
+## 人工标注
+
+人工标注器比较现有 24 项矩阵中的真实结果与参考 proxy。准备一次工作区，再启动本地网页：
+
+```powershell
+python -m videoactagent.cli annotate prepare --index runs/work/full_chain_24_v1/final_results/full_result_index.json --output-dir runs/work/manual_annotation_v1
+python -m videoactagent.cli annotate serve --session-dir runs/work/manual_annotation_v1
+```
+
+默认地址是 `http://127.0.0.1:8767`。标注器不自动跟踪人物，也不从视频伪造三维相机位姿；论文级结果必须经过独立复核。
 
 ## 文档
 
 - [架构](docs/ARCHITECTURE.md)
 - [使用说明](docs/USAGE.md)
+- [Coded Draft 真实 pilot 报告](docs/CODED_DRAFT_PILOT_REPORT.md)
+- [测试基线审计](docs/BASELINE_TEST_AUDIT.md)
 - [实验与历史评分纠正](docs/EXPERIMENTS.md)
-
-本阶段默认 `submit=false`、`max_api_calls=0`，不会调用 Kling、Seedance 或服务器推理。API 与服务器实验必须另行报告并获准后执行。
-
-## Gated full-chain preparation
-
-```powershell
-.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json prepare
-```
-
-This one-time offline command writes `runs/work/full_chain_24_v1/`: the frozen
-matrix, 16 API-ready jobs, 8 VACE-ready jobs, and `summary.json`. Every job is
-at `jobs/<story>__<backend>/prepared/`; its parent is reserved for a separate
-future release approval. Prepare creates no approval, reads no credentials,
-and invokes no API, GPU, or network.
-
-Only offline status commands are available:
-
-```powershell
-.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json canary-status
-.\.venv\Scripts\python.exe experiment.py configs/full_chain_matrix.json remainder-status
-```
-
-There is intentionally no submit action. Real API submission or VACE inference
-requires a separate explicit, matrix-bound approval and execution workflow.

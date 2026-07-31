@@ -1,56 +1,59 @@
 # 使用说明
 
-## 1. 准备
+## 1. 生成 coded draft
 
-- Python 3.10+
-- Blender，默认路径 `D:\blender\blender.exe`
-- 安装依赖：`python -m pip install -e .`
-
-无需配置 API 密钥；当前入口硬性拒绝联网提交。
-
-## 2. 一次运行整套故事
+当前入口接收人工配对的 prompt、单段 whole-story ShotScript 和 `SemanticStoryPlan`，同时渲染 diagnostic 与 clay 两个版本。输出目录必须不存在，失败时不会覆盖已有证据。
 
 ```powershell
-python run.py configs/whole_story_suite.json
+python -m videoactagent.coded_draft --blender D:\blender\blender.exe --shotscript stories/station_reunion.json --prompt prompts/station_reunion.txt --semantic-plan plans/station_reunion.semantic.json --output-dir runs/work/coded_draft_v2/station_reunion
 ```
 
-配置包含 8 个独立故事、统一媒体 profile、Blender 路径和输出目录。不要复用已经存在的输出目录，程序会拒绝覆盖。
-
-## 3. 查看结果
+默认媒体规格为 24 fps、960×540；示例故事为 5 秒，因此严格期望 120 个可解码帧。当前仅 `station_reunion` 完成真实 Blender pilot，输出在 `runs/work/coded_draft_v1/station_reunion/`：
 
 ```text
-runs/work/whole_story_v4/
-  summary.json
-  contact_sheet.png
-  <story_id>/
-    proxy.mp4
-    proxy.blend
-    manifest.json
-    blender.log
-    inspection/{first,middle,last}.png
-    bundles/{kling,seedance,vace}.json
+bundle.json                         未来 source_video_edit 输入说明
+manifest.json                       完整媒体、来源与制品哈希
+semantic_contact_sheet.png          五个语义时间点的双 profile 对照
+renders/diagnostic/station_proxy.mp4 人工检查用彩色预演
+renders/clay/station_proxy.mp4       未来后端候选条件视频
+semantic_frames/                     真实解码得到的 K0–K4 帧
+sources/                             只读输入快照
+logs/                                两次真实 Blender 日志
 ```
 
-`summary.json` 是整套结果；每条 `manifest.json` 保存真实解码信息和来源哈希。Kling/Seedance 清单使用 `prompt_only`，不含 proxy 输入；VACE 清单使用 `source_video`，实际绑定 proxy。这些 JSON 尚不是现有提交器可直接消费的 payload 或 preprocess job。
+构建门禁包括：
 
-## 4. 修改故事
+- 语义计划、ShotScript 的故事 ID 和 5 秒时长一致；
+- 两个视频都精确匹配帧数、fps、时长和分辨率；
+- K0–K4 均能从真实视频解码，diagnostic 与 clay 不能相同；
+- 来源快照、所有制品和 JSON 引用通过 SHA-256 绑定；
+- `bundle.json` 与 `manifest.json` 保持 `backend_consumed=false`。
 
-通常只需修改三处：
+不要把 diagnostic 发给生成模型：它的颜色、文字和轨迹辅助线会被模型当成外观内容。clay 隐藏这些诊断元素，但它目前也只是候选条件；仓库尚无把该 bundle 提交给 VACE、Kling 或 Seedance 的适配器。
 
-1. 在 `prompts/` 添加一个完整、连续、无切镜的文本；
-2. 在 `stories/` 添加对应的单 shot ShotScript；
-3. 在 `configs/whole_story_suite.json` 注册 case，并换一个新的输出目录。
+## 2. 标注现有真实结果
 
-当前 Blender 只可靠表达人物 root 线性位移和相机线性关键帧。不要把 `action`、`facing` 或运镜名称本身当作骨骼动作和曲线轨迹已实现的证据。
-当前 prompt 与 ShotScript 也是人工配对输入，尚无自动语义编译或一致性评分。
+准备命令读取 [full_result_index.json](../runs/work/full_chain_24_v1/final_results/full_result_index.json)，核对视频 SHA-256，并从每个真实视频解码固定的 9 个归一化时间点。它会得到 8 个参考 proxy、23 个成功结果和 1 个禁用的生成失败项，不会生成或修改视频。
 
-## 5. 完整性门
+```powershell
+python -m videoactagent.cli annotate prepare --index runs/work/full_chain_24_v1/final_results/full_result_index.json --output-dir runs/work/manual_annotation_v1
+python -m videoactagent.cli annotate serve --session-dir runs/work/manual_annotation_v1
+```
 
-生成结果进入运动评分前必须满足：
+浏览器打开 `http://127.0.0.1:8767`。标注规则如下：
 
-- `decoded_duration / requested_duration >= 0.95`；
-- 分辨率与目标一致；
-- 首、中、末关键时间可解码。
+- 人物位置记录脚底点，坐标为左上角原点的 `[0,1] × [0,1]`；
+- 每帧同时记录可见性和身份置信度；遮挡、出框或身份歧义时不猜位置，不纳入几何评分；
+- 相机只标注可观察的背景运动类别、强度和置信度，不宣称恢复三维相机参数；
+- 初次保存是 `draft`；必须由不同人员复核后，才标记 `reviewed` 并具备论文统计资格；
+- 结果标注绑定已经复核的参考标注 SHA，防止参考轨迹被静默替换。
 
-不满足时标记 `incomplete`，不得继续计算人物轨迹或相机控制分数。人工标注帧数与插值点数必须分开报告。
-当前离线入口没有生成模型输出适配器，因此只对 Blender proxy 执行媒体检查；完整性门由代码和单测定义，待后端接入后才能用于真实生成结果。
+这个标注工作区针对旧的 `full_chain_24_v1` 结果，不代表旧后端已经使用新 clay。
+
+## 3. 当前结果应如何解释
+
+- Kling/Seedance 的旧矩阵提交是纯文本条件，没有传入任何 proxy、语义关键帧或显式轨迹，所以其质量不能用来判断新 clay 是否有效。
+- 旧 VACE 结果使用的是此前的彩色诊断 proxy 路径，不是本次 clay bundle；观察到接近 proxy 的外观继承，不能算新流程成功。
+- 下一步应先为一个场景接入真正消费 clay 的视频编辑适配器，做少量、同设置的条件消融，再决定是否扩大矩阵。
+
+以上两个入口当前只执行本地渲染、解码、哈希和网页标注；它们不会调用 API 或服务器。仓库中保留的历史实验代码不等于全仓库被“绝对禁止联网”，运行其他入口前仍需单独检查其行为与调用预算。
