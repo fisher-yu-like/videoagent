@@ -23,6 +23,203 @@ SHOT_SCRIPT = Path("examples/station_shotscript.json")
 
 
 class BlenderProxyIntegrationTests(unittest.TestCase):
+    def test_real_blender_preserves_heading_context_across_stationary_shots(self):
+        self.assertTrue(BLENDER.is_file(), f"Blender missing at {BLENDER}")
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            document = json.loads(SHOT_SCRIPT.read_text(encoding="utf-8"))
+            document["shots"] = document["shots"][:2]
+            for shot in document["shots"]:
+                shot["duration"] = 1.0
+
+            actor_a_first, actor_b_first = document["shots"][0]["actors"]
+            actor_a_first["start"], actor_a_first["end"] = [0, 0, 0], [0, 2, 0]
+            actor_b_first["start"], actor_b_first["end"] = [-2, 0, 0], [-2, 0, 0]
+            actor_a_second, actor_b_second = document["shots"][1]["actors"]
+            actor_a_second["start"] = actor_a_second["end"] = [0, 2, 0]
+            actor_b_second["start"], actor_b_second["end"] = [-2, 0, 0], [0, 0, 0]
+
+            shotscript = directory / "cross_shot_heading.json"
+            shotscript.write_text(json.dumps(document), encoding="utf-8")
+            output = directory / "heading_proxy"
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--blender",
+                    str(BLENDER),
+                    "--shotscript",
+                    str(shotscript),
+                    "--output-dir",
+                    str(output),
+                    "--fps",
+                    "3",
+                    "--resolution",
+                    "160x90",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+            probe_script = """
+import bpy
+import json
+scene = bpy.context.scene
+
+def action_curves(obj):
+    action = obj.animation_data.action
+    if hasattr(action, "fcurves"):
+        return action.fcurves
+    return [
+        curve
+        for layer in action.layers
+        for strip in layer.strips
+        for channelbag in strip.channelbags
+        for curve in channelbag.fcurves
+    ]
+
+payload = {}
+for actor_id in ("actor_a", "actor_b"):
+    actor = bpy.data.objects[actor_id]
+    values = {}
+    for frame in range(1, 7):
+        scene.frame_set(frame)
+        values[str(frame)] = round(float(actor.rotation_euler.z), 6)
+    location_frames = sorted({
+        round(float(point.co.x))
+        for curve in action_curves(actor)
+        if curve.data_path == "location"
+        for point in curve.keyframe_points
+    })
+    payload[actor_id] = {"headings": values, "location_frames": location_frames}
+print("CROSS_SHOT_HEADING_PROBE=" + json.dumps(payload, sort_keys=True))
+"""
+            probed = subprocess.run(
+                [
+                    str(BLENDER),
+                    "--background",
+                    str(output / "station_proxy.blend"),
+                    "--python-expr",
+                    probe_script,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            self.assertEqual(probed.returncode, 0, probed.stdout + probed.stderr)
+            line = next(
+                line
+                for line in (probed.stdout + probed.stderr).splitlines()
+                if line.startswith("CROSS_SHOT_HEADING_PROBE=")
+            )
+            headings = json.loads(line.partition("=")[2])
+
+            for frame in (3, 4, 5, 6):
+                self.assertAlmostEqual(
+                    headings["actor_a"]["headings"][str(frame)], 0.0, places=5
+                )
+            for frame in (1, 2, 3, 4):
+                self.assertAlmostEqual(
+                    headings["actor_b"]["headings"][str(frame)],
+                    -1.570796,
+                    places=5,
+                )
+            self.assertEqual(headings["actor_a"]["location_frames"], [1, 3, 4, 6])
+            self.assertEqual(headings["actor_b"]["location_frames"], [1, 3, 4, 6])
+
+            trajectory = directory / "stationary_s02_trajectory.json"
+            trajectory.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "0.1",
+                        "scene_id": document["scene_id"],
+                        "shot_id": document["shots"][1]["shot_id"],
+                        "coordinate_space": "normalized_0_1_top_left",
+                        "duration_seconds": 1.0,
+                        "sample_count": 2,
+                        "tracks": [
+                            {
+                                "track_id": "actor_a_stationary",
+                                "target": {"type": "actor", "id": "actor_a"},
+                                "primitive": "polyline",
+                                "semantic": "move",
+                                "points": [
+                                    {"t": 0.0, "x": 0.5, "y": 0.25, "visible": True},
+                                    {"t": 1.0, "x": 0.5, "y": 0.25, "visible": True},
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory_output = directory / "trajectory_heading_proxy"
+            trajectory_completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(RUNNER),
+                    "--blender",
+                    str(BLENDER),
+                    "--shotscript",
+                    str(shotscript),
+                    "--trajectory",
+                    str(trajectory),
+                    "--output-dir",
+                    str(trajectory_output),
+                    "--fps",
+                    "3",
+                    "--resolution",
+                    "160x90",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=180,
+            )
+            self.assertEqual(
+                trajectory_completed.returncode,
+                0,
+                trajectory_completed.stdout + trajectory_completed.stderr,
+            )
+            trajectory_probed = subprocess.run(
+                [
+                    str(BLENDER),
+                    "--background",
+                    str(trajectory_output / "trajectory_proxy.blend"),
+                    "--python-expr",
+                    probe_script,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            self.assertEqual(
+                trajectory_probed.returncode,
+                0,
+                trajectory_probed.stdout + trajectory_probed.stderr,
+            )
+            trajectory_line = next(
+                line
+                for line in (trajectory_probed.stdout + trajectory_probed.stderr).splitlines()
+                if line.startswith("CROSS_SHOT_HEADING_PROBE=")
+            )
+            trajectory_headings = json.loads(trajectory_line.partition("=")[2])
+            for frame in (3, 4, 5, 6):
+                self.assertAlmostEqual(
+                    trajectory_headings["actor_a"]["headings"][str(frame)],
+                    0.0,
+                    places=5,
+                )
+
     def test_real_blender_renders_station_proxy_artifacts(self):
         self.assertTrue(BLENDER.is_file(), f"Blender missing at {BLENDER}")
         with tempfile.TemporaryDirectory() as root:

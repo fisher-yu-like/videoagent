@@ -408,6 +408,28 @@ def point_camera(camera, target: Vector):
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
+def _actor_motion_context(
+    ranges,
+    actor_id: str,
+    replacement_shot_id: str | None = None,
+    replacement_points: list[Vector] | None = None,
+    replacement_frames: list[int] | None = None,
+) -> tuple[list[Vector], list[int]]:
+    points = []
+    frames = []
+    for shot, start_frame, end_frame in ranges:
+        if shot.shot_id == replacement_shot_id:
+            if replacement_points is None or replacement_frames is None:
+                raise ValueError("replacement actor motion requires points and frames")
+            points.extend(replacement_points)
+            frames.extend(replacement_frames)
+        else:
+            actor = actor_plan(shot, actor_id)
+            points.extend((vec(actor.start), vec(actor.end)))
+            frames.extend((start_frame, end_frame))
+    return points, frames
+
+
 def configure_scene(
     script: ShotScript,
     profile: RenderProfile = DEFAULT_RENDER_PROFILE,
@@ -476,11 +498,6 @@ def configure_scene(
             root.keyframe_insert(data_path="location", frame=start_frame)
             root.location = vec(actor.end)
             root.keyframe_insert(data_path="location", frame=end_frame)
-            animate_actor_motion(
-                root,
-                [vec(actor.start), vec(actor.end)],
-                [start_frame, end_frame],
-            )
 
         for frame in range(start_frame, end_frame + 1):
             fraction = 0.0 if end_frame == start_frame else (frame - start_frame) / (end_frame - start_frame)
@@ -492,6 +509,14 @@ def configure_scene(
             camera.data.keyframe_insert(data_path="lens", frame=frame)
 
         frame_cursor = end_frame + 1
+
+    for actor_id, root in actor_roots.items():
+        points, frames = _actor_motion_context(ranges, actor_id)
+        animate_actor_motion(
+            root,
+            points,
+            frames,
+        )
 
     scene.frame_start = 1
     scene.frame_end = frame_cursor - 1
@@ -687,13 +712,21 @@ def apply_trajectory(
                 frame = _frame_for_time(start_frame, end_frame, point.t)
                 actor.location = world
                 actor.keyframe_insert(data_path="location", frame=frame)
+            track_frames = [
+                _frame_for_time(start_frame, end_frame, point.t)
+                for point in track.points
+            ]
+            motion_points, motion_frames = _actor_motion_context(
+                ranges,
+                track.target_id,
+                shot.shot_id,
+                world_points,
+                track_frames,
+            )
             animate_actor_motion(
                 actor,
-                world_points,
-                [
-                    _frame_for_time(start_frame, end_frame, point.t)
-                    for point in track.points
-                ],
+                motion_points,
+                motion_frames,
                 replace=True,
             )
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
