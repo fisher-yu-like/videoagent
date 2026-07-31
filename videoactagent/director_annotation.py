@@ -1,0 +1,286 @@
+"""Strict human director annotations for actor, camera, and prompt control."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+import json
+import math
+import re
+from typing import Any
+
+from videoactagent.trajectory import (
+    TrajectoryInstruction,
+    TrajectoryPoint,
+    TrajectoryTarget,
+    TrajectoryTrack,
+)
+
+
+SCHEMA_VERSION = "1.0"
+_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_ITERATION = re.compile(r"^D(?:0|[1-9][0-9]*)$")
+_SHOT_SIZES = frozenset({"extreme_wide", "wide", "medium", "close", "extreme_close"})
+_INTERPOLATIONS = frozenset({"linear", "bezier", "constant"})
+_PAYLOAD_FIELDS = frozenset({
+    "schema_version", "author_id", "iteration_id", "parent_iteration_id",
+    "auto_filled_values", "keyframes",
+})
+_KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera", "visible_state"})
+_CAMERA_FIELDS = frozenset({
+    "position", "look_at", "focal_length_mm", "shot_size", "interpolation",
+    "roll_degrees",
+})
+
+
+class DirectorAnnotationError(ValueError):
+    """Raised when human director input is incomplete or untrustworthy."""
+
+
+@dataclass(frozen=True)
+class CameraKeyframe:
+    keyframe_id: str
+    t: float
+    position: tuple[float, float, float]
+    look_at: tuple[float, float, float]
+    focal_length_mm: float
+    shot_size: str
+    interpolation: str
+    roll_degrees: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "keyframe_id": self.keyframe_id,
+            "t": self.t,
+            "position": list(self.position),
+            "look_at": list(self.look_at),
+            "focal_length_mm": self.focal_length_mm,
+            "shot_size": self.shot_size,
+            "interpolation": self.interpolation,
+            "roll_degrees": self.roll_degrees,
+        }
+
+
+@dataclass(frozen=True)
+class CompiledDirectorAnnotation:
+    actor_trajectory: TrajectoryInstruction
+    camera_trajectory: tuple[CameraKeyframe, ...]
+    compiled_prompt: str
+    canonical_annotation: bytes
+    camera_document: bytes
+
+
+def _exact(value: Mapping[str, object], fields: frozenset[str], label: str) -> None:
+    if set(value) != fields:
+        missing = sorted(fields - set(value))
+        unknown = sorted(set(value) - fields)
+        raise DirectorAnnotationError(
+            f"{label} fields are invalid: missing={missing}, unknown={unknown}"
+        )
+
+
+def _identifier(value: object, label: str) -> str:
+    if not isinstance(value, str) or not _ID.fullmatch(value):
+        raise DirectorAnnotationError(f"{label} must be a safe non-empty identifier")
+    return value
+
+
+def _number(value: object, label: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise DirectorAnnotationError(f"{label} must be a finite number")
+    result = float(value)
+    if not math.isfinite(result):
+        raise DirectorAnnotationError(f"{label} must be a finite number")
+    return 0.0 if result == 0.0 else result
+
+
+def _unit(value: object, label: str) -> float:
+    result = _number(value, label)
+    if not 0.0 <= result <= 1.0:
+        raise DirectorAnnotationError(f"{label} must be in [0, 1]")
+    return result
+
+
+def _vector3(value: object, label: str) -> tuple[float, float, float]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise DirectorAnnotationError(f"{label} must contain exactly three finite numbers")
+    return tuple(_number(item, f"{label}[{index}]") for index, item in enumerate(value))  # type: ignore[return-value]
+
+
+def _canonical(value: object) -> bytes:
+    try:
+        return (json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            allow_nan=False,
+        ) + "\n").encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise DirectorAnnotationError(f"annotation is not canonical JSON: {exc}") from exc
+
+
+def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
+    required = {
+        "story_id", "shot_id", "duration_seconds", "sample_count", "actors", "keyframes"
+    }
+    if set(value) != required:
+        raise DirectorAnnotationError("director contract fields are invalid")
+    story_id = _identifier(value.get("story_id"), "contract.story_id")
+    shot_id = _identifier(value.get("shot_id"), "contract.shot_id")
+    duration = _number(value.get("duration_seconds"), "contract.duration_seconds")
+    if duration <= 0:
+        raise DirectorAnnotationError("contract.duration_seconds must be positive")
+    sample_count = value.get("sample_count")
+    if type(sample_count) is not int or sample_count < 2:
+        raise DirectorAnnotationError("contract.sample_count must be an integer >= 2")
+    actors_value = value.get("actors")
+    if not isinstance(actors_value, list) or not actors_value:
+        raise DirectorAnnotationError("contract.actors must be a non-empty list")
+    actors = [_identifier(actor, "contract actor") for actor in actors_value]
+    if len(set(actors)) != len(actors):
+        raise DirectorAnnotationError("contract actor IDs must be unique")
+    frames_value = value.get("keyframes")
+    if not isinstance(frames_value, list) or len(frames_value) != 5:
+        raise DirectorAnnotationError("contract must contain exactly K0--K4")
+    frames = []
+    for index, item in enumerate(frames_value):
+        if not isinstance(item, Mapping) or set(item) != {"id", "t"}:
+            raise DirectorAnnotationError("contract keyframe fields are invalid")
+        key = item.get("id")
+        time = _unit(item.get("t"), f"contract K{index}.t")
+        if key != f"K{index}":
+            raise DirectorAnnotationError("contract keyframe schedule is invalid")
+        frames.append({"id": key, "t": time})
+    times = [frame["t"] for frame in frames]
+    if times != sorted(times) or len(set(times)) != len(times) or times[0] != 0.0 or times[-1] != 1.0:
+        raise DirectorAnnotationError("contract keyframe schedule is invalid")
+    return {
+        "story_id": story_id, "shot_id": shot_id, "duration_seconds": duration,
+        "sample_count": sample_count, "actors": actors, "keyframes": frames,
+    }
+
+
+def compile_director_annotation(
+    payload: Mapping[str, Any], contract: Mapping[str, Any]
+) -> CompiledDirectorAnnotation:
+    if not isinstance(payload, Mapping):
+        raise DirectorAnnotationError("annotation must be one object")
+    _exact(payload, _PAYLOAD_FIELDS, "annotation")
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise DirectorAnnotationError(f"schema_version must be {SCHEMA_VERSION}")
+    author = payload.get("author_id")
+    if not isinstance(author, str) or not author.strip():
+        raise DirectorAnnotationError("author_id is required")
+    iteration = payload.get("iteration_id")
+    parent = payload.get("parent_iteration_id")
+    if not isinstance(iteration, str) or not _ITERATION.fullmatch(iteration):
+        raise DirectorAnnotationError("iteration_id is invalid")
+    if not isinstance(parent, str) or not _ITERATION.fullmatch(parent):
+        raise DirectorAnnotationError("parent_iteration_id is invalid")
+    if int(iteration[1:]) != int(parent[1:]) + 1:
+        raise DirectorAnnotationError("iteration IDs are not consecutive")
+    if payload.get("auto_filled_values") != 0:
+        raise DirectorAnnotationError("auto_filled_values must be exactly 0")
+
+    expected = _contract(contract)
+    frames_value = payload.get("keyframes")
+    if not isinstance(frames_value, list) or len(frames_value) != 5:
+        raise DirectorAnnotationError("annotation must contain exactly K0--K4")
+
+    actor_points: dict[str, list[TrajectoryPoint]] = {actor: [] for actor in expected["actors"]}
+    cameras: list[CameraKeyframe] = []
+    prompts: list[str] = []
+    normalized_frames = []
+    for index, (raw, schedule) in enumerate(zip(frames_value, expected["keyframes"])):
+        if not isinstance(raw, Mapping):
+            raise DirectorAnnotationError(f"K{index} must be an object")
+        _exact(raw, _KEYFRAME_FIELDS, f"K{index}")
+        time = _unit(raw.get("t"), f"K{index}.t")
+        if raw.get("id") != schedule["id"] or time != schedule["t"]:
+            raise DirectorAnnotationError("annotation keyframe schedule differs from contract")
+        actors_value = raw.get("actors")
+        if not isinstance(actors_value, Mapping) or set(actors_value) != set(expected["actors"]):
+            raise DirectorAnnotationError(f"K{index}.actors must contain every actor exactly once")
+        normalized_actors: dict[str, dict[str, float]] = {}
+        for actor in expected["actors"]:
+            point = actors_value[actor]
+            if not isinstance(point, Mapping) or set(point) != {"x", "y"}:
+                raise DirectorAnnotationError(f"K{index}.{actor} point fields are invalid")
+            x = _unit(point.get("x"), f"K{index}.{actor}.x")
+            y = _unit(point.get("y"), f"K{index}.{actor}.y")
+            actor_points[actor].append(TrajectoryPoint(t=time, x=x, y=y, visible=True))
+            normalized_actors[actor] = {"x": x, "y": y}
+
+        camera_value = raw.get("camera")
+        if not isinstance(camera_value, Mapping):
+            raise DirectorAnnotationError(f"K{index}.camera is required")
+        _exact(camera_value, _CAMERA_FIELDS, f"K{index}.camera")
+        position = _vector3(camera_value.get("position"), f"K{index}.camera.position")
+        look_at = _vector3(camera_value.get("look_at"), f"K{index}.camera.look_at")
+        if position == look_at:
+            raise DirectorAnnotationError(f"K{index}.camera.look_at must differ from position")
+        focal = _number(camera_value.get("focal_length_mm"), f"K{index}.camera.focal_length_mm")
+        if not 1.0 <= focal <= 300.0:
+            raise DirectorAnnotationError(f"K{index}.camera.focal_length_mm must be in [1, 300]")
+        shot_size = camera_value.get("shot_size")
+        if shot_size not in _SHOT_SIZES:
+            raise DirectorAnnotationError(f"K{index}.camera.shot_size is invalid")
+        interpolation = camera_value.get("interpolation")
+        if interpolation not in _INTERPOLATIONS:
+            raise DirectorAnnotationError(f"K{index}.camera.interpolation is invalid")
+        roll = _number(camera_value.get("roll_degrees"), f"K{index}.camera.roll_degrees")
+        if not -180.0 <= roll <= 180.0:
+            raise DirectorAnnotationError(f"K{index}.camera.roll_degrees must be in [-180, 180]")
+        camera = CameraKeyframe(
+            keyframe_id=schedule["id"], t=time, position=position, look_at=look_at,
+            focal_length_mm=focal, shot_size=str(shot_size),
+            interpolation=str(interpolation), roll_degrees=roll,
+        )
+        cameras.append(camera)
+
+        visible = raw.get("visible_state")
+        if not isinstance(visible, str) or not visible.strip():
+            raise DirectorAnnotationError(f"K{index}.visible_state is required")
+        visible = visible.strip()
+        prompts.append(
+            f"{schedule['id']} (t={time:g}): {visible} Camera: {shot_size}, "
+            f"{focal:g} mm, position {list(position)}, look_at {list(look_at)}."
+        )
+        normalized_frames.append({
+            "id": schedule["id"], "t": time, "actors": normalized_actors,
+            "camera": {
+                "position": list(position), "look_at": list(look_at),
+                "focal_length_mm": focal, "shot_size": shot_size,
+                "interpolation": interpolation, "roll_degrees": roll,
+            },
+            "visible_state": visible,
+        })
+
+    tracks = tuple(
+        TrajectoryTrack(
+            track_id=f"human_{actor}", target=TrajectoryTarget("actor", actor),
+            primitive="polyline", semantic="move", points=tuple(actor_points[actor]),
+        )
+        for actor in expected["actors"]
+    )
+    actor_trajectory = TrajectoryInstruction(
+        scene_id=expected["story_id"], shot_id=expected["shot_id"],
+        duration_seconds=expected["duration_seconds"],
+        sample_count=expected["sample_count"], tracks=tracks,
+    )
+    normalized = {
+        "schema_version": SCHEMA_VERSION, "author_id": author.strip(),
+        "iteration_id": iteration, "parent_iteration_id": parent,
+        "auto_filled_values": 0, "keyframes": normalized_frames,
+    }
+    camera_doc = {
+        "schema_version": SCHEMA_VERSION, "scene_id": expected["story_id"],
+        "shot_id": expected["shot_id"],
+        "duration_seconds": expected["duration_seconds"],
+        "states": [camera.to_dict() for camera in cameras],
+    }
+    return CompiledDirectorAnnotation(
+        actor_trajectory=actor_trajectory,
+        camera_trajectory=tuple(cameras),
+        compiled_prompt="\n".join(prompts),
+        canonical_annotation=_canonical(normalized),
+        camera_document=_canonical(camera_doc),
+    )
