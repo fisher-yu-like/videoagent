@@ -28,6 +28,8 @@ def contract() -> dict:
             {"id": "K3", "t": 0.8},
             {"id": "K4", "t": 1.0},
         ],
+        "story_prompt": "A continuous station reunion shot.",
+        "appearance_instruction": "Natural proportions and consistent station lighting.",
     }
     inherited = payload_keyframes(value["keyframes"])
     value["inheritance_sha256"] = "a" * 64
@@ -52,7 +54,6 @@ def payload_keyframes(keys: list[dict]) -> list[dict]:
                 "interpolation": "linear",
                 "roll_degrees": 0.0,
             },
-            "visible_state": f"K{index} visible station state.",
         }
         for index, item in enumerate(keys)
     ]
@@ -69,6 +70,8 @@ def payload() -> dict:
         "iteration_id": "D1",
         "parent_iteration_id": "D0",
         "auto_filled_values": 0,
+        "visual_style": "source_default",
+        "mood": "source_default",
         "frozen_through_keyframe": "K0",
         "inheritance_sha256": expected["inheritance_sha256"],
         "inherited_locked_values": deepcopy(expected["inherited_keyframes"][:1]),
@@ -89,9 +92,12 @@ class DirectorAnnotationTests(unittest.TestCase):
             ["K0", "K1", "K2", "K3", "K4"],
         )
         self.assertEqual(result.camera_trajectory[2].focal_length_mm, 37.0)
-        self.assertIn("K0 (t=0)", result.compiled_prompt)
-        self.assertIn("K4 (t=1)", result.compiled_prompt)
-        self.assertEqual(json.loads(result.canonical_annotation)["author_id"], "sy")
+        self.assertIn("actor_a follows the authored path", result.compiled_prompt)
+        self.assertIn("actor_a and actor_b move closer", result.compiled_prompt)
+        canonical = json.loads(result.canonical_annotation)
+        self.assertEqual(canonical["author_id"], "sy")
+        self.assertEqual(canonical["prompt_compiler_version"], "trajectory-facts-v1")
+        self.assertNotIn("visible_state", canonical["keyframes"][0])
         self.assertEqual(json.loads(result.camera_document)["states"][4]["keyframe_id"], "K4")
 
     def test_canonical_annotation_can_be_revalidated(self) -> None:
@@ -115,11 +121,19 @@ class DirectorAnnotationTests(unittest.TestCase):
         with self.assertRaisesRegex(DirectorAnnotationError, "camera"):
             compile_director_annotation(value, contract())
 
-    def test_rejects_empty_keyframe_prompt(self) -> None:
+    def test_rejects_free_text_keyframe_prompt(self) -> None:
         value = payload()
-        value["keyframes"][3]["visible_state"] = "  "
-        with self.assertRaisesRegex(DirectorAnnotationError, "visible_state"):
+        value["keyframes"][3]["visible_state"] = "move left"
+        with self.assertRaisesRegex(DirectorAnnotationError, "fields"):
             compile_director_annotation(value, contract())
+
+    def test_rejects_unknown_visual_style_or_mood(self) -> None:
+        for field, invalid in (("visual_style", "anime"), ("mood", "angry")):
+            value = payload()
+            value[field] = invalid
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(DirectorAnnotationError, field):
+                    compile_director_annotation(value, contract())
 
     def test_rejects_camera_that_cannot_look_anywhere(self) -> None:
         value = payload()
@@ -164,7 +178,7 @@ class DirectorAnnotationTests(unittest.TestCase):
             compile_director_annotation(value, contract())
 
     def test_k2_boundary_rejects_changed_boundary_camera_or_prompt(self) -> None:
-        for field in ("camera", "visible_state"):
+        for field in ("camera", "actors"):
             with self.subTest(field=field):
                 value = payload()
                 value["frozen_through_keyframe"] = "K2"
@@ -172,7 +186,7 @@ class DirectorAnnotationTests(unittest.TestCase):
                 if field == "camera":
                     value["keyframes"][2]["camera"]["roll_degrees"] = 2.0
                 else:
-                    value["keyframes"][2]["visible_state"] = "changed"
+                    value["keyframes"][2]["actors"]["actor_a"]["x"] += 0.01
                 with self.assertRaisesRegex(DirectorAnnotationError, "locked inherited"):
                     compile_director_annotation(value, contract())
 

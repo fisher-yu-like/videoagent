@@ -16,6 +16,11 @@ from videoactagent.trajectory import (
     TrajectoryTarget,
     TrajectoryTrack,
 )
+from videoactagent.trajectory_prompt import (
+    PROMPT_COMPILER_VERSION,
+    TrajectoryPromptError,
+    compile_trajectory_prompt,
+)
 
 
 SCHEMA_VERSION = "1.0"
@@ -27,9 +32,9 @@ _INTERPOLATIONS = frozenset({"linear", "bezier", "constant"})
 _PAYLOAD_FIELDS = frozenset({
     "schema_version", "author_id", "iteration_id", "parent_iteration_id",
     "auto_filled_values", "frozen_through_keyframe", "inheritance_sha256",
-    "inherited_locked_values", "keyframes",
+    "inherited_locked_values", "keyframes", "visual_style", "mood",
 })
-_INHERITED_KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera", "visible_state"})
+_INHERITED_KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera"})
 _KEYFRAME_FIELDS = _INHERITED_KEYFRAME_FIELDS | {"camera_source"}
 _CAMERA_FIELDS = frozenset({
     "position", "look_at", "focal_length_mm", "shot_size", "interpolation",
@@ -167,9 +172,6 @@ def _normalize_frame(
     roll = _number(camera_value.get("roll_degrees"), f"{label}.camera.roll_degrees")
     if not -180.0 <= roll <= 180.0:
         raise DirectorAnnotationError(f"{label}.camera.roll_degrees must be in [-180, 180]")
-    visible = raw.get("visible_state")
-    if not isinstance(visible, str) or not visible.strip():
-        raise DirectorAnnotationError(f"{label}.visible_state is required")
     return {
         "id": schedule["id"], "t": time, "actors": normalized_actors,
         "camera": {
@@ -177,14 +179,14 @@ def _normalize_frame(
             "focal_length_mm": focal, "shot_size": shot_size,
             "interpolation": interpolation, "roll_degrees": roll,
         },
-        "visible_state": visible.strip(),
     }
 
 
 def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
         "story_id", "shot_id", "duration_seconds", "sample_count", "actors", "keyframes",
-        "inheritance_sha256", "inherited_keyframes",
+        "inheritance_sha256", "inherited_keyframes", "story_prompt",
+        "appearance_instruction",
     }
     if set(value) != required:
         raise DirectorAnnotationError("director contract fields are invalid")
@@ -227,10 +229,17 @@ def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
         _normalize_frame(raw, schedule, actors, f"contract inherited K{index}")
         for index, (raw, schedule) in enumerate(zip(inherited_value, frames))
     ]
+    story_prompt = value.get("story_prompt")
+    appearance = value.get("appearance_instruction")
+    if not isinstance(story_prompt, str) or not story_prompt.strip():
+        raise DirectorAnnotationError("contract.story_prompt must be non-empty")
+    if not isinstance(appearance, str) or not appearance.strip():
+        raise DirectorAnnotationError("contract.appearance_instruction must be non-empty")
     return {
         "story_id": story_id, "shot_id": shot_id, "duration_seconds": duration,
         "sample_count": sample_count, "actors": actors, "keyframes": frames,
         "inheritance_sha256": inheritance_sha256, "inherited_keyframes": inherited,
+        "story_prompt": story_prompt.strip(), "appearance_instruction": appearance.strip(),
     }
 
 
@@ -239,7 +248,12 @@ def compile_director_annotation(
 ) -> CompiledDirectorAnnotation:
     if not isinstance(payload, Mapping):
         raise DirectorAnnotationError("annotation must be one object")
-    _exact(payload, _PAYLOAD_FIELDS, "annotation")
+    payload_fields = set(payload)
+    if payload_fields == set(_PAYLOAD_FIELDS) | {"prompt_compiler_version"}:
+        if payload.get("prompt_compiler_version") != PROMPT_COMPILER_VERSION:
+            raise DirectorAnnotationError("prompt_compiler_version is invalid")
+    else:
+        _exact(payload, _PAYLOAD_FIELDS, "annotation")
     if payload.get("schema_version") != SCHEMA_VERSION:
         raise DirectorAnnotationError(f"schema_version must be {SCHEMA_VERSION}")
     author = payload.get("author_id")
@@ -255,6 +269,12 @@ def compile_director_annotation(
         raise DirectorAnnotationError("iteration IDs are not consecutive")
     if payload.get("auto_filled_values") != 0:
         raise DirectorAnnotationError("auto_filled_values must be exactly 0")
+    visual_style = payload.get("visual_style")
+    mood = payload.get("mood")
+    if visual_style not in {"source_default", "cinematic_realism", "documentary"}:
+        raise DirectorAnnotationError("visual_style is invalid")
+    if mood not in {"source_default", "warm", "neutral", "tense"}:
+        raise DirectorAnnotationError("mood is invalid")
 
     expected = _contract(contract)
     boundary = payload.get("frozen_through_keyframe")
@@ -278,7 +298,6 @@ def compile_director_annotation(
 
     actor_points: dict[str, list[TrajectoryPoint]] = {actor: [] for actor in expected["actors"]}
     cameras: list[CameraKeyframe] = []
-    prompts: list[str] = []
     normalized_frames = []
     for index, (raw, schedule) in enumerate(zip(frames_value, expected["keyframes"])):
         normalized = _normalize_frame(
@@ -314,11 +333,6 @@ def compile_director_annotation(
         )
         cameras.append(camera)
 
-        visible = normalized["visible_state"]
-        prompts.append(
-            f"{schedule['id']} (t={time:g}): {visible} Camera: {shot_size}, "
-            f"{focal:g} mm, position {list(position)}, look_at {list(look_at)}."
-        )
         normalized_frames.append(normalized)
 
     locked_frames = [
@@ -346,6 +360,8 @@ def compile_director_annotation(
         "auto_filled_values": 0, "frozen_through_keyframe": boundary,
         "inheritance_sha256": expected["inheritance_sha256"],
         "inherited_locked_values": submitted_inherited, "keyframes": normalized_frames,
+        "visual_style": visual_style, "mood": mood,
+        "prompt_compiler_version": PROMPT_COMPILER_VERSION,
     }
     camera_doc = {
         "schema_version": SCHEMA_VERSION, "scene_id": expected["story_id"],
@@ -353,10 +369,21 @@ def compile_director_annotation(
         "duration_seconds": expected["duration_seconds"],
         "states": [camera.to_dict() for camera in cameras],
     }
+    try:
+        compiled_prompt = compile_trajectory_prompt(
+            story_prompt=expected["story_prompt"],
+            appearance_instruction=expected["appearance_instruction"],
+            duration_seconds=expected["duration_seconds"],
+            keyframes=normalized_frames,
+            visual_style=visual_style,
+            mood=mood,
+        )
+    except TrajectoryPromptError as exc:
+        raise DirectorAnnotationError(f"cannot compile trajectory prompt: {exc}") from exc
     return CompiledDirectorAnnotation(
         actor_trajectory=actor_trajectory,
         camera_trajectory=tuple(cameras),
-        compiled_prompt="\n".join(prompts),
+        compiled_prompt=compiled_prompt,
         canonical_annotation=_canonical(normalized),
         camera_document=_canonical(camera_doc),
     )

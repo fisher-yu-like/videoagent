@@ -15,6 +15,7 @@ from videoactagent.director_loop import (
     prepare_iteration,
     prepare_workspace,
     publish_iteration,
+    preview_prompt,
     session_document,
     verify_workspace,
 )
@@ -43,6 +44,8 @@ class DirectorLoopTests(unittest.TestCase):
             "iteration_id": session["next_iteration_id"],
             "parent_iteration_id": session["current"]["iteration_id"],
             "auto_filled_values": 0,
+            "visual_style": "source_default",
+            "mood": "source_default",
             "frozen_through_keyframe": boundary,
             "inheritance_sha256": session["inheritance_sha256"],
             "inherited_locked_values": deepcopy(
@@ -67,6 +70,7 @@ class DirectorLoopTests(unittest.TestCase):
             session["inherited_keyframes"][0]["actors"]["actor_a"],
             {"x": 0.16, "y": 0.5},
         )
+        self.assertNotIn("visible_state", session["inherited_keyframes"][0])
         self.assertEqual(
             session["inherited_keyframes"][0]["camera"]["position"],
             [0.0, -10.0, 6.0],
@@ -88,6 +92,27 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertTrue((iteration / "input" / "compiled_prompt.txt").is_file())
             self.assertFalse((iteration / "approval.json").exists())
             self.assertFalse(any(path.name.startswith("vace") for path in iteration.rglob("*")))
+
+    def test_prompt_preview_is_read_only_and_matches_iteration_compiler(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            payload_value = self.director_payload(manifest)
+            before = {
+                path.relative_to(manifest.parent).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in manifest.parent.rglob("*") if path.is_file()
+            }
+            state_before = (manifest.parent / "state.json").read_bytes()
+            preview = preview_prompt(manifest, payload_value)
+            after = {
+                path.relative_to(manifest.parent).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                for path in manifest.parent.rglob("*") if path.is_file()
+            }
+            self.assertEqual(after, before)
+            self.assertEqual((manifest.parent / "state.json").read_bytes(), state_before)
+            self.assertEqual(preview["prompt_compiler_version"], "trajectory-facts-v1")
+            job = prepare_iteration(manifest, payload_value)
+            compiled = (job.parent / "input" / "compiled_prompt.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(compiled, preview["prompt"])
 
     def test_approval_rejects_unrendered_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as root:

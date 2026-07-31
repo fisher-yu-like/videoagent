@@ -20,9 +20,13 @@ from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from videoactagent.coded_draft import CodedDraftError, _decode_video
-from videoactagent.director_annotation import compile_director_annotation
+from videoactagent.director_annotation import (
+    DirectorAnnotationError,
+    compile_director_annotation,
+)
 from videoactagent.trajectory import canonical_bytes
 from videoactagent.trajectory_author import _verify_coded_bundle
+from videoactagent.trajectory_prompt import PROMPT_COMPILER_VERSION
 
 
 SCHEMA_VERSION = "1.0"
@@ -292,8 +296,17 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
 
 def _contract(workspace: Mapping[str, Any]) -> dict[str, Any]:
     doc = workspace["document"]
+    root = workspace["root"]
     timeline = doc["timeline"]
     inheritance = derive_inherited_keyframes(workspace)
+    prompt_path = _verify_record(root, doc["source"]["prompt"], "source prompt")
+    semantic_path = _verify_record(root, doc["source"]["semantic_plan"], "semantic plan")
+    try:
+        story_prompt = prompt_path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError) as exc:
+        raise DirectorLoopError(f"cannot read source prompt: {exc}") from exc
+    semantic = _read(semantic_path, "semantic plan")
+    appearance = semantic.get("appearance_instruction")
     return {
         "story_id": doc["story_id"], "shot_id": doc["shot_id"],
         "duration_seconds": timeline["duration_seconds"],
@@ -301,6 +314,7 @@ def _contract(workspace: Mapping[str, Any]) -> dict[str, Any]:
         "keyframes": [{"id": item["id"], "t": item["t"]} for item in doc["keyframes"]],
         "inheritance_sha256": inheritance["inheritance_sha256"],
         "inherited_keyframes": inheritance["keyframes"],
+        "story_prompt": story_prompt, "appearance_instruction": appearance,
     }
 
 
@@ -355,10 +369,6 @@ def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
         }
         if set(actor_specs) != set(doc["actors"]):
             raise DirectorLoopError("ShotScript actors differ from director manifest")
-        visible = {
-            item.get("id"): item.get("visible_state")
-            for item in semantic.get("semantic_keyframes", []) if isinstance(item, Mapping)
-        }
         inherited = []
         for frame in doc["keyframes"]:
             t = float(frame["t"])
@@ -390,9 +400,6 @@ def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
                 round(sum(point[axis] for point in positions) / len(positions), 12)
                 for axis in range(2)
             ] + [1.25]
-            description = visible.get(frame["id"])
-            if not isinstance(description, str) or not description.strip():
-                raise DirectorLoopError(f"semantic visible state is missing for {frame['id']}")
             inherited.append({
                 "id": frame["id"], "t": t, "actors": actor_points,
                 "camera": {
@@ -401,7 +408,6 @@ def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
                     "shot_size": camera.get("shot_size"), "interpolation": "linear",
                     "roll_degrees": 0.0,
                 },
-                "visible_state": description.strip(),
             })
         source = {
             "iteration": _record(directory / "iteration.json", root),
@@ -416,14 +422,34 @@ def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _compile_candidate(workspace: Mapping[str, Any], payload: Mapping[str, Any]):
+    state = workspace["state"]
+    expected_id = f"D{state['next_iteration']}"
+    if payload.get("iteration_id") != expected_id or payload.get("parent_iteration_id") != state["current_iteration"]:
+        raise DirectorLoopError("iteration is stale or not the next version")
+    try:
+        return compile_director_annotation(payload, _contract(workspace))
+    except DirectorAnnotationError as exc:
+        raise DirectorLoopError(str(exc)) from exc
+
+
+def preview_prompt(manifest_path: Path | str, payload: Mapping[str, Any]) -> dict[str, str]:
+    workspace = verify_workspace(manifest_path)
+    compiled = _compile_candidate(workspace, payload)
+    prompt = compiled.compiled_prompt
+    return {
+        "prompt": prompt,
+        "sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        "prompt_compiler_version": PROMPT_COMPILER_VERSION,
+    }
+
+
 def prepare_iteration(manifest_path: Path | str, payload: Mapping[str, Any]) -> Path:
     workspace = verify_workspace(manifest_path)
     root = workspace["root"]
     state = workspace["state"]
     expected_id = f"D{state['next_iteration']}"
-    if payload.get("iteration_id") != expected_id or payload.get("parent_iteration_id") != state["current_iteration"]:
-        raise DirectorLoopError("iteration is stale or not the next version")
-    compiled = compile_director_annotation(payload, _contract(workspace))
+    compiled = _compile_candidate(workspace, payload)
     directory = root / "iterations" / expected_id
     if directory.exists():
         raise DirectorLoopError(f"iteration already exists: {expected_id}")
@@ -734,6 +760,9 @@ class _Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if not isinstance(payload, Mapping):
                 raise DirectorLoopError("request body must be one object")
+            if path == "/api/prompt-preview":
+                self._json(preview_prompt(self.manifest, payload))
+                return
             if path == "/api/iterations":
                 job = prepare_iteration(self.manifest, payload)
                 Thread(target=run_render_job, args=(self.manifest, job), daemon=True).start()
