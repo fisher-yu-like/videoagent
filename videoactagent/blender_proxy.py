@@ -366,7 +366,8 @@ def create_actor(profile: RenderProfile, actor: ActorPlan, actor_index: int):
     label_curve.size = 0.32
     label = bpy.data.objects.new(f"{actor.actor_id}_label", label_curve)
     bpy.context.collection.objects.link(label)
-    label.location = (0, 0, 2.45)
+    label.location = (0, 0, 3.35)
+    label.rotation_mode = "XYZ"
     label.rotation_euler = (math.radians(90), 0, 0)
     label.data.materials.append(material)
     label.parent = root
@@ -549,9 +550,11 @@ def animate_actor_motion(
         raise ValueError("actor motion requires matching non-empty points and frames")
     limb_names = ("upper_arm.L", "upper_arm.R", "upper_leg.L", "upper_leg.R")
     limbs = {name: _actor_anchor(actor, name) for name in limb_names}
+    label = bpy.data.objects[f"{actor.name}_label"]
     if replace:
         start_frame, end_frame = min(frames), max(frames)
         _remove_keyframes(actor, ("rotation_euler",), start_frame, end_frame)
+        _remove_keyframes(label, ("rotation_euler",), start_frame, end_frame)
         for limb in limbs.values():
             _remove_keyframes(limb, ("rotation_euler",), start_frame, end_frame)
 
@@ -559,8 +562,11 @@ def animate_actor_motion(
         tuple(path_heading_degrees(points, index) for index in range(len(points)))
     )
     for heading, frame in zip(headings, frames):
-        actor.rotation_euler = (0.0, 0.0, math.radians(heading - 90.0))
+        actor_yaw = math.radians(heading - 90.0)
+        actor.rotation_euler = (0.0, 0.0, actor_yaw)
         actor.keyframe_insert(data_path="rotation_euler", frame=frame)
+        label.rotation_euler = (math.radians(90.0), 0.0, -actor_yaw)
+        label.keyframe_insert(data_path="rotation_euler", frame=frame)
         for limb in limbs.values():
             limb.rotation_euler = (0.0, 0.0, 0.0)
             limb.keyframe_insert(data_path="rotation_euler", frame=frame)

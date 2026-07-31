@@ -555,7 +555,8 @@ actors = [bpy.data.objects[name] for name in ("actor_a", "actor_b")]
 actor_objects = sorted(
     (
         obj for obj in bpy.data.objects
-        if obj.name in {"actor_a", "actor_b"} or obj.name.startswith(("actor_a__", "actor_b__"))
+        if obj.name in {"actor_a", "actor_b", "actor_a_label", "actor_b_label"}
+        or obj.name.startswith(("actor_a__", "actor_b__"))
     ),
     key=lambda obj: obj.name,
 )
@@ -613,6 +614,7 @@ print("BLENDER_STYLE_PROBE=" + json.dumps(payload, sort_keys=True))
             self.assertTrue(diagnostic["keyframes"]["camera"])
             self.assertTrue(diagnostic["keyframes"]["actor_a"])
             self.assertTrue(diagnostic["keyframes"]["actor_a__anchor__upper_arm.L"])
+            self.assertTrue(diagnostic["keyframes"]["actor_a_label"])
             manifest = json.loads(
                 (directory / "diagnostic" / "trajectory_proxy_manifest.json").read_text(
                     encoding="utf-8"

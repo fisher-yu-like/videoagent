@@ -282,6 +282,7 @@ print("CROSS_SHOT_HEADING_PROBE=" + json.dumps(payload, sort_keys=True))
             probe_script = """
 import bpy
 import json
+from mathutils import Vector
 
 required = [
     "head", "torso", "pelvis",
@@ -327,6 +328,32 @@ scene.frame_set(8)
 payload["moving_swing"] = [float(value) for value in bpy.data.objects["actor_a__anchor__upper_arm.L"].rotation_euler]
 payload["stationary_swing"] = [float(value) for value in bpy.data.objects["actor_b__anchor__upper_arm.L"].rotation_euler]
 payload["forward_yaw"] = float(bpy.data.objects["actor_a"].rotation_euler.z)
+
+actor = bpy.data.objects["actor_a"]
+head = bpy.data.objects["actor_a__head"]
+label = bpy.data.objects["actor_a_label"]
+camera = bpy.data.objects["DirectorCamera"]
+
+scene.frame_set(1)
+actor_start = actor.matrix_world.translation.copy()
+label_start = label.matrix_world.translation.copy()
+scene.frame_set(8)
+actor_end = actor.matrix_world.translation.copy()
+label_end = label.matrix_world.translation.copy()
+
+def world_z_bounds(obj):
+    world = [obj.matrix_world @ Vector(corner) for corner in obj.bound_box]
+    return [min(point.z for point in world), max(point.z for point in world)]
+
+label_normal = (label.matrix_world.to_3x3() @ Vector((0.0, 0.0, 1.0))).normalized()
+to_camera = (camera.matrix_world.translation - label.matrix_world.translation).normalized()
+payload["label"] = {
+    "head_z": world_z_bounds(head),
+    "label_z": world_z_bounds(label),
+    "normal_view_dot": abs(float(label_normal.dot(to_camera))),
+    "actor_delta": [float(value) for value in actor_end - actor_start],
+    "label_delta": [float(value) for value in label_end - label_start],
+}
 print("HUMANOID_PROBE=" + json.dumps(payload, sort_keys=True))
 """
             probed = subprocess.run(
@@ -338,11 +365,13 @@ print("HUMANOID_PROBE=" + json.dumps(payload, sort_keys=True))
                 timeout=60,
             )
             self.assertEqual(probed.returncode, 0, probed.stdout + probed.stderr)
-            line = next(
-                line for line in (probed.stdout + probed.stderr).splitlines()
+            evidence = probed.stdout + probed.stderr
+            lines = [
+                line for line in evidence.splitlines()
                 if line.startswith("HUMANOID_PROBE=")
-            )
-            probe = json.loads(line.partition("=")[2])
+            ]
+            self.assertTrue(lines, evidence)
+            probe = json.loads(lines[0].partition("=")[2])
             for actor_id in ("actor_a", "actor_b"):
                 with self.subTest(actor=actor_id):
                     self.assertEqual(probe[actor_id]["root_type"], "EMPTY")
@@ -355,6 +384,15 @@ print("HUMANOID_PROBE=" + json.dumps(payload, sort_keys=True))
             self.assertAlmostEqual(probe["moving_swing"][1], 0.0, places=6)
             self.assertTrue(all(abs(value) < 1e-6 for value in probe["stationary_swing"]))
             self.assertAlmostEqual(probe["forward_yaw"], -1.570796, places=5)
+            self.assertGreater(
+                probe["label"]["label_z"][0] - probe["label"]["head_z"][1],
+                0.2,
+            )
+            self.assertGreater(probe["label"]["normal_view_dot"], 0.75)
+            for actor_delta, label_delta in zip(
+                probe["label"]["actor_delta"], probe["label"]["label_delta"]
+            ):
+                self.assertAlmostEqual(actor_delta, label_delta, places=5)
 
 
 if __name__ == "__main__":
