@@ -110,7 +110,10 @@ def _strict_text(value: object, label: str) -> str:
 
 def _profile_text(value: object, label: str) -> str:
     text = _strict_text(value, label)
-    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in text):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in text
+    ):
         raise RestylePromptError(f"{label} must not contain control characters")
     if text in _HEADINGS:
         raise RestylePromptError(f"{label} must not contain a reserved section heading")
@@ -219,8 +222,7 @@ def _trajectory_fact_block(source: str, duration: float) -> list[str]:
     continuity = _CONTINUITY.search(source)
     if continuity is None or continuity.start() == 0 or source[continuity.start() - 1] != " ":
         raise RestylePromptError("trajectory_prompt has no terminal continuity sentence")
-    trajectory_duration = float(continuity.group("duration"))
-    if not math.isfinite(trajectory_duration) or trajectory_duration != duration:
+    if continuity.group("duration") != f"{duration:g}":
         raise RestylePromptError("trajectory and restyle durations must match")
 
     prefix = source[:continuity.start() - 1]
@@ -262,7 +264,7 @@ def _partition_trajectory_facts(
         for index, first in enumerate(actor_ids)
         for second in actor_ids[index + 1:]
     )
-    segments: dict[int, dict[str, dict[Any, str]]] = {}
+    segments: dict[int, dict[str, Any]] = {}
     current_segment: int | None = None
     for fact in facts:
         segment_match = _SEGMENT_FACT.fullmatch(fact)
@@ -285,6 +287,9 @@ def _partition_trajectory_facts(
             "actors": {},
             "spacing": {},
             "camera": {},
+            "order": [],
+            "driving_facts": [],
+            "camera_facts": [],
         })
         body = segment_match.group("body")
         motion_match = motion_pattern.fullmatch(body)
@@ -294,6 +299,8 @@ def _partition_trajectory_facts(
             if actor in segment["actors"]:
                 raise RestylePromptError(f"duplicate actor fact for K{start}: {actor}")
             segment["actors"][actor] = fact
+            segment["order"].append(("actor", actor))
+            segment["driving_facts"].append(fact)
             continue
         if spacing_match is not None:
             pair = (spacing_match.group("first"), spacing_match.group("second"))
@@ -302,6 +309,8 @@ def _partition_trajectory_facts(
             if pair in segment["spacing"]:
                 raise RestylePromptError(f"duplicate spacing fact for K{start}: {pair}")
             segment["spacing"][pair] = fact
+            segment["order"].append(("spacing", pair))
+            segment["driving_facts"].append(fact)
             continue
         camera_claim = _camera_claim(body)
         if camera_claim is None:
@@ -311,6 +320,8 @@ def _partition_trajectory_facts(
                 f"duplicate camera {camera_claim} fact for segment K{start}"
             )
         segment["camera"][camera_claim] = fact
+        segment["order"].append(("camera", camera_claim))
+        segment["camera_facts"].append(fact)
 
     if not segments:
         raise RestylePromptError("trajectory_prompt must contain trajectory segments")
@@ -329,13 +340,28 @@ def _partition_trajectory_facts(
             raise RestylePromptError(
                 f"K{start} to K{start + 1} needs exactly one fact per actor pair"
             )
-        driving.extend(segment["actors"][actor] for actor in actor_ids)
-        driving.extend(segment["spacing"][pair] for pair in actor_pairs)
-        camera.extend(
-            segment["camera"][claim]
-            for claim in _CAMERA_CLAIM_ORDER
-            if claim in segment["camera"]
+        required_order = (
+            [("actor", actor) for actor in actor_ids]
+            + [("spacing", pair) for pair in actor_pairs]
         )
+        if segment["order"][:len(required_order)] != required_order:
+            raise RestylePromptError(
+                f"K{start} to K{start + 1} actor and spacing facts are out of order"
+            )
+        camera_order = segment["order"][len(required_order):]
+        expected_camera_order = sorted(
+            camera_order,
+            key=lambda item: _CAMERA_CLAIM_ORDER.index(item[1]),
+        )
+        if (
+            any(kind != "camera" for kind, _ in camera_order)
+            or camera_order != expected_camera_order
+        ):
+            raise RestylePromptError(
+                f"K{start} to K{start + 1} camera facts are out of order"
+            )
+        driving.extend(segment["driving_facts"])
+        camera.extend(segment["camera_facts"])
     camera.append(framing)
     return tuple(driving), tuple(camera)
 
