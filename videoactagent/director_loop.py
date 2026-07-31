@@ -122,6 +122,22 @@ def _verify_record(root: Path, value: object, label: str) -> Path:
     return path
 
 
+def _verify_annotation_compiler_versions(
+    root: Path, value: object, label: str, *,
+    trajectory_version: object, restyle_version: object,
+) -> Path:
+    path = _verify_record(root, value, label)
+    annotation = _read(path, label)
+    if (
+        trajectory_version != PROMPT_COMPILER_VERSION
+        or restyle_version != RESTYLE_COMPILER_VERSION
+        or annotation.get("prompt_compiler_version") != trajectory_version
+        or annotation.get("restyle_compiler_version") != restyle_version
+    ):
+        raise DirectorLoopError(f"{label} compiler version binding is invalid")
+    return path
+
+
 def _copy(source: Path, target: Path, root: Path) -> dict[str, object]:
     before = _sha(source)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -316,10 +332,16 @@ def _iteration(root: Path, iteration_id: str) -> tuple[Path, dict[str, Any]]:
         }
         if not isinstance(inputs, Mapping) or set(inputs) != required_inputs:
             raise DirectorLoopError(f"{iteration_id} input inventory is invalid")
-        paths = {
-            name: _verify_record(root, inputs[name], f"{iteration_id} {name}")
-            for name in required_inputs
-        }
+        paths = {}
+        for name in required_inputs:
+            if name == "annotation":
+                paths[name] = _verify_annotation_compiler_versions(
+                    root, inputs[name], f"{iteration_id} annotation",
+                    trajectory_version=document["trajectory_compiler_version"],
+                    restyle_version=document["restyle_compiler_version"],
+                )
+            else:
+                paths[name] = _verify_record(root, inputs[name], f"{iteration_id} {name}")
         if paths["compiled_prompt"].read_bytes() != paths["trajectory_prompt"].read_bytes():
             raise DirectorLoopError("compiled_prompt differs from trajectory_prompt")
         source = document.get("source")
@@ -634,7 +656,14 @@ def publish_iteration(
     if not isinstance(job_inputs, Mapping) or set(job_inputs) != expected_inputs:
         raise DirectorLoopError("render job input inventory is invalid")
     for name in expected_inputs:
-        _verify_record(job_path.parent, job_inputs[name], f"render job {name}")
+        if name == "annotation":
+            _verify_annotation_compiler_versions(
+                job_path.parent, job_inputs[name], "render job annotation",
+                trajectory_version=job["trajectory_compiler_version"],
+                restyle_version=job["restyle_compiler_version"],
+            )
+        else:
+            _verify_record(job_path.parent, job_inputs[name], f"render job {name}")
     job_source = job.get("source")
     profile_record = workspace["document"]["source"]["restyle_profile"]
     if (

@@ -38,6 +38,17 @@ class DirectorLoopTests(unittest.TestCase):
         path.write_bytes(data)
         return data
 
+    @staticmethod
+    def rebind_record(record: dict, data: bytes) -> None:
+        record["sha256"] = hashlib.sha256(data).hexdigest()
+        record["bytes"] = len(data)
+
+    def tamper_annotation_versions(self, path: Path) -> bytes:
+        annotation = json.loads(path.read_text(encoding="utf-8"))
+        annotation["prompt_compiler_version"] = "adversarial-trajectory"
+        annotation["restyle_compiler_version"] = "adversarial-restyle"
+        return self.rewrite_json(path, annotation)
+
     def make_workspace(self, root: str, restyle_profile: Path | None = None) -> Path:
         self.assertTrue(BUNDLE.is_file(), f"missing real D0 bundle: {BUNDLE}")
         self.assertTrue(BLENDER.is_file(), f"missing Blender: {BLENDER}")
@@ -311,6 +322,70 @@ class DirectorLoopTests(unittest.TestCase):
             self.rewrite_json(state_path, state)
 
             with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                export_approved_iteration(manifest)
+
+    def test_publish_rejects_rehashed_annotation_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            annotation_path = job_path.parent / job["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(job["inputs"]["annotation"], annotation_bytes)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_iteration_verification_and_approve_reject_rehashed_annotation_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            annotation_path = manifest.parent / iteration["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(iteration["inputs"]["annotation"], annotation_bytes)
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                verify_workspace(manifest)
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                approve_iteration(manifest, "D1", "sy")
+
+    def test_export_rejects_fully_rehashed_annotation_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            approval_path = approve_iteration(manifest, "D1", "sy")
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            annotation_path = manifest.parent / iteration["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(iteration["inputs"]["annotation"], annotation_bytes)
+            iteration_bytes = self.rewrite_json(iteration_path, iteration)
+
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            self.rebind_record(approval["annotation"], annotation_bytes)
+            self.rebind_record(approval["iteration_manifest"], iteration_bytes)
+            approval_bytes = self.rewrite_json(approval_path, approval)
+
+            state_path = manifest.parent / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.rebind_record(state["approval"], approval_bytes)
+            self.rewrite_json(state_path, state)
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
                 export_approved_iteration(manifest)
 
     def test_byte_ranges_support_video_seeking(self) -> None:
