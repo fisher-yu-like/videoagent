@@ -27,36 +27,60 @@ INFERENCE=${INFERENCE:-"$VACE_ROOT/vace/vace_wan_inference.py"}
 JOB_DIR=$(dirname -- "$JOB_JSON")
 EXPECTED_VACE=48eb44f1c4be87cc65a98bff985a26976841e9f3
 EXPECTED_WAN=9737cba9c1c3c4d04b33fcad41c111989865d315
+VACE_DRY_RUN=${VACE_DRY_RUN:-0}
+if [ "$VACE_DRY_RUN" != 0 ] && [ "$VACE_DRY_RUN" != 1 ]; then
+  echo "VACE_DRY_RUN must be 0 or 1" >&2
+  exit 64
+fi
 
 export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 VALIDATION_LOG=$(mktemp)
 cleanup_validation() { rm -f "$VALIDATION_LOG"; }
 trap cleanup_validation EXIT
-"$VACE_PYTHON" -m videoactagent.vace_full_chain validate "$JOB_DIR" >"$VALIDATION_LOG"
-
-if [ "$(git -C "$VACE_ROOT" rev-parse HEAD)" != "$EXPECTED_VACE" ]; then
-  echo "VACE commit gate failed" >&2
-  exit 67
-fi
-if [ "$(git -C "$WAN_ROOT" rev-parse HEAD)" != "$EXPECTED_WAN" ]; then
-  echo "Wan commit gate failed" >&2
-  exit 68
-fi
-if [ ! -f "$INFERENCE" ] || [ ! -d "$VACE_CKPT_DIR" ]; then
-  echo "VACE inference program or checkpoint is unavailable" >&2
-  exit 69
-fi
-
-gpu_compute=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits)
-if printf '%s\n' "$gpu_compute" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*$'; then
-  echo "GPU already has a compute process" >&2
-  exit 70
+JOB_SCHEMA=$("$VACE_PYTHON" - "$JOB_JSON" <<'PY'
+import json
+import sys
+job = json.load(open(sys.argv[1], encoding="utf-8"))
+is_coded_draft = (
+    job.get("schema_version") == "1.0"
+    and job.get("conditioning_mode") == "source_video_edit"
+    and job.get("control_mode") == "source_video_edit"
+    and isinstance(job.get("inventory"), list)
+)
+print("coded_draft" if is_coded_draft else "legacy")
+PY
+)
+if [ "$JOB_SCHEMA" = coded_draft ]; then
+  "$VACE_PYTHON" -m videoactagent.vace_coded_draft verify --job "$JOB_JSON" >"$VALIDATION_LOG"
+else
+  "$VACE_PYTHON" -m videoactagent.vace_full_chain validate "$JOB_DIR" >"$VALIDATION_LOG"
 fi
 
 matching_inferences() { pgrep -fc '[v]ace_wan_inference.py' || true; }
-if [ "$(matching_inferences)" -ne 0 ]; then
-  echo "a VACE inference process is already present" >&2
-  exit 71
+if [ "$VACE_DRY_RUN" != 1 ]; then
+  if [ "$(git -C "$VACE_ROOT" rev-parse HEAD)" != "$EXPECTED_VACE" ]; then
+    echo "VACE commit gate failed" >&2
+    exit 67
+  fi
+  if [ "$(git -C "$WAN_ROOT" rev-parse HEAD)" != "$EXPECTED_WAN" ]; then
+    echo "Wan commit gate failed" >&2
+    exit 68
+  fi
+  if [ ! -f "$INFERENCE" ] || [ ! -d "$VACE_CKPT_DIR" ]; then
+    echo "VACE inference program or checkpoint is unavailable" >&2
+    exit 69
+  fi
+
+  gpu_compute=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits)
+  if printf '%s\n' "$gpu_compute" | grep -Eq '^[[:space:]]*[0-9]+[[:space:]]*$'; then
+    echo "GPU already has a compute process" >&2
+    exit 70
+  fi
+
+  if [ "$(matching_inferences)" -ne 0 ]; then
+    echo "a VACE inference process is already present" >&2
+    exit 71
+  fi
 fi
 
 mkdir -p "$OUTPUT_DIR"
@@ -69,10 +93,22 @@ import base64
 import json
 import sys
 job = json.load(open(sys.argv[1], encoding="utf-8"))
+references = job["mapping"].get("src_ref_images")
+if references is None:
+    reference = ""
+elif (
+    isinstance(references, list)
+    and len(references) == 1
+    and isinstance(references[0], str)
+    and references[0]
+):
+    reference = references[0]
+else:
+    raise SystemExit("src_ref_images must be null or a one-item string list")
 for value in (
     job["mapping"]["src_video"],
     job["mapping"]["src_mask"],
-    job["mapping"]["src_ref_images"][0],
+    reference,
     job["mapping"]["prompt"],
 ):
     print(base64.b64encode(value.encode("utf-8")).decode("ascii"))
@@ -82,10 +118,13 @@ if [ "${#VALUES[@]}" -ne 4 ]; then
   echo "validated job settings could not be materialized" >&2
   exit 72
 fi
-decode_base64() { printf '%s' "$1" | base64 --decode; }
+decode_base64() { printf '%s' "$1" | tr -d '\r' | base64 --decode; }
 SRC_VIDEO="$JOB_DIR/$(decode_base64 "${VALUES[0]}")"
 SRC_MASK="$JOB_DIR/$(decode_base64 "${VALUES[1]}")"
-FIRST_FRAME="$JOB_DIR/$(decode_base64 "${VALUES[2]}")"
+REF_IMAGE=$(decode_base64 "${VALUES[2]}")
+if [ -n "$REF_IMAGE" ]; then
+  REF_IMAGE="$JOB_DIR/$REF_IMAGE"
+fi
 PROMPT=$(decode_base64 "${VALUES[3]}")
 
 COMMAND=(
@@ -96,7 +135,11 @@ COMMAND=(
   --ckpt_dir "$VACE_CKPT_DIR"
   --src_video "$SRC_VIDEO"
   --src_mask "$SRC_MASK"
-  --src_ref_images "$FIRST_FRAME"
+)
+if [ -n "$REF_IMAGE" ]; then
+  COMMAND+=(--src_ref_images "$REF_IMAGE")
+fi
+COMMAND+=(
   --prompt "$PROMPT"
   --use_prompt_extend plain
   --base_seed 2026
@@ -107,6 +150,11 @@ COMMAND=(
 )
 printf '%q ' "${COMMAND[@]}" >"$OUTPUT_DIR/command.txt"
 printf '\n' >>"$OUTPUT_DIR/command.txt"
+
+if [ "$VACE_DRY_RUN" = 1 ]; then
+  echo "VACE_DRY_RUN_OK $OUTPUT_DIR/command.txt"
+  exit 0
+fi
 
 nvidia-smi --query-gpu=timestamp,index,memory.used,utilization.gpu,temperature.gpu \
   --format=csv,noheader,nounits -lms 250 >"$OUTPUT_DIR/gpu_metrics.csv" 2>&1 &

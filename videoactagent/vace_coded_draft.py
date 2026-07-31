@@ -39,6 +39,14 @@ _CONTROL_FPS = 16
 _CONTROL_RESOLUTION = (832, 480)
 _CONTROL_PATH = "control/src_video.mp4"
 _RESAMPLING = "ffmpeg_scale_fps_final_frame_clone"
+_JOB_ARTIFACT_PATHS = (
+    "control/src_mask.mp4",
+    "control/src_video.mp4",
+    "source/clay.mp4",
+    "source/coded_draft_bundle.json",
+    "source/coded_draft_manifest.json",
+    "source/semantic_plan.json",
+)
 
 
 class VaceCodedDraftError(ValueError):
@@ -84,6 +92,10 @@ def _record(path: Path, relative: str) -> dict[str, Any]:
         "bytes": path.stat().st_size,
         "sha256": _sha256(path),
     }
+
+
+def _artifact_projection(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {field: record[field] for field in ("path", "bytes", "sha256")}
 
 
 def _safe_artifact(root: Path, path_text: Any, label: str) -> Path:
@@ -233,6 +245,122 @@ def _verify_inventory(root: Path, records: Any) -> dict[str, Mapping[str, Any]]:
     return verified
 
 
+def _verify_job_inventory(root: Path, records: Any) -> list[dict[str, Any]]:
+    if not isinstance(records, list):
+        raise VaceCodedDraftError("VACE job inventory must be a list")
+    expected_paths = list(_JOB_ARTIFACT_PATHS)
+    paths = [record.get("path") if isinstance(record, Mapping) else None for record in records]
+    if paths != expected_paths or len({str(path).casefold() for path in paths}) != len(paths):
+        raise VaceCodedDraftError("VACE job inventory paths are invalid or case-conflicting")
+    verified: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, Mapping) or set(record) != {"path", "bytes", "sha256"}:
+            raise VaceCodedDraftError("VACE job inventory record is not canonical")
+        _verify_record(root, record, f"VACE job inventory {record['path']}")
+        verified.append(dict(record))
+    actual = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    declared = set(expected_paths) | {_JOB_NAME}
+    if actual != declared or len({path.casefold() for path in actual}) != len(actual):
+        raise VaceCodedDraftError("VACE job files differ from the declared closed inventory")
+    return verified
+
+
+def _verified_source_binding(
+    root: Path,
+    binding: Any,
+    label: str,
+    inventory: Mapping[str, Mapping[str, Any]],
+) -> Path:
+    if not isinstance(binding, Mapping) or binding.get("verified_equal") is not True:
+        raise VaceCodedDraftError(f"{label} binding is not verified_equal")
+    record = {
+        "path": binding.get("snapshot_path"),
+        "bytes": binding.get("bytes"),
+        "sha256": binding.get("snapshot_sha256"),
+    }
+    target = _verify_record(root, record, f"{label} snapshot")
+    declared = inventory.get(str(record["path"]))
+    if not isinstance(declared, Mapping) or any(
+        declared.get(field) != record[field] for field in ("path", "bytes", "sha256")
+    ):
+        raise VaceCodedDraftError(f"{label} snapshot inventory record mismatch")
+    if binding.get("original_sha256") != binding.get("snapshot_sha256"):
+        raise VaceCodedDraftError(f"{label} original and snapshot hashes differ")
+    return target
+
+
+def _derive_source_provenance(
+    bundle: Mapping[str, Any],
+    semantic: Mapping[str, Any],
+    source_frame_count: int,
+) -> dict[str, Any]:
+    appearance = bundle.get("appearance_instruction")
+    story_prompt = bundle.get("story_prompt")
+    if not isinstance(appearance, str) or not appearance.strip():
+        raise VaceCodedDraftError("appearance_instruction must be non-empty")
+    if appearance != semantic.get("appearance_instruction"):
+        raise VaceCodedDraftError(
+            "appearance_instruction differs from the semantic plan snapshot"
+        )
+    if not isinstance(story_prompt, str) or not story_prompt.strip():
+        raise VaceCodedDraftError("story_prompt must be non-empty")
+
+    motion = bundle.get("motion_semantics")
+    keyframes = motion.get("keyframes") if isinstance(motion, Mapping) else None
+    semantic_keyframes = semantic.get("semantic_keyframes")
+    if (
+        not isinstance(keyframes, list)
+        or not keyframes
+        or not isinstance(semantic_keyframes, list)
+        or len(keyframes) != len(semantic_keyframes)
+    ):
+        raise VaceCodedDraftError("motion/semantic keyframes are missing or unequal")
+    schedule: list[dict[str, Any]] = []
+    previous_t = -1.0
+    previous_frame = -1
+    for item, semantic_item in zip(keyframes, semantic_keyframes):
+        if not isinstance(item, Mapping) or not isinstance(semantic_item, Mapping):
+            raise VaceCodedDraftError("motion semantic keyframe is invalid")
+        semantic_id = item.get("semantic_id")
+        t = item.get("t")
+        frame_index = item.get("frame_index")
+        if (
+            not isinstance(semantic_id, str)
+            or semantic_item.get("id") != semantic_id
+            or isinstance(t, bool)
+            or not isinstance(t, (int, float))
+            or not math.isfinite(float(t))
+            or not 0 <= float(t) <= 1
+            or not _same_number(t, semantic_item.get("t"), 1e-12)
+            or isinstance(frame_index, bool)
+            or not isinstance(frame_index, int)
+        ):
+            raise VaceCodedDraftError("motion semantic keyframe schedule is invalid")
+        expected_frame = round(float(t) * (source_frame_count - 1))
+        if (
+            frame_index != expected_frame
+            or float(t) <= previous_t
+            or frame_index <= previous_frame
+        ):
+            raise VaceCodedDraftError(
+                "motion keyframe index must equal round(t * (source_frame_count - 1))"
+            )
+        previous_t = float(t)
+        previous_frame = frame_index
+        schedule.append(
+            {"semantic_id": semantic_id, "t": t, "frame_index": frame_index}
+        )
+    return {
+        "story_prompt": story_prompt.strip(),
+        "appearance_instruction": appearance.strip(),
+        "keyframes": schedule,
+    }
+
+
 def _verified_coded_draft(
     bundle_path: Path | str, manifest_path: Path | str
 ) -> dict[str, Any]:
@@ -317,51 +445,30 @@ def _verified_coded_draft(
     manifest_binding = manifest.get("sources", {}).get("semantic_plan")
     if not isinstance(semantic_binding, Mapping) or semantic_binding != manifest_binding:
         raise VaceCodedDraftError("semantic plan binding mismatch")
-    semantic_path = _verify_record(
-        root,
-        {
-            "path": semantic_binding.get("snapshot_path"),
-            "bytes": semantic_binding.get("bytes"),
-            "sha256": semantic_binding.get("snapshot_sha256"),
-        },
-        "semantic plan snapshot",
+    semantic_path = _verified_source_binding(
+        root, semantic_binding, "semantic plan", inventory
     )
-    if semantic_binding.get("verified_equal") is not True:
-        raise VaceCodedDraftError("semantic plan snapshot is not verified_equal")
-    if inventory.get(str(semantic_binding.get("snapshot_path"))) is None:
-        raise VaceCodedDraftError("semantic plan snapshot is absent from inventory")
     semantic = _read_object(semantic_path, "semantic plan snapshot")
     if semantic.get("story_id") != story_id:
         raise VaceCodedDraftError("semantic plan story identity mismatch")
 
-    appearance = bundle.get("appearance_instruction")
-    story_prompt = bundle.get("story_prompt")
-    if not isinstance(appearance, str) or not appearance.strip():
-        raise VaceCodedDraftError("appearance_instruction must be non-empty")
-    if not isinstance(story_prompt, str) or not story_prompt.strip():
-        raise VaceCodedDraftError("story_prompt must be non-empty")
-    keyframes = motion.get("keyframes")
-    if not isinstance(keyframes, list) or not keyframes:
-        raise VaceCodedDraftError("motion semantic keyframes must be non-empty")
-    schedule: list[dict[str, Any]] = []
-    previous = -1
-    for item in keyframes:
-        if not isinstance(item, Mapping):
-            raise VaceCodedDraftError("motion semantic keyframe is invalid")
-        reduced = {name: item.get(name) for name in ("semantic_id", "t", "frame_index")}
-        if (
-            not isinstance(reduced["semantic_id"], str)
-            or isinstance(reduced["t"], bool)
-            or not isinstance(reduced["t"], (int, float))
-            or not math.isfinite(float(reduced["t"]))
-            or not 0 <= float(reduced["t"]) <= 1
-            or isinstance(reduced["frame_index"], bool)
-            or not isinstance(reduced["frame_index"], int)
-            or not previous < reduced["frame_index"] < media["frame_count"]
-        ):
-            raise VaceCodedDraftError("motion semantic keyframe schedule is invalid")
-        previous = reduced["frame_index"]
-        schedule.append(reduced)
+    source_bindings = bundle.get("source_bindings")
+    prompt_binding = (
+        source_bindings.get("prompt") if isinstance(source_bindings, Mapping) else None
+    )
+    manifest_prompt_binding = manifest.get("sources", {}).get("prompt")
+    if not isinstance(prompt_binding, Mapping) or prompt_binding != manifest_prompt_binding:
+        raise VaceCodedDraftError("prompt source binding mismatch")
+    prompt_path = _verified_source_binding(root, prompt_binding, "prompt", inventory)
+    try:
+        prompt_source_text = prompt_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise VaceCodedDraftError(f"cannot read prompt snapshot: {exc}") from exc
+    if bundle.get("story_prompt") != prompt_source_text:
+        raise VaceCodedDraftError(
+            "bundle story_prompt differs from the hashed prompt snapshot"
+        )
+    provenance = _derive_source_provenance(bundle, semantic, media["frame_count"])
     return {
         "root": root,
         "bundle_path": bundle_file,
@@ -372,9 +479,7 @@ def _verified_coded_draft(
         "media": media,
         "semantic_path": semantic_path,
         "semantic_sha256": _sha256(semantic_path),
-        "story_prompt": story_prompt.strip(),
-        "appearance_instruction": appearance.strip(),
-        "keyframes": schedule,
+        **provenance,
     }
 
 
@@ -505,6 +610,20 @@ def build_vace_coded_draft_job(
             "appearance_instruction": verified["appearance_instruction"],
         }
         prompt_text = f"{components['story_prompt']} {components['appearance_instruction']}"
+        job_inventory = sorted(
+            (
+                _artifact_projection(record)
+                for record in (
+                    mask,
+                    control,
+                    clay_record,
+                    bundle_record,
+                    manifest_record,
+                    semantic_record,
+                )
+            ),
+            key=lambda record: record["path"],
+        )
         job = {
             "schema_version": _SCHEMA_VERSION,
             "story_id": verified["story_id"],
@@ -519,6 +638,7 @@ def build_vace_coded_draft_job(
                 "source_bundle_backend_consumed": False,
             },
             "control": control,
+            "inventory": job_inventory,
             "prompt": {
                 "text": prompt_text,
                 "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
@@ -602,7 +722,7 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     job = _read_object(path, "clay-only VACE job")
     required = {
         "schema_version", "story_id", "backend", "conditioning_mode",
-        "control_mode", "source", "control", "prompt", "motion_semantics", "mapping",
+        "control_mode", "source", "control", "inventory", "prompt", "motion_semantics", "mapping",
         "mask", "vace", "timeline", "server_contract", "api_calls", "evidence",
     }
     if set(job) != required:
@@ -615,15 +735,19 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         or job.get("api_calls") != 0
     ):
         raise VaceCodedDraftError("VACE job identity contract is invalid")
+    inventory = _verify_job_inventory(root, job.get("inventory"))
     source = job.get("source")
     if not isinstance(source, Mapping) or source.get("source_bundle_backend_consumed") is not False:
         raise VaceCodedDraftError("VACE source contract is invalid")
+    snapshot_paths: dict[str, Path] = {}
     for name, expected in (
         ("coded_draft_bundle", "source/coded_draft_bundle.json"),
         ("coded_draft_manifest", "source/coded_draft_manifest.json"),
         ("semantic_plan", "source/semantic_plan.json"),
     ):
-        _verify_record(root, source.get(name), name, expected_path=expected)
+        snapshot_paths[name] = _verify_record(
+            root, source.get(name), name, expected_path=expected
+        )
     clay = source.get("conditioning_video")
     clay_path = _verify_record(
         root, clay, "clay conditioning video", expected_path="source/clay.mp4"
@@ -638,6 +762,60 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         raise VaceCodedDraftError("clay-only source policy is invalid")
     media = _probe_media(clay_path)
     _verify_media_record(media, clay.get("media"))
+
+    source_bundle = _read_object(
+        snapshot_paths["coded_draft_bundle"], "snapshotted coded-draft bundle"
+    )
+    source_manifest = _read_object(
+        snapshot_paths["coded_draft_manifest"], "snapshotted coded-draft manifest"
+    )
+    source_semantic = _read_object(
+        snapshot_paths["semantic_plan"], "snapshotted semantic plan"
+    )
+    if (
+        source_bundle.get("story_id") != job.get("story_id")
+        or source_manifest.get("story_id") != job.get("story_id")
+        or source_semantic.get("story_id") != job.get("story_id")
+        or source_bundle.get("conditioning_mode") != "source_video_edit"
+        or source_bundle.get("backend_consumed") is not False
+        or source_manifest.get("backend_consumed") is not False
+    ):
+        raise VaceCodedDraftError("snapshotted coded-draft identity is invalid")
+    manifest_bundle = source_manifest.get("outputs", {}).get("bundle")
+    if (
+        not isinstance(manifest_bundle, Mapping)
+        or manifest_bundle.get("bytes") != source["coded_draft_bundle"]["bytes"]
+        or manifest_bundle.get("sha256") != source["coded_draft_bundle"]["sha256"]
+    ):
+        raise VaceCodedDraftError("snapshotted bundle hash differs from its manifest")
+    semantic_binding = source_bundle.get("motion_semantics", {}).get("semantic_plan")
+    if (
+        not isinstance(semantic_binding, Mapping)
+        or semantic_binding != source_manifest.get("sources", {}).get("semantic_plan")
+        or semantic_binding.get("bytes") != source["semantic_plan"]["bytes"]
+        or semantic_binding.get("snapshot_sha256") != source["semantic_plan"]["sha256"]
+    ):
+        raise VaceCodedDraftError("snapshotted semantic plan binding is invalid")
+    prompt_binding = source_bundle.get("source_bindings", {}).get("prompt")
+    if (
+        not isinstance(prompt_binding, Mapping)
+        or prompt_binding != source_manifest.get("sources", {}).get("prompt")
+        or prompt_binding.get("verified_equal") is not True
+        or prompt_binding.get("original_sha256") != prompt_binding.get("snapshot_sha256")
+    ):
+        raise VaceCodedDraftError("snapshotted prompt binding is invalid")
+    original_clay = source_bundle.get("conditioning_video")
+    if (
+        not isinstance(original_clay, Mapping)
+        or original_clay != source_manifest.get("videos", {}).get("clay")
+        or original_clay.get("sha256") != clay.get("source_sha256")
+        or original_clay.get("bytes") != clay.get("bytes")
+        or original_clay.get("media") != clay.get("media")
+    ):
+        raise VaceCodedDraftError("snapshotted clay binding is invalid")
+    source_provenance = _derive_source_provenance(
+        source_bundle, source_semantic, media["frame_count"]
+    )
 
     control = job.get("control")
     control_path = _verify_record(
@@ -668,6 +846,12 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         for field in components
     ):
         raise VaceCodedDraftError("VACE prompt components are invalid")
+    expected_components = {
+        "story_prompt": source_provenance["story_prompt"],
+        "appearance_instruction": source_provenance["appearance_instruction"],
+    }
+    if components != expected_components:
+        raise VaceCodedDraftError("VACE prompt components differ from source snapshots")
     prompt_text = f"{components['story_prompt']} {components['appearance_instruction']}"
     expected_prompt = {
         "text": prompt_text,
@@ -699,11 +883,19 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         or not motion["keyframes"]
     ):
         raise VaceCodedDraftError("VACE motion semantics are invalid")
-    for item in motion["keyframes"]:
-        if not isinstance(item, Mapping) or set(item) != {
-            "semantic_id", "t", "source_frame_index", "control_frame_index"
-        }:
-            raise VaceCodedDraftError("VACE motion keyframe contract is invalid")
+    expected_keyframes = [
+        {
+            "semantic_id": item["semantic_id"],
+            "t": item["t"],
+            "source_frame_index": round(float(item["t"]) * (media["frame_count"] - 1)),
+            "control_frame_index": round(float(item["t"]) * (_CONTROL_FRAMES - 1)),
+        }
+        for item in source_provenance["keyframes"]
+    ]
+    if motion["keyframes"] != expected_keyframes:
+        raise VaceCodedDraftError(
+            "VACE motion keyframes differ from the bound semantic/source timeline"
+        )
 
     timeline = {
         "source": {
@@ -756,6 +948,22 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     }
     if mask != expected_mask:
         raise VaceCodedDraftError("VACE mask metadata mismatch")
+    expected_inventory = sorted(
+        (
+            _artifact_projection(record)
+            for record in (
+                mask,
+                control,
+                clay,
+                source["coded_draft_bundle"],
+                source["coded_draft_manifest"],
+                source["semantic_plan"],
+            )
+        ),
+        key=lambda record: record["path"],
+    )
+    if inventory != expected_inventory:
+        raise VaceCodedDraftError("VACE job inventory differs from bound source records")
     try:
         _verify_full_generation_mask(
             mask_path,

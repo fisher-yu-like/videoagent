@@ -94,6 +94,17 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
         "bytes": semantic_path.stat().st_size,
         "verified_equal": True,
     }
+    prompt_path = root / "sources" / "prompt.txt"
+    prompt_text = "One continuous take. Two travelers approach each other."
+    prompt_path.write_text(prompt_text, encoding="utf-8")
+    prompt_binding = {
+        "original_path": "ignored-prompt.txt",
+        "original_sha256": _sha256(prompt_path),
+        "snapshot_path": "sources/prompt.txt",
+        "snapshot_sha256": _sha256(prompt_path),
+        "bytes": prompt_path.stat().st_size,
+        "verified_equal": True,
+    }
     clay = {**_record(clay_path, root), "media": clay_media}
     diagnostic = {**_record(diagnostic_path, root), "media": diagnostic_media}
     bundle = {
@@ -102,7 +113,7 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
         "conditioning_mode": "source_video_edit",
         "conditioning_video": clay,
         "appearance_instruction": "Natural people and realistic station light.",
-        "story_prompt": "One continuous take. Two travelers approach each other.",
+        "story_prompt": prompt_text,
         "motion_semantics": {
             "semantic_plan": semantic_binding,
             "keyframes": [
@@ -115,6 +126,7 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
             "role": "evidence_only",
             "backend_consumed": False,
         },
+        "source_bindings": {"prompt": prompt_binding},
         "backend_consumed": False,
     }
     bundle_path = root / "bundle.json"
@@ -122,6 +134,7 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
     bundle_record = _record(bundle_path, root)
     inventory = [
         _record(semantic_path, root),
+        _record(prompt_path, root),
         _record(clay_path, root),
         _record(diagnostic_path, root),
         bundle_record,
@@ -135,7 +148,7 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
             "duration_seconds": 5.0,
             "resolution": [64, 32],
         },
-        "sources": {"semantic_plan": semantic_binding},
+        "sources": {"semantic_plan": semantic_binding, "prompt": prompt_binding},
         "videos": {"clay": clay, "diagnostic": diagnostic},
         "outputs": {"bundle": bundle_record},
         "backend_consumed": False,
@@ -226,6 +239,17 @@ class VaceCodedDraftTests(unittest.TestCase):
             self.assertNotIn("diagnostic", json.dumps(job).lower())
             self.assertEqual(job["api_calls"], 0)
             self.assertEqual(
+                [item["path"] for item in job["inventory"]],
+                [
+                    "control/src_mask.mp4",
+                    "control/src_video.mp4",
+                    "source/clay.mp4",
+                    "source/coded_draft_bundle.json",
+                    "source/coded_draft_manifest.json",
+                    "source/semantic_plan.json",
+                ],
+            )
+            self.assertEqual(
                 job["evidence"],
                 {"source_validation_passed": True, "inference_success": False},
             )
@@ -261,6 +285,49 @@ class VaceCodedDraftTests(unittest.TestCase):
             job_path = build_vace_coded_draft_job(bundle, manifest, root / "job")
             clay = job_path.parent / "source" / "clay.mp4"
             clay.write_bytes(clay.read_bytes() + b"tamper")
+            with self.assertRaises(VaceCodedDraftError):
+                verify_vace_coded_draft_job(job_path)
+
+    def test_job_verification_rejects_undeclared_and_case_changed_files(self):
+        from videoactagent.vace_coded_draft import (
+            VaceCodedDraftError,
+            build_vace_coded_draft_job,
+            verify_vace_coded_draft_job,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, manifest = _make_coded_draft(root / "coded")
+            job_path = build_vace_coded_draft_job(bundle, manifest, root / "job")
+            extra = job_path.parent / "undeclared.bin"
+            extra.write_bytes(b"real undeclared bytes")
+            with self.assertRaises(VaceCodedDraftError):
+                verify_vace_coded_draft_job(job_path)
+            extra.unlink()
+
+            clay = job_path.parent / "source" / "clay.mp4"
+            intermediate = clay.with_name("rename.tmp")
+            changed_case = clay.with_name("CLAY.mp4")
+            clay.rename(intermediate)
+            intermediate.rename(changed_case)
+            with self.assertRaises(VaceCodedDraftError):
+                verify_vace_coded_draft_job(job_path)
+
+    def test_job_verification_reconstructs_motion_keyframes_from_source(self):
+        from videoactagent.vace_coded_draft import (
+            VaceCodedDraftError,
+            build_vace_coded_draft_job,
+            verify_vace_coded_draft_job,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, manifest = _make_coded_draft(root / "coded")
+            job_path = build_vace_coded_draft_job(bundle, manifest, root / "job")
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["motion_semantics"]["keyframes"][0]["t"] = 999
+            job["motion_semantics"]["keyframes"][0]["source_frame_index"] = -42
+            job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
             with self.assertRaises(VaceCodedDraftError):
                 verify_vace_coded_draft_job(job_path)
 
@@ -301,6 +368,28 @@ class VaceCodedDraftTests(unittest.TestCase):
                     manifest_document["artifact_inventory"][index] = bundle_record
             manifest.write_text(json.dumps(manifest_document, indent=2), encoding="utf-8")
 
+            with self.assertRaises(VaceCodedDraftError):
+                build_vace_coded_draft_job(bundle, manifest, root / "job")
+
+    def test_prepare_rejects_story_prompt_unbound_from_hashed_prompt_snapshot(self):
+        from videoactagent.vace_coded_draft import (
+            VaceCodedDraftError,
+            build_vace_coded_draft_job,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, manifest = _make_coded_draft(root / "coded")
+            bundle_document = json.loads(bundle.read_text(encoding="utf-8"))
+            bundle_document["story_prompt"] = "UNBOUND prompt injected into bundle"
+            bundle.write_text(json.dumps(bundle_document, indent=2), encoding="utf-8")
+            bundle_record = _record(bundle, bundle.parent)
+            manifest_document = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_document["outputs"]["bundle"] = bundle_record
+            for index, record in enumerate(manifest_document["artifact_inventory"]):
+                if record["path"] == "bundle.json":
+                    manifest_document["artifact_inventory"][index] = bundle_record
+            manifest.write_text(json.dumps(manifest_document, indent=2), encoding="utf-8")
             with self.assertRaises(VaceCodedDraftError):
                 build_vace_coded_draft_job(bundle, manifest, root / "job")
 
