@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 import re
+import unicodedata
 from typing import Any
 
 
@@ -19,13 +20,45 @@ _PROFILE_KEYS = {
     "quality",
 }
 _SUBJECT_KEYS = {"actor_id", "description"}
-_ACTOR_ID = re.compile(r"[A-Za-z][A-Za-z0-9_]*\Z")
-_NUMBER_PATTERN = r"-?\d+(?:\.\d+)?"
-_SEGMENT_PREFIX = re.compile(r"K\d+ to K\d+, ")
-_FRAMING_FACT = re.compile(
-    rf"framing starts as [A-Za-z0-9_-]+ at {_NUMBER_PATTERN} mm "
-    rf"and ends as [A-Za-z0-9_-]+ at {_NUMBER_PATTERN} mm"
+_HEADINGS = (
+    "Subjects and wardrobe",
+    "Driving motion from the approved proxy",
+    "Environment",
+    "Lighting",
+    "Camera motion and framing",
+    "Photoreal quality",
+    "Must preserve / must replace / must avoid",
 )
+_ACTOR_ID = re.compile(r"(?=.*[A-Za-z0-9])[A-Za-z0-9_.-]+\Z")
+_NUMBER_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?"
+_SHOT_SIZE_PATTERN = r"[A-Za-z0-9_-]+(?: [A-Za-z0-9_-]+)*"
+_SEGMENT_FACT = re.compile(r"K(?P<start>\d+) to K(?P<end>\d+), (?P<body>.+)\Z")
+_FRAMING_FACT = re.compile(
+    rf"framing starts as {_SHOT_SIZE_PATTERN} at {_NUMBER_PATTERN} mm "
+    rf"and ends as {_SHOT_SIZE_PATTERN} at {_NUMBER_PATTERN} mm\Z"
+)
+_CONTINUITY = re.compile(
+    rf"One continuous (?P<duration>{_NUMBER_PATTERN})-second take, no cuts, "
+    r"no time jumps, and no teleporting\.\Z",
+)
+_CREATIVE_SENTENCES = frozenset(
+    [
+        "Use cinematic realistic visual style",
+        "Use documentary visual style",
+        "Use warm mood",
+        "Use neutral mood",
+        "Use tense mood",
+    ]
+    + [
+        f"Use {style} and {mood}"
+        for style in (
+            "cinematic realistic visual style",
+            "documentary visual style",
+        )
+        for mood in ("warm mood", "neutral mood", "tense mood")
+    ]
+)
+_CAMERA_CLAIM_ORDER = ("motion", "look_at", "focal", "shot_size", "roll")
 
 
 class RestylePromptError(ValueError):
@@ -37,6 +70,10 @@ class SubjectProfile:
     actor_id: str
     description: str
 
+    def __post_init__(self) -> None:
+        _validated_actor_id(self.actor_id, "actor_id")
+        _profile_text(self.description, "description")
+
 
 @dataclass(frozen=True, slots=True)
 class RestyleProfile:
@@ -47,6 +84,21 @@ class RestyleProfile:
     lighting: str
     quality: str
 
+    def __post_init__(self) -> None:
+        if self.schema_version != "1.0":
+            raise RestylePromptError("schema_version must be exactly '1.0'")
+        _profile_text(self.scene_id, "scene_id")
+        if not isinstance(self.subjects, tuple) or not self.subjects:
+            raise RestylePromptError("subjects must be a non-empty tuple")
+        if not all(isinstance(subject, SubjectProfile) for subject in self.subjects):
+            raise RestylePromptError("subjects must contain only SubjectProfile values")
+        actor_ids = [subject.actor_id for subject in self.subjects]
+        if len(actor_ids) != len(set(actor_ids)):
+            raise RestylePromptError("subjects must have unique actor IDs")
+        _profile_text(self.environment, "environment")
+        _profile_text(self.lighting, "lighting")
+        _profile_text(self.quality, "quality")
+
 
 def _strict_text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
@@ -54,6 +106,24 @@ def _strict_text(value: object, label: str) -> str:
     if value != value.strip():
         raise RestylePromptError(f"{label} must not have surrounding whitespace")
     return value
+
+
+def _profile_text(value: object, label: str) -> str:
+    text = _strict_text(value, label)
+    if any(unicodedata.category(character) in {"Cc", "Cf"} for character in text):
+        raise RestylePromptError(f"{label} must not contain control characters")
+    if text in _HEADINGS:
+        raise RestylePromptError(f"{label} must not contain a reserved section heading")
+    return text
+
+
+def _validated_actor_id(value: object, label: str) -> str:
+    actor_id = _strict_text(value, label)
+    if _ACTOR_ID.fullmatch(actor_id) is None:
+        raise RestylePromptError(
+            f"{label} must use only ASCII letters, digits, '_', '.', or '-'"
+        )
+    return actor_id
 
 
 def _exact_keys(value: Mapping[str, Any], expected: set[str], label: str) -> None:
@@ -72,42 +142,27 @@ def load_restyle_profile(value: Mapping[str, Any]) -> RestyleProfile:
         raise RestylePromptError("restyle profile must be an object")
     _exact_keys(value, _PROFILE_KEYS, "restyle profile")
 
-    schema_version = _strict_text(value["schema_version"], "schema_version")
-    if schema_version != "1.0":
-        raise RestylePromptError("schema_version must be exactly '1.0'")
-
     raw_subjects = value["subjects"]
     if not isinstance(raw_subjects, list) or not raw_subjects:
         raise RestylePromptError("subjects must be a non-empty array")
 
     subjects: list[SubjectProfile] = []
-    actor_ids: set[str] = set()
     for index, raw_subject in enumerate(raw_subjects):
         if not isinstance(raw_subject, Mapping):
             raise RestylePromptError(f"subjects[{index}] must be an object")
         _exact_keys(raw_subject, _SUBJECT_KEYS, f"subjects[{index}]")
-        actor_id = _strict_text(raw_subject["actor_id"], f"subjects[{index}].actor_id")
-        if _ACTOR_ID.fullmatch(actor_id) is None:
-            raise RestylePromptError(
-                f"subjects[{index}].actor_id must be a stable identifier"
-            )
-        if actor_id in actor_ids:
-            raise RestylePromptError(f"duplicate actor_id: {actor_id}")
-        actor_ids.add(actor_id)
         subjects.append(SubjectProfile(
-            actor_id=actor_id,
-            description=_strict_text(
-                raw_subject["description"], f"subjects[{index}].description"
-            ),
+            actor_id=raw_subject["actor_id"],
+            description=raw_subject["description"],
         ))
 
     return RestyleProfile(
-        schema_version=schema_version,
-        scene_id=_strict_text(value["scene_id"], "scene_id"),
+        schema_version=value["schema_version"],
+        scene_id=value["scene_id"],
         subjects=tuple(subjects),
-        environment=_strict_text(value["environment"], "environment"),
-        lighting=_strict_text(value["lighting"], "lighting"),
-        quality=_strict_text(value["quality"], "quality"),
+        environment=value["environment"],
+        lighting=value["lighting"],
+        quality=value["quality"],
     )
 
 
@@ -133,61 +188,155 @@ def _fact_patterns(actor_ids: tuple[str, ...]) -> tuple[re.Pattern[str], re.Patt
     return motion, spacing
 
 
-def _camera_fact(value: str) -> bool:
+def _camera_claim(value: str) -> str | None:
     exact = {
-        "camera moves along the approved path",
-        "camera look-at changes",
+        "camera moves along the approved path": "motion",
+        "camera look-at changes": "look_at",
     }
     if value in exact:
-        return True
-    return any(re.fullmatch(pattern, value) is not None for pattern in (
-        rf"focal length changes from {_NUMBER_PATTERN} mm to {_NUMBER_PATTERN} mm",
-        r"shot size changes from [A-Za-z0-9_-]+ to [A-Za-z0-9_-]+",
-        rf"roll changes from {_NUMBER_PATTERN} degrees to {_NUMBER_PATTERN} degrees",
-    ))
+        return exact[value]
+    patterns = (
+        (
+            "focal",
+            rf"focal length changes from {_NUMBER_PATTERN} mm to {_NUMBER_PATTERN} mm",
+        ),
+        (
+            "shot_size",
+            rf"shot size changes from {_SHOT_SIZE_PATTERN} to {_SHOT_SIZE_PATTERN}",
+        ),
+        (
+            "roll",
+            rf"roll changes from {_NUMBER_PATTERN} degrees to {_NUMBER_PATTERN} degrees",
+        ),
+    )
+    for claim, pattern in patterns:
+        if re.fullmatch(pattern, value) is not None:
+            return claim
+    return None
+
+
+def _trajectory_fact_block(source: str, duration: float) -> list[str]:
+    continuity = _CONTINUITY.search(source)
+    if continuity is None or continuity.start() == 0 or source[continuity.start() - 1] != " ":
+        raise RestylePromptError("trajectory_prompt has no terminal continuity sentence")
+    trajectory_duration = float(continuity.group("duration"))
+    if not math.isfinite(trajectory_duration) or trajectory_duration != duration:
+        raise RestylePromptError("trajectory and restyle durations must match")
+
+    prefix = source[:continuity.start() - 1]
+    for creative in sorted(_CREATIVE_SENTENCES, key=len, reverse=True):
+        suffix = f" {creative}."
+        if prefix.endswith(suffix):
+            prefix = prefix[:-len(suffix)]
+            break
+
+    if not prefix.endswith("."):
+        raise RestylePromptError("trajectory_prompt has a malformed fact block")
+    before_final_period = prefix[:-1]
+    boundary = before_final_period.rfind(". K")
+    if boundary < 1:
+        raise RestylePromptError("trajectory_prompt has no anchored trajectory fact block")
+    appearance = before_final_period[:boundary]
+    _strict_text(appearance, "trajectory appearance envelope")
+    fact_block = "K" + before_final_period[boundary + 3:]
+    facts = fact_block.split("; ")
+    if not facts or "; ".join(facts) != fact_block or any(not fact for fact in facts):
+        raise RestylePromptError("trajectory_prompt fact delimiters are malformed")
+    return facts
 
 
 def _partition_trajectory_facts(
-    trajectory_prompt: object, actor_ids: tuple[str, ...],
+    trajectory_prompt: object, actor_ids: tuple[str, ...], duration: float,
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     source = _strict_text(trajectory_prompt, "trajectory_prompt")
-    motion_pattern, spacing_pattern = _fact_patterns(actor_ids)
-    driving: list[str] = []
-    camera: list[str] = []
-    seen_actors: set[str] = set()
-    has_spacing = False
+    facts = _trajectory_fact_block(source, duration)
+    if _FRAMING_FACT.fullmatch(facts[-1]) is None:
+        raise RestylePromptError("trajectory_prompt must end with one framing fact")
+    if any(_FRAMING_FACT.fullmatch(fact) is not None for fact in facts[:-1]):
+        raise RestylePromptError("trajectory_prompt must contain exactly one framing fact")
+    framing = facts.pop()
 
-    for chunk in source.split(";"):
-        prefix = _SEGMENT_PREFIX.search(chunk)
-        if prefix is None:
-            continue
-        candidate = chunk[prefix.start():].strip().rstrip(".")
-        prefix_text = prefix.group(0)
-        body = candidate[len(prefix_text):]
+    motion_pattern, spacing_pattern = _fact_patterns(actor_ids)
+    actor_pairs = tuple(
+        (first, second)
+        for index, first in enumerate(actor_ids)
+        for second in actor_ids[index + 1:]
+    )
+    segments: dict[int, dict[str, dict[Any, str]]] = {}
+    current_segment: int | None = None
+    for fact in facts:
+        segment_match = _SEGMENT_FACT.fullmatch(fact)
+        if segment_match is None:
+            raise RestylePromptError(f"malformed trajectory-v2 fact: {fact}")
+        start = int(segment_match.group("start"))
+        end = int(segment_match.group("end"))
+        if end != start + 1:
+            raise RestylePromptError("trajectory segments must move forward by one K frame")
+        if current_segment is None:
+            if start != 0:
+                raise RestylePromptError("trajectory segments must start at K0 to K1")
+            current_segment = start
+        elif start != current_segment:
+            if start != current_segment + 1:
+                raise RestylePromptError("trajectory segments must be contiguous and ordered")
+            current_segment = start
+
+        segment = segments.setdefault(start, {
+            "actors": {},
+            "spacing": {},
+            "camera": {},
+        })
+        body = segment_match.group("body")
         motion_match = motion_pattern.fullmatch(body)
         spacing_match = spacing_pattern.fullmatch(body)
         if motion_match is not None:
-            seen_actors.add(motion_match.group("actor"))
-            driving.append(candidate)
-        elif spacing_match is not None:
-            if spacing_match.group("first") == spacing_match.group("second"):
-                raise RestylePromptError("spacing facts require two different actors")
-            has_spacing = True
-            driving.append(candidate)
-        elif _camera_fact(body):
-            camera.append(candidate)
-        else:
-            raise RestylePromptError(f"unrecognized trajectory-v2 fact: {candidate}")
+            actor = motion_match.group("actor")
+            if actor in segment["actors"]:
+                raise RestylePromptError(f"duplicate actor fact for K{start}: {actor}")
+            segment["actors"][actor] = fact
+            continue
+        if spacing_match is not None:
+            pair = (spacing_match.group("first"), spacing_match.group("second"))
+            if pair not in actor_pairs:
+                raise RestylePromptError("spacing actor pairs must use sorted distinct IDs")
+            if pair in segment["spacing"]:
+                raise RestylePromptError(f"duplicate spacing fact for K{start}: {pair}")
+            segment["spacing"][pair] = fact
+            continue
+        camera_claim = _camera_claim(body)
+        if camera_claim is None:
+            raise RestylePromptError(f"unrecognized trajectory-v2 fact: {fact}")
+        if camera_claim in segment["camera"]:
+            raise RestylePromptError(
+                f"duplicate camera {camera_claim} fact for segment K{start}"
+            )
+        segment["camera"][camera_claim] = fact
 
-    framing = _FRAMING_FACT.findall(source)
-    if len(framing) != 1:
-        raise RestylePromptError("trajectory_prompt must contain one framing fact")
-    camera.append(framing[0])
+    if not segments:
+        raise RestylePromptError("trajectory_prompt must contain trajectory segments")
 
-    if seen_actors != set(actor_ids):
-        raise RestylePromptError("trajectory_prompt must contain motion for every subject")
-    if len(actor_ids) > 1 and not has_spacing:
-        raise RestylePromptError("trajectory_prompt must contain subject spacing facts")
+    driving: list[str] = []
+    camera: list[str] = []
+    for start in range(len(segments)):
+        segment = segments.get(start)
+        if segment is None:
+            raise RestylePromptError("trajectory segments must be contiguous")
+        if set(segment["actors"]) != set(actor_ids):
+            raise RestylePromptError(
+                f"K{start} to K{start + 1} needs exactly one fact per actor"
+            )
+        if set(segment["spacing"]) != set(actor_pairs):
+            raise RestylePromptError(
+                f"K{start} to K{start + 1} needs exactly one fact per actor pair"
+            )
+        driving.extend(segment["actors"][actor] for actor in actor_ids)
+        driving.extend(segment["spacing"][pair] for pair in actor_pairs)
+        camera.extend(
+            segment["camera"][claim]
+            for claim in _CAMERA_CLAIM_ORDER
+            if claim in segment["camera"]
+        )
+    camera.append(framing)
     return tuple(driving), tuple(camera)
 
 
@@ -196,12 +345,12 @@ def compile_restyle_prompt(
 ) -> str:
     """Return the seven ordered, source-bound restyle sections."""
     if not isinstance(profile, RestyleProfile):
-        raise RestylePromptError("profile must be a validated RestyleProfile")
+        raise RestylePromptError("profile must be a RestyleProfile")
     duration = _positive_duration(duration_seconds)
     subjects = tuple(sorted(profile.subjects, key=lambda subject: subject.actor_id))
     actor_ids = tuple(subject.actor_id for subject in subjects)
     driving_facts, camera_facts = _partition_trajectory_facts(
-        trajectory_prompt, actor_ids
+        trajectory_prompt, actor_ids, duration
     )
 
     subject_lines = "\n".join(
@@ -210,10 +359,12 @@ def compile_restyle_prompt(
     driving_lines = "\n".join(f"- {fact}" for fact in driving_facts)
     camera_lines = "\n".join(f"- {fact}" for fact in camera_facts)
     subject_count = len(subjects)
-    distinguishable = (
-        "two distinguishable subjects" if subject_count == 2
-        else f"all {subject_count} distinguishable subjects"
-    )
+    if subject_count == 1:
+        distinguishable = "the distinguishable subject"
+    elif subject_count == 2:
+        distinguishable = "two distinguishable subjects"
+    else:
+        distinguishable = f"all {subject_count} distinguishable subjects"
 
     sections = (
         ("Subjects and wardrobe", subject_lines),
