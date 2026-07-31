@@ -23,6 +23,7 @@ from videoactagent.backends.jd import (
 from videoactagent.seedance_reference import (
     SeedanceCapabilityEvidence,
     load_seedance_capability_evidence,
+    validate_capability_evidence,
     validate_remote_video_asset,
 )
 
@@ -121,6 +122,8 @@ def prepare_backend(
     reference_evidence = capability_evidence
     if isinstance(reference_evidence, dict):
         reference_evidence = load_seedance_capability_evidence(reference_evidence)
+    if isinstance(reference_evidence, SeedanceCapabilityEvidence):
+        reference_evidence = validate_capability_evidence(reference_evidence)
     if reference_evidence is not None and not isinstance(
         reference_evidence, SeedanceCapabilityEvidence
     ):

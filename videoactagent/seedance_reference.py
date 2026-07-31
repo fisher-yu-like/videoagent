@@ -18,7 +18,10 @@ import re
 from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
 
-from videoactagent.backends.jd import build_seedance_reference_video
+from videoactagent.backends.jd import (
+    SUPPORTED_SEEDANCE_MODELS,
+    build_seedance_reference_video,
+)
 
 
 SCHEMA_VERSION = "seedance-reference-capability/1"
@@ -41,12 +44,21 @@ PLACEHOLDER_SUFFIXES = (
     ".test",
     ".local",
 )
+_TRUST_TOKEN = object()
+
+
+class _UntrustedEvidence(ValueError):
+    pass
 
 
 @dataclass(frozen=True)
 class CapturedGatewayResponse:
     path: str
     sha256: str
+
+    def __post_init__(self) -> None:
+        _safe_relative_path(self.path, "captured gateway response")
+        _sha256(self.sha256, "captured gateway response sha256")
 
 
 @dataclass(frozen=True)
@@ -59,6 +71,9 @@ class SeedanceEvidenceRecord:
     source_url: str | None = None
     response_record: CapturedGatewayResponse | None = None
 
+    def __post_init__(self) -> None:
+        _validate_evidence_record_fields(self, "evidence record")
+
 
 @dataclass(frozen=True)
 class SeedanceCapabilityEvidence:
@@ -68,6 +83,29 @@ class SeedanceCapabilityEvidence:
     model_evidence: SeedanceEvidenceRecord
     gateway_evidence: SeedanceEvidenceRecord | None
     _capture_verified: bool = field(default=False, init=False, repr=False, compare=False)
+    _validation_token: object = field(default=None, init=False, repr=False, compare=False)
+    _captured_task_id: str | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.schema_version != SCHEMA_VERSION:
+            raise ValueError("Seedance capability evidence schema_version is invalid")
+        if self.model_capability not in ("model_supported", "unsupported"):
+            raise ValueError("model_capability state is invalid")
+        if self.gateway_capability not in ("gateway_unverified", "gateway_verified"):
+            raise ValueError("gateway_capability state is invalid")
+        if not isinstance(self.model_evidence, SeedanceEvidenceRecord):
+            raise ValueError("model_evidence must be a SeedanceEvidenceRecord")
+        if self.gateway_evidence is not None and not isinstance(
+            self.gateway_evidence, SeedanceEvidenceRecord
+        ):
+            raise ValueError("gateway_evidence must be a SeedanceEvidenceRecord")
+        if self.gateway_evidence is not None and self.gateway_evidence.model != self.model:
+            raise ValueError("model and gateway evidence exact models differ")
+        if self.gateway_capability == "gateway_verified" and (
+            self.gateway_evidence is None
+            or self.gateway_evidence.response_record is None
+        ):
+            raise ValueError("gateway_verified requires a captured local gateway response record")
 
     @property
     def model(self) -> str:
@@ -78,6 +116,24 @@ def _nonempty(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
         raise ValueError(f"{label} must be a nonempty trimmed string")
     return value
+
+
+def _validate_evidence_record_fields(
+    record: SeedanceEvidenceRecord, label: str
+) -> None:
+    if record.model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError(f"{label} model is not an allowlisted exact model identifier")
+    if record.content_type != "video_url":
+        raise ValueError(f"{label} content_type must be exactly video_url")
+    if record.url_field != "video_url":
+        raise ValueError(f"{label} url_field must be exactly video_url")
+    if record.role != "reference_video":
+        raise ValueError(f"{label} role must be exactly reference_video")
+    _utc_timestamp(record.observed_at)
+    if (record.source_url is None) == (record.response_record is None):
+        raise ValueError(f"{label} must contain exactly one source URL or captured response record")
+    if record.source_url is not None:
+        _public_https_url(record.source_url, f"{label} source URL")
 
 
 def _sha256(value: object, label: str) -> str:
@@ -164,6 +220,8 @@ def _evidence_record(value: object, label: str) -> SeedanceEvidenceRecord:
             f"{label} must contain exactly one source URL or captured response record"
         )
     model = _nonempty(value.get("model"), f"{label} model")
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError(f"{label} model is not an allowlisted exact model identifier")
     if value.get("content_type") != "video_url":
         raise ValueError(f"{label} content_type must be exactly video_url")
     if value.get("url_field") != "video_url":
@@ -202,7 +260,7 @@ def _read_json_strict(path: Path) -> object:
         raise ValueError(f"cannot read capability evidence: {exc}") from exc
 
 
-def _verify_response_capture(record: CapturedGatewayResponse, base_dir: Path | None) -> None:
+def _verify_response_capture(record: CapturedGatewayResponse, base_dir: Path | None) -> str:
     if base_dir is None:
         raise ValueError(
             "gateway_verified requires a captured local gateway response and base_dir"
@@ -236,6 +294,7 @@ def _verify_response_capture(record: CapturedGatewayResponse, base_dir: Path | N
         task_id = result.get("task_id")
     if response.get("error") or not isinstance(task_id, str) or not task_id.strip():
         raise ValueError("captured gateway response must show a successful task response")
+    return task_id
 
 
 def load_seedance_capability_evidence(
@@ -280,9 +339,13 @@ def load_seedance_capability_evidence(
             raise ValueError(
                 "gateway_verified requires a captured local gateway response record"
             )
-        _verify_response_capture(gateway_evidence.response_record, base_dir)
     elif gateway_evidence is not None and gateway_evidence.response_record is not None:
         raise ValueError("captured gateway response must not be marked gateway_unverified")
+    captured_task_id = None
+    if gateway_capability == "gateway_verified":
+        captured_task_id = _verify_response_capture(
+            gateway_evidence.response_record, base_dir
+        )
     loaded = SeedanceCapabilityEvidence(
         schema_version=SCHEMA_VERSION,
         model_capability=model_capability,
@@ -291,7 +354,30 @@ def load_seedance_capability_evidence(
         gateway_evidence=gateway_evidence,
     )
     object.__setattr__(loaded, "_capture_verified", gateway_capability == "gateway_verified")
+    object.__setattr__(loaded, "_validation_token", _TRUST_TOKEN)
+    object.__setattr__(loaded, "_captured_task_id", captured_task_id)
     return loaded
+
+
+def validate_capability_evidence(
+    capability: SeedanceCapabilityEvidence,
+) -> SeedanceCapabilityEvidence:
+    """Canonical trust boundary for immutable capability evidence objects."""
+    if not isinstance(capability, SeedanceCapabilityEvidence):
+        raise ValueError("capability evidence object has an invalid type")
+    if capability._validation_token is not _TRUST_TOKEN:
+        raise _UntrustedEvidence("capability evidence was not loaded by the strict loader")
+    _validate_evidence_record_fields(capability.model_evidence, "model evidence")
+    if capability.gateway_evidence is not None:
+        _validate_evidence_record_fields(capability.gateway_evidence, "gateway evidence")
+    if capability.gateway_capability == "gateway_verified" and (
+        not capability._capture_verified
+        or not capability._captured_task_id
+        or capability.gateway_evidence is None
+        or capability.gateway_evidence.response_record is None
+    ):
+        raise _UntrustedEvidence("gateway_verified evidence lacks trusted capture provenance")
+    return capability
 
 
 def _record_shape(
@@ -305,7 +391,7 @@ def _record_shape(
         raise ValueError(f"{label} record must be an object")
     required = {"path", "sha256", "bytes"}
     if not required.issubset(value):
-        return None
+        raise ValueError(f"{label} record is missing path/hash/size")
     if set(value) - required - allowed_extra:
         raise ValueError(f"{label} record contains unknown fields")
     path = _safe_relative_path(value.get("path"), label)
@@ -475,7 +561,11 @@ def prepare_reference_candidate(
 
     loaded_capability: SeedanceCapabilityEvidence | None
     if isinstance(capability, SeedanceCapabilityEvidence):
-        loaded_capability = capability
+        try:
+            loaded_capability = validate_capability_evidence(capability)
+        except _UntrustedEvidence as exc:
+            blockers.append(str(exc))
+            loaded_capability = None
     elif isinstance(capability, Mapping):
         loaded_capability = load_seedance_capability_evidence(capability)
     else:
@@ -484,11 +574,6 @@ def prepare_reference_candidate(
         blockers.append("missing verified Seedance model capability evidence")
     elif loaded_capability.model_capability != "model_supported":
         blockers.append("Seedance model reference-video capability is unsupported")
-    elif (
-        loaded_capability.gateway_capability == "gateway_verified"
-        and not loaded_capability._capture_verified
-    ):
-        blockers.append("gateway_verified evidence was not loaded from a captured response")
 
     if blockers:
         return _blocked_candidate(blockers, source_hashes)
@@ -541,6 +626,12 @@ def prepare_reference_candidate(
         "compiler_versions": compiler_versions,
         "compiler_hashes": compiler_hashes,
         "source_hashes": source_hashes,
+        "proxy": {
+            "url": valid_url,
+            "path": str(records["clay"]["path"]),
+            "sha256": str(records["clay"]["sha256"]),
+            "bytes": int(records["clay"]["bytes"]),
+        },
         "payload": payload,
         "payload_sha256": hashlib.sha256(payload_bytes).hexdigest(),
     }

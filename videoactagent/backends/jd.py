@@ -11,6 +11,11 @@ import uuid
 from videoactagent.run_record import RunDirectory
 
 
+SUPPORTED_SEEDANCE_MODELS = frozenset(
+    {"Doubao-Seedance-2.5", "Doubao-Seedance-2.0"}
+)
+
+
 def build_kling_t2v(prompt: str, duration: int = 5) -> dict:
     return {
         "model": "Kling-V2-5-Turbo",
@@ -76,9 +81,9 @@ def build_seedance_reference_video(
     """Build, but never submit, the one supported reference-video request shape."""
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("Seedance reference prompt must be a nonempty string")
-    if not isinstance(model, str) or not model.strip():
-        raise ValueError("Seedance model must be a nonempty exact model identifier")
-    if isinstance(duration, bool) or duration != 5:
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("Seedance model is not an allowlisted exact model identifier")
+    if type(duration) is not int or duration != 5:
         raise ValueError("Seedance reference-video duration must be exactly 5 seconds")
     # Imported lazily to keep the URL contract in one place without a module cycle.
     from videoactagent.seedance_reference import validate_remote_video_asset

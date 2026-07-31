@@ -211,6 +211,17 @@ class BackendPrepareTests(unittest.TestCase):
             report["conditions"]["proxy_video"]["blockers"],
         )
 
+    def test_present_incomplete_binding_is_malformed_not_a_blocker(self):
+        from videoactagent.backend_prepare import prepare_backend
+
+        with self.assertRaises(ValueError):
+            prepare_backend(
+                self.bundle,
+                "seedance",
+                {"s01": {"proxy_video": "https://media.volccdn.com/clay.mp4"}},
+                capability_evidence={"gateway_capability": "bogus"},
+            )
+
     def test_cli_writes_readiness_without_network_fields(self):
         from videoactagent.backend_prepare import main
 

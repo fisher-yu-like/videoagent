@@ -25,10 +25,10 @@ def record(path: str, sha256: str = SHA_A, size: int = 12, **extra: object) -> d
     return {"path": path, "sha256": sha256, "bytes": size, **extra}
 
 
-def evidence_document(*, verified: bool, response_sha256: str | None = None) -> dict:
+def evidence_document(*, verified: bool, response_sha256: str | None = None, model: str = MODEL) -> dict:
     contract = {
         "observed_at": "2026-07-31T12:34:56Z",
-        "model": MODEL,
+        "model": model,
         "content_type": "video_url",
         "url_field": "video_url",
         "role": "reference_video",
@@ -217,7 +217,13 @@ class SeedanceReferenceRequestTests(unittest.TestCase):
         self.assertNotIn("image", json.dumps(payload))
         self.assertNotIn("audio", json.dumps(payload))
 
-        for prompt, model, duration in (("", MODEL, 5), ("ok", "", 5), ("ok", MODEL, 6)):
+        for prompt, model, duration in (
+            ("", MODEL, 5),
+            ("ok", "", 5),
+            ("ok", "Not-A-Seedance-Model", 5),
+            ("ok", MODEL, 6),
+            ("ok", MODEL, 5.0),
+        ):
             with self.subTest(prompt=prompt, model=model, duration=duration):
                 with self.assertRaises(ValueError):
                     build_seedance_reference_video(
@@ -316,6 +322,20 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
         self.assertEqual(candidate["state"], "ready_for_single_combined_probe")
         self.assertEqual(candidate["payload"]["model"], MODEL)
 
+    def test_verified_doubao_seedance_2_0_requires_exact_evidence_model(self) -> None:
+        from videoactagent.seedance_reference import load_seedance_capability_evidence, prepare_reference_candidate
+
+        capability = load_seedance_capability_evidence(
+            evidence_document(verified=False, model="Doubao-Seedance-2.0")
+        )
+        candidate = prepare_reference_candidate(
+            approved_export=approved_export(),
+            proxy_url="https://media.volccdn.com/approved/clay.mp4",
+            capability=capability,
+        )
+        self.assertEqual(candidate["state"], "ready_for_single_combined_probe")
+        self.assertEqual(candidate["payload"]["model"], "Doubao-Seedance-2.0")
+
     def test_legitimate_absence_blocks_but_malformed_records_raise(self) -> None:
         from videoactagent.seedance_reference import prepare_reference_candidate
 
@@ -358,6 +378,15 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
                 capability=capability,
             )
 
+        partial = approved_export()
+        partial["clay"].pop("sha256")
+        with self.assertRaisesRegex(ValueError, "clay record is missing"):
+            prepare_reference_candidate(
+                approved_export=partial,
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=capability,
+            )
+
     def test_model_name_alone_and_static_capability_never_unlock_candidate(self) -> None:
         from videoactagent.backends.capabilities import gateway_capability
         from videoactagent.seedance_reference import (
@@ -376,26 +405,53 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
                 self.assertEqual(candidate["state"], "blocked")
                 self.assertTrue(candidate["blockers"])
 
-        forged = SeedanceCapabilityEvidence(
+        forged_model_evidence = SeedanceEvidenceRecord(
+            observed_at="2026-07-31T12:34:56Z",
+            model=MODEL,
+            content_type="video_url",
+            url_field="video_url",
+            role="reference_video",
+            source_url="https://www.volcengine.com/docs/official/model-reference",
+        )
+        with self.assertRaises(ValueError):
+            SeedanceCapabilityEvidence(
+                schema_version="seedance-reference-capability/1",
+                model_capability="model_supported",
+                gateway_capability="gateway_verified",
+                model_evidence=forged_model_evidence,
+                gateway_evidence=None,
+            )
+
+        forged_unverified = SeedanceCapabilityEvidence(
             schema_version="seedance-reference-capability/1",
             model_capability="model_supported",
-            gateway_capability="gateway_verified",
-            model_evidence=SeedanceEvidenceRecord(
-                observed_at="2026-07-31T12:34:56Z",
-                model=MODEL,
-                content_type="video_url",
-                url_field="video_url",
-                role="reference_video",
-                source_url="https://www.volcengine.com/docs/official/model-reference",
-            ),
+            gateway_capability="gateway_unverified",
+            model_evidence=forged_model_evidence,
             gateway_evidence=None,
         )
-        forged_candidate = prepare_reference_candidate(
+        object.__setattr__(forged_unverified, "_capture_verified", True)
+        candidate = prepare_reference_candidate(
             approved_export=approved_export(),
             proxy_url="https://media.volccdn.com/approved/clay.mp4",
-            capability=forged,
+            capability=forged_unverified,
         )
-        self.assertEqual(forged_candidate["state"], "blocked")
+        self.assertEqual(candidate["state"], "blocked")
+
+
+    def test_candidate_binds_proxy_record_and_url(self) -> None:
+        from videoactagent.seedance_reference import prepare_reference_candidate
+
+        candidate = prepare_reference_candidate(
+            approved_export=approved_export(),
+            proxy_url="https://media.volccdn.com/approved/clay.mp4",
+            capability=self._capability(verified=False),
+        )
+        self.assertEqual(
+            candidate["proxy"]["url"], "https://media.volccdn.com/approved/clay.mp4"
+        )
+        self.assertEqual(candidate["proxy"]["sha256"], approved_export()["clay"]["sha256"])
+        self.assertEqual(candidate["proxy"]["bytes"], approved_export()["clay"]["bytes"])
+        self.assertEqual(candidate["proxy"]["path"], approved_export()["clay"]["path"])
 
     def test_materialize_prompt_reads_safe_verified_utf8_without_mutating_export(self) -> None:
         from videoactagent.seedance_reference import materialize_approved_prompt
