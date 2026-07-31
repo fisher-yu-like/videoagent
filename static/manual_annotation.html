@@ -68,6 +68,7 @@
       </select>
     </label>
     <label>Confidence <input id="camera-confidence" type="number" min="0" max="1" step="0.05" placeholder="0..1"></label>
+    <label>Annotator ID <input id="annotator-id" type="text" placeholder="person making labels"></label>
     <button id="save">Save draft annotation</button>
     <label>Reviewer ID <input id="reviewer-id" type="text" placeholder="independent reviewer"></label>
     <button id="review-button">Review saved draft</button>
@@ -105,6 +106,15 @@ function setInteractive(enabled) {
   document.querySelector("#review-button").disabled = !enabled || saving;
   document.querySelector("#previous").disabled = !enabled || currentFrame === 0;
   document.querySelector("#next").disabled = !enabled || !currentTarget || currentFrame === currentTarget.video.frames.length - 1;
+  document.querySelector("#visibility").disabled = !enabled;
+  document.querySelector("#identity").disabled = !enabled;
+  document.querySelector("#actor").disabled = !enabled;
+  document.querySelector("#clear").disabled = !enabled;
+  document.querySelector("#camera-category").disabled = !enabled;
+  document.querySelector("#camera-intensity").disabled = !enabled;
+  document.querySelector("#camera-confidence").disabled = !enabled;
+  document.querySelector("#annotator-id").disabled = !enabled;
+  document.querySelector("#reviewer-id").disabled = !enabled;
 }
 function saveTargetState() {
   if (!currentTarget) return;
@@ -142,13 +152,15 @@ function showFrame(index) {
   currentFrame = index;
   var record = frameRecord();
   var token = ++loadToken;
-  var image = new Image();
   loading = true;
   ready = false;
   currentImage = null;
+  document.querySelector("#visibility").value = "";
+  document.querySelector("#identity").value = "";
   context.clearRect(0, 0, canvas.width, canvas.height);
   canvas.style.pointerEvents = "none";
   setInteractive(false);
+  var image = new Image();
   setStatus("Loading real decoded frame " + String(record.frame) + "...");
   image.onload = function () {
     if (token !== loadToken) return;
@@ -190,6 +202,7 @@ function selectTarget() {
   showFrame(0);
 }
 function updateCurrentLabels() {
+  if (loading || !ready || saving) return;
   if (!currentTarget || !currentActor) return;
   var visibility = document.querySelector("#visibility").value;
   var identity = document.querySelector("#identity").value;
@@ -231,16 +244,25 @@ canvas.addEventListener("click", function (event) {
 document.querySelector("#visibility").onchange = updateCurrentLabels;
 document.querySelector("#identity").onchange = updateCurrentLabels;
 document.querySelector("#clear").onclick = function () {
+  if (loading || !ready || saving) return;
   decisions.delete(decisionKey(currentTarget.target_type, currentTarget.target_id, currentActor, frameRecord().frame));
   draw();
 };
 document.querySelector("#previous").onclick = function () { showFrame(currentFrame - 1); };
 document.querySelector("#next").onclick = function () { showFrame(currentFrame + 1); };
-document.querySelector("#actor").onchange = function (event) { currentActor = event.target.value; draw(); };
+document.querySelector("#actor").onchange = function (event) {
+  if (loading || !ready || saving) return;
+  currentActor = event.target.value;
+  draw();
+};
 document.querySelector("#target").onchange = selectTarget;
-document.querySelector("#camera-category").onchange = saveTargetState;
-document.querySelector("#camera-intensity").onchange = saveTargetState;
-document.querySelector("#camera-confidence").onchange = saveTargetState;
+function updateCameraState() {
+  if (loading || !ready || saving) return;
+  saveTargetState();
+}
+document.querySelector("#camera-category").onchange = updateCameraState;
+document.querySelector("#camera-intensity").onchange = updateCameraState;
+document.querySelector("#camera-confidence").onchange = updateCameraState;
 
 async function sha256Hex(bytes) {
   var digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -273,7 +295,9 @@ document.querySelector("#save").onclick = async function () {
     var category = document.querySelector("#camera-category").value;
     var intensity = document.querySelector("#camera-intensity").value;
     var confidenceText = document.querySelector("#camera-confidence").value;
+    var annotatorId = document.querySelector("#annotator-id").value.trim();
     if (!category || !intensity || confidenceText === "") throw new Error("Complete the observable camera labels.");
+    if (!annotatorId) throw new Error("Annotator ID is required before saving a draft.");
     var referenceSha = null;
     if (currentTarget.target_type === "result") referenceSha = await referenceHash(currentTarget.reference_id);
     var payload = {
@@ -281,6 +305,7 @@ document.querySelector("#save").onclick = async function () {
       target_type: currentTarget.target_type,
       target_id: currentTarget.target_id,
       annotation_status: "draft",
+      annotator_id: annotatorId,
       reference_annotation_sha256: referenceSha,
       actors: actors,
       camera: {category: category, intensity: intensity, confidence: Number(confidenceText)}

@@ -325,9 +325,20 @@ class ManualAnnotationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "first annotation save must be draft"):
             save_annotation(session_dir, payload)
         payload["annotation_status"] = "draft"
+        payload["annotator_id"] = "  "
+        with self.assertRaisesRegex(ValueError, "annotator_id"):
+            save_annotation(session_dir, payload)
+        payload["annotator_id"] = "annotator_1"
         save_annotation(session_dir, payload)
         with self.assertRaisesRegex(ValueError, "reviewer_id"):
             review_annotation(session_dir, "reference", "story_a", reviewer_id="  ")
+        with self.assertRaisesRegex(ValueError, "different from annotator_id"):
+            review_annotation(
+                session_dir,
+                "reference",
+                "story_a",
+                reviewer_id="annotator_1",
+            )
 
     def test_paper_eligibility_rejects_orphan_and_tampered_annotations(self) -> None:
         from videoactagent.manual_annotation import annotation_is_paper_eligible
@@ -353,6 +364,10 @@ class ManualAnnotationTests(unittest.TestCase):
             ),
             lambda item: item["actors"].pop("actor_b"),
             lambda item: item["camera"].__setitem__("pose", [0, 0, 0]),
+            lambda item: item.__setitem__("annotator_id", ""),
+            lambda item: item["review"].__setitem__(
+                "reviewer_id", item["annotator_id"]
+            ),
         )
         for mutate in mutations:
             changed = json.loads(original)
@@ -447,6 +462,48 @@ class ManualAnnotationTests(unittest.TestCase):
         self.assertIn("function decisionKey(targetType, targetId", html)
         self.assertNotIn('id="annotation-status"', html)
 
+    def test_html_loading_state_guards_every_annotation_control(self) -> None:
+        html = (ROOT / "static" / "manual_annotation.html").read_text(encoding="utf-8")
+        for selector in (
+            "#visibility",
+            "#identity",
+            "#actor",
+            "#clear",
+            "#camera-category",
+            "#camera-intensity",
+            "#camera-confidence",
+        ):
+            self.assertIn(
+                'document.querySelector("' + selector + '").disabled = !enabled;',
+                html,
+            )
+        self.assertIn(
+            "function updateCurrentLabels() {\n  if (loading || !ready || saving)",
+            html,
+        )
+        self.assertIn(
+            'document.querySelector("#clear").onclick = function () {\n  if (loading || !ready || saving) return;',
+            html,
+        )
+        self.assertIn(
+            'document.querySelector("#actor").onchange = function (event) {\n  if (loading || !ready || saving) return;',
+            html,
+        )
+        self.assertIn("function updateCameraState() {\n  if (loading || !ready || saving) return;", html)
+
+        show_frame = html.split("function showFrame(index) {", 1)[1].split(
+            "function selectTarget() {", 1
+        )[0]
+        image_creation = show_frame.index("var image = new Image();")
+        for reset in (
+            "currentImage = null;",
+            'document.querySelector("#visibility").value = "";',
+            'document.querySelector("#identity").value = "";',
+            "context.clearRect(0, 0, canvas.width, canvas.height);",
+            "setInteractive(false);",
+        ):
+            self.assertLess(show_frame.index(reset), image_creation)
+
     def test_cli_dispatches_annotate_help(self) -> None:
         import io
         from contextlib import redirect_stdout
@@ -538,6 +595,7 @@ class ManualAnnotationTests(unittest.TestCase):
             "target_type": target_type,
             "target_id": target_id,
             "annotation_status": "draft",
+            "annotator_id": "annotator_1",
             "reference_annotation_sha256": reference_sha,
             "actors": actors,
             "camera": {

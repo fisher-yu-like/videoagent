@@ -451,6 +451,7 @@ _ANNOTATION_KEYS = frozenset(
         "target_type",
         "target_id",
         "story_id",
+        "annotator_id",
         "video_sha256",
         "session_manifest_sha256",
         "reference_annotation_sha256",
@@ -606,6 +607,15 @@ def _review_is_valid(value: object) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
 
 
+def _human_id(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be non-empty")
+    result = value.strip()
+    if any(ord(character) < 32 for character in result) or len(result) > 200:
+        raise ValueError(f"{label} is invalid")
+    return result
+
+
 def _validate_reference_snapshot(
     session_root: Path,
     reference_sha: object,
@@ -736,12 +746,17 @@ def _validate_annotation_value(
         raise ValueError("stored camera intensity is invalid")
     _unit(camera.get("confidence"), "stored camera confidence")
     state = value.get("annotation_status")
+    annotator_id = _human_id(value.get("annotator_id"), "annotator_id")
     if state == "draft":
         if value.get("review") is not None or value.get("eligible_for_paper") is not False:
             raise ValueError("draft annotation review state is invalid")
     elif state == "reviewed":
         if not _review_is_valid(value.get("review")):
             raise ValueError("reviewed annotation metadata is invalid")
+        review = value["review"]
+        assert isinstance(review, Mapping)
+        if review.get("reviewer_id") == annotator_id:
+            raise ValueError("reviewer_id must be different from annotator_id")
         if value.get("eligible_for_paper") is not True:
             raise ValueError("reviewed annotation eligibility field is inconsistent")
     else:
@@ -772,6 +787,7 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         "target_type",
         "target_id",
         "annotation_status",
+        "annotator_id",
         "reference_annotation_sha256",
         "actors",
         "camera",
@@ -783,6 +799,7 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
     target_type = payload["target_type"]
     target_id = payload["target_id"]
     state = payload["annotation_status"]
+    annotator_id = _human_id(payload["annotator_id"], "annotator_id")
     if not isinstance(target_type, str) or not isinstance(target_id, str):
         raise ValueError("annotation target identifiers must be strings")
     target_id = _safe_token(target_id, "target_id")
@@ -870,6 +887,7 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         "target_type": target_type,
         "target_id": target_id,
         "story_id": target["story_id"],
+        "annotator_id": annotator_id,
         "video_sha256": video["sha256"],
         "session_manifest_sha256": manifest_sha,
         "reference_annotation_sha256": reference_sha,
@@ -900,11 +918,7 @@ def review_annotation(
     """Independently promote an existing validated draft to reviewed."""
 
     session_root = Path(session_dir).resolve()
-    if not isinstance(reviewer_id, str) or not reviewer_id.strip():
-        raise ValueError("reviewer_id must be non-empty")
-    reviewer = reviewer_id.strip()
-    if any(ord(character) < 32 for character in reviewer) or len(reviewer) > 200:
-        raise ValueError("reviewer_id is invalid")
+    reviewer = _human_id(reviewer_id, "reviewer_id")
     if target_type not in {"reference", "result"}:
         raise ValueError("target_type must be reference or result")
     target_id = _safe_token(target_id, "target_id")
@@ -916,6 +930,8 @@ def review_annotation(
     )
     if draft["annotation_status"] != "draft":
         raise ValueError("only an existing draft can be reviewed")
+    if reviewer == draft["annotator_id"]:
+        raise ValueError("reviewer_id must be different from annotator_id")
     reviewed = dict(draft)
     reviewed["annotation_status"] = "reviewed"
     reviewed["eligible_for_paper"] = True
