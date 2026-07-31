@@ -12,6 +12,7 @@ COMMANDS = {
     "camera-eval": "videoactagent.camera_eval",
     "closed-loop": "videoactagent.closed_loop",
     "control-bridge": "videoactagent.control_bridge",
+    "director-loop": "videoactagent.director_loop",
     "jd-smoke": "videoactagent.jd_smoke",
     "module-io": "videoactagent.module_io",
     "annotate": "videoactagent.manual_annotation",

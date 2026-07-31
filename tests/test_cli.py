@@ -15,6 +15,7 @@ class ConsoleDispatcherTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertIn("trajectory-observe", output.getvalue())
         self.assertIn("jd-smoke", output.getvalue())
+        self.assertIn("director-loop", output.getvalue())
 
     def test_unknown_command_returns_two_without_importing_a_module(self):
         from videoactagent.cli import main
