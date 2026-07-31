@@ -10,6 +10,7 @@ dependencies = ["imageio-ffmpeg==0.6.0", "numpy", "Pillow"]
 
 [project.scripts]
 videoactagent = "videoactagent.cli:main"
+videoactagent-coded-draft = "videoactagent.coded_draft:main"
 
 [tool.setuptools.packages.find]
 include = ["videoactagent*"]
