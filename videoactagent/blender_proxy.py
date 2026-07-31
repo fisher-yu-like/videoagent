@@ -27,6 +27,14 @@ from videoactagent.director_annotation import (
     CameraKeyframe,
     camera_trajectory_from_path,
 )
+from videoactagent.humanoid_proxy import (
+    ACTOR_GEOMETRY_PROFILE,
+    HEADING_TOLERANCE,
+    HUMANOID_PARTS,
+    REQUIRED_ACTOR_PARTS,
+    path_heading_degrees,
+    unwrap_heading_degrees,
+)
 
 
 @dataclass(frozen=True)
@@ -324,17 +332,33 @@ def create_actor(profile: RenderProfile, actor: ActorPlan, actor_index: int):
         clay_gray=clay_actor_color(actor_index)[0],
     )
 
-    bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.34, depth=1.45, location=(0, 0, 0.95))
-    body = bpy.context.object
-    body.name = f"{actor.actor_id}_body"
-    body.data.materials.append(material)
-    body.parent = root
+    anchors = {}
+    for part in HUMANOID_PARTS:
+        anchor = bpy.data.objects.new(
+            f"{actor.actor_id}__anchor__{part.name}", None
+        )
+        bpy.context.collection.objects.link(anchor)
+        anchors[part.name] = anchor
+    for part in HUMANOID_PARTS:
+        anchor = anchors[part.name]
+        anchor.parent = root if part.parent == "root" else anchors[part.parent]
+        anchor.location = part.anchor
 
-    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12, radius=0.31, location=(0, 0, 1.9))
-    head = bpy.context.object
-    head.name = f"{actor.actor_id}_head"
-    head.data.materials.append(material)
-    head.parent = root
+        if part.primitive == "cube":
+            bpy.ops.mesh.primitive_cube_add(size=2.0)
+        elif part.primitive == "cylinder":
+            bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=1.0, depth=2.0)
+        elif part.primitive == "ico_sphere":
+            bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1.0)
+        else:
+            raise ValueError(f"unsupported humanoid primitive: {part.primitive}")
+        body_part = bpy.context.object
+        body_part.name = f"{actor.actor_id}__{part.name}"
+        body_part.parent = anchor
+        body_part.location = part.local_center
+        body_part.scale = part.local_scale
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        body_part.data.materials.append(material)
 
     label_curve = bpy.data.curves.new(f"{actor.actor_id}_label_curve", type="FONT")
     label_curve.body = actor.actor_id.replace("actor_", "").upper()
@@ -452,6 +476,11 @@ def configure_scene(
             root.keyframe_insert(data_path="location", frame=start_frame)
             root.location = vec(actor.end)
             root.keyframe_insert(data_path="location", frame=end_frame)
+            animate_actor_motion(
+                root,
+                [vec(actor.start), vec(actor.end)],
+                [start_frame, end_frame],
+            )
 
         for frame in range(start_frame, end_frame + 1):
             fraction = 0.0 if end_frame == start_frame else (frame - start_frame) / (end_frame - start_frame)
@@ -476,6 +505,58 @@ def _remove_keyframes(owner, data_paths: tuple[str, ...], start_frame: int, end_
                 owner.keyframe_delete(data_path=data_path, frame=frame)
             except (RuntimeError, TypeError):
                 pass
+
+
+def _actor_anchor(actor, part_name: str):
+    return bpy.data.objects[f"{actor.name}__anchor__{part_name}"]
+
+
+def animate_actor_motion(
+    actor,
+    points: list[Vector],
+    frames: list[int],
+    *,
+    replace: bool = False,
+):
+    """Key authored heading and a restrained neutral walk cycle on one actor."""
+
+    if len(points) != len(frames) or not points:
+        raise ValueError("actor motion requires matching non-empty points and frames")
+    limb_names = ("upper_arm.L", "upper_arm.R", "upper_leg.L", "upper_leg.R")
+    limbs = {name: _actor_anchor(actor, name) for name in limb_names}
+    if replace:
+        start_frame, end_frame = min(frames), max(frames)
+        _remove_keyframes(actor, ("rotation_euler",), start_frame, end_frame)
+        for limb in limbs.values():
+            _remove_keyframes(limb, ("rotation_euler",), start_frame, end_frame)
+
+    headings = unwrap_heading_degrees(
+        tuple(path_heading_degrees(points, index) for index in range(len(points)))
+    )
+    for heading, frame in zip(headings, frames):
+        actor.rotation_euler = (0.0, 0.0, math.radians(heading - 90.0))
+        actor.keyframe_insert(data_path="rotation_euler", frame=frame)
+        for limb in limbs.values():
+            limb.rotation_euler = (0.0, 0.0, 0.0)
+            limb.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+    tolerance_squared = HEADING_TOLERANCE * HEADING_TOLERANCE
+    for index, (start, end) in enumerate(zip(points, points[1:])):
+        dx, dy = float(end[0] - start[0]), float(end[1] - start[1])
+        start_frame, end_frame = frames[index], frames[index + 1]
+        if dx * dx + dy * dy <= tolerance_squared or end_frame - start_frame < 2:
+            continue
+        swing_frame = (start_frame + end_frame) // 2
+        direction = 1.0 if index % 2 == 0 else -1.0
+        angles = {
+            "upper_arm.L": direction * 0.22,
+            "upper_arm.R": -direction * 0.22,
+            "upper_leg.L": -direction * 0.18,
+            "upper_leg.R": direction * 0.18,
+        }
+        for name, angle in angles.items():
+            limbs[name].rotation_euler = (angle, 0.0, 0.0)
+            limbs[name].keyframe_insert(data_path="rotation_euler", frame=swing_frame)
 
 
 def _frame_for_time(start_frame: int, end_frame: int, normalized_time: float) -> int:
@@ -606,6 +687,15 @@ def apply_trajectory(
                 frame = _frame_for_time(start_frame, end_frame, point.t)
                 actor.location = world
                 actor.keyframe_insert(data_path="location", frame=frame)
+            animate_actor_motion(
+                actor,
+                world_points,
+                [
+                    _frame_for_time(start_frame, end_frame, point.t)
+                    for point in track.points
+                ],
+                replace=True,
+            )
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
             material = actor_material
         elif track.target_type == "anchor":
@@ -797,6 +887,8 @@ def render_outputs(
         "blender_version": bpy.app.version_string,
         "scene_id": script.scene_id,
         "environment_preset": script.environment_preset,
+        "actor_geometry_profile": ACTOR_GEOMETRY_PROFILE,
+        "required_actor_parts": list(REQUIRED_ACTOR_PARTS),
         "scene_frame_start": scene.frame_start,
         "scene_frame_end": scene.frame_end,
         "rendered_frames": scene.frame_end - scene.frame_start + 1,
@@ -892,6 +984,8 @@ def render_trajectory_outputs(
         "schema_version": "0.1",
         "renderer": "blender",
         "blender_version": bpy.app.version_string,
+        "actor_geometry_profile": ACTOR_GEOMETRY_PROFILE,
+        "required_actor_parts": list(REQUIRED_ACTOR_PARTS),
         "render_style": profile.style,
         "effective_profile": profile.as_dict(),
         "shotscript_sha256": sha256_file(shotscript_path),
