@@ -149,6 +149,10 @@ class VaceFullChainTests(unittest.TestCase):
         self.assertIn("output directory already exists", script)
         self.assertIn("--query-compute-apps=pid", script)
         self.assertIn("vace_wan_inference.py", script)
+        self.assertIn(
+            'export PYTHONPATH="$PROJECT_ROOT:$WAN_ROOT${PYTHONPATH:+:$PYTHONPATH}"',
+            script,
+        )
         self.assertIn("--frame_num", script)
         self.assertIn("--sample_steps", script)
         self.assertIn("--base_seed", script)

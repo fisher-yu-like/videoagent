@@ -33,7 +33,7 @@ if [ "$VACE_DRY_RUN" != 0 ] && [ "$VACE_DRY_RUN" != 1 ]; then
   exit 64
 fi
 
-export PYTHONPATH="$PROJECT_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$PROJECT_ROOT:$WAN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 VALIDATION_LOG=$(mktemp)
 cleanup_validation() { rm -f "$VALIDATION_LOG"; }
 trap cleanup_validation EXIT
