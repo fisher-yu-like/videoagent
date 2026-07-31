@@ -17,7 +17,13 @@ from videoactagent.backends.capabilities import gateway_capability
 from videoactagent.backends.jd import (
     build_kling_t2v,
     build_seedance_first_last,
+    build_seedance_reference_video,
     build_seedance_t2v,
+)
+from videoactagent.seedance_reference import (
+    SeedanceCapabilityEvidence,
+    load_seedance_capability_evidence,
+    validate_remote_video_asset,
 )
 
 
@@ -58,11 +64,17 @@ def _prompt_payload(backend: str, prompt: str, duration: int) -> dict:
     raise ValueError(f"unsupported backend: {backend}")
 
 
-def prepare_backend(bundle: dict, backend: str, bindings: dict) -> dict:
+def prepare_backend(
+    bundle: dict,
+    backend: str,
+    bindings: dict,
+    capability_evidence: SeedanceCapabilityEvidence | dict | None = None,
+) -> dict:
     capability = gateway_capability(backend)
     shot = bundle["shots"][0]
     shot_id = shot["shot_id"]
-    duration = int(round(shot["duration"]))
+    shot_duration = float(shot["duration"])
+    duration = int(round(shot_duration))
     shot_bindings = bindings.get(shot_id, {})
     conditions = {
         "plain": {
@@ -106,25 +118,89 @@ def prepare_backend(bundle: dict, backend: str, bindings: dict) -> dict:
         }
 
     proxy_blockers = []
-    if capability.reference_video == "gateway_unverified":
-        proxy_blockers.append("JD gateway reference_video capability is unverified")
-    elif capability.reference_video == "unsupported":
-        proxy_blockers.append("JD gateway reference_video is unsupported")
+    reference_evidence = capability_evidence
+    if isinstance(reference_evidence, dict):
+        reference_evidence = load_seedance_capability_evidence(reference_evidence)
+    if reference_evidence is not None and not isinstance(
+        reference_evidence, SeedanceCapabilityEvidence
+    ):
+        raise ValueError("capability_evidence is not valid Seedance evidence")
+    if backend != "seedance" and reference_evidence is not None:
+        raise ValueError("Seedance capability evidence cannot be used for Kling")
+    if reference_evidence is None:
+        if capability.reference_video == "gateway_unverified":
+            proxy_blockers.append("JD gateway reference_video capability is unverified")
+        elif capability.reference_video == "unsupported":
+            proxy_blockers.append("JD gateway reference_video is unsupported")
+    elif reference_evidence.model_capability != "model_supported":
+        proxy_blockers.append("Seedance model reference_video capability is unsupported")
+    elif (
+        reference_evidence.gateway_capability == "gateway_verified"
+        and not reference_evidence._capture_verified
+    ):
+        proxy_blockers.append("gateway_verified evidence was not loaded from a captured response")
     if "proxy_video" not in shot_bindings:
         proxy_blockers.append("missing remote binding: proxy_video")
     else:
-        validate_remote_asset(shot_bindings["proxy_video"])
-    conditions["proxy_video"] = {
-        "status": "blocked",
-        "blockers": proxy_blockers,
-    }
+        if reference_evidence is None:
+            validate_remote_asset(shot_bindings["proxy_video"])
+        else:
+            validate_remote_video_asset(shot_bindings["proxy_video"])
+    if reference_evidence is not None and shot_duration != 5.0:
+        proxy_blockers.append("Seedance reference_video requires exactly five seconds")
+    if proxy_blockers:
+        conditions["proxy_video"] = {
+            "status": "blocked",
+            "blockers": proxy_blockers,
+        }
+    else:
+        assert reference_evidence is not None
+        conditions["proxy_video"] = {
+            "status": (
+                "ready"
+                if reference_evidence.gateway_capability == "gateway_verified"
+                else "ready_for_single_combined_probe"
+            ),
+            "payload": build_seedance_reference_video(
+                shot["prompts"]["cinematic"],
+                shot_bindings["proxy_video"],
+                model=reference_evidence.model,
+                duration=duration,
+            ),
+        }
 
+    reported_capability = asdict(capability)
+    if reference_evidence is not None:
+        def _provenance(record):
+            if record is None:
+                return None
+            if record.response_record is not None:
+                return {
+                    "capture": {
+                        "path": record.response_record.path,
+                        "sha256": record.response_record.sha256,
+                    }
+                }
+            return {"source_url": record.source_url}
+
+        reported_capability["provided_reference_video"] = {
+            "model": reference_evidence.model,
+            "model_capability": reference_evidence.model_capability,
+            "gateway_capability": reference_evidence.gateway_capability,
+            "content_type": "video_url",
+            "url_field": "video_url",
+            "role": "reference_video",
+            "evidence": {
+                "model": _provenance(reference_evidence.model_evidence),
+                "gateway": _provenance(reference_evidence.gateway_evidence),
+            },
+        }
     return {
         "schema_version": "0.1",
         "backend": backend,
         "shot_id": shot_id,
         "network_called": False,
-        "capability_evidence": asdict(capability),
+        "capability_evidence": reported_capability,
         "conditions": conditions,
     }
 
@@ -134,6 +210,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--backend", choices=("seedance", "kling"), required=True)
     parser.add_argument("--bindings", type=Path)
+    parser.add_argument("--capability-evidence", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args(argv)
 
@@ -146,7 +223,17 @@ def main(argv: list[str] | None = None) -> None:
         if args.bindings
         else {}
     )
-    report = prepare_backend(bundle, args.backend, bindings)
+    reference_evidence = (
+        load_seedance_capability_evidence(args.capability_evidence)
+        if args.capability_evidence
+        else None
+    )
+    report = prepare_backend(
+        bundle,
+        args.backend,
+        bindings,
+        capability_evidence=reference_evidence,
+    )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_name(f".{args.output.name}.tmp")
     temporary.write_text(

@@ -66,6 +66,43 @@ def build_seedance_first_last(
     }
 
 
+def build_seedance_reference_video(
+    prompt: str,
+    proxy_url: str,
+    *,
+    model: str,
+    duration: int = 5,
+) -> dict:
+    """Build, but never submit, the one supported reference-video request shape."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Seedance reference prompt must be a nonempty string")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Seedance model must be a nonempty exact model identifier")
+    if isinstance(duration, bool) or duration != 5:
+        raise ValueError("Seedance reference-video duration must be exactly 5 seconds")
+    # Imported lazily to keep the URL contract in one place without a module cycle.
+    from videoactagent.seedance_reference import validate_remote_video_asset
+
+    url = validate_remote_video_asset(proxy_url)
+    return {
+        "model": model,
+        "content": [
+            {"type": "text", "text": prompt},
+            {
+                "type": "video_url",
+                "video_url": {"url": url},
+                "role": "reference_video",
+            },
+        ],
+        "parameters": {
+            "ratio": "16:9",
+            "resolution": "720p",
+            "duration": 5,
+            "watermark": False,
+        },
+    }
+
+
 def extract_task_id(response: dict) -> str:
     task_id = response.get("task_id") or (response.get("result") or {}).get(
         "task_id"
