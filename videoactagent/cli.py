@@ -26,6 +26,7 @@ COMMANDS = {
     "trajectory-observe": "videoactagent.trajectory_observe",
     "trajectory-proxy": "videoactagent.trajectory_proxy",
     "vace-inputs": "videoactagent.vace_inputs",
+    "vace-coded-draft": "videoactagent.vace_coded_draft",
     "vace-probe": "videoactagent.vace_preprocess_probe",
 }
 
