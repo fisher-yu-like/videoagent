@@ -26,6 +26,7 @@ PROXY_PATH = ROOT / "videoactagent" / "blender_proxy.py"
 BLENDER = Path(r"D:\blender\blender.exe")
 RUNNER_PATH = ROOT / "videoactagent" / "blender_runner.py"
 SHOT_SCRIPT_PATH = ROOT / "examples" / "station_shotscript.json"
+TRAJECTORY_PATH = ROOT / "examples" / "trajectory_circle_s01.json"
 
 
 def load_proxy_without_blender():
@@ -153,12 +154,10 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
     def test_clay_hides_actor_labels_and_action_axis_only_by_render_flag(self):
         self.assertTrue(self.proxy.hide_in_clay("action_axis"))
         self.assertTrue(self.proxy.hide_in_clay("actor_a_label"))
+        self.assertTrue(self.proxy.hide_in_clay("TrajectoryCurve_camera_orbit"))
+        self.assertTrue(self.proxy.hide_in_clay("TrajectoryPoint_actor_a_01"))
+        self.assertTrue(self.proxy.hide_in_clay("TrajectoryLabel_actor_a_00"))
         self.assertFalse(self.proxy.hide_in_clay("actor_a_body"))
-        self.assertFalse(self.proxy.hide_in_clay("TrajectoryLabel_actor_a_00"))
-
-        source = PROXY_PATH.read_text(encoding="utf-8")
-        self.assertIn("obj.hide_render = True", source)
-        self.assertNotIn("bpy.data.objects.remove(obj", source)
 
     def test_render_profile_is_immutable_and_explicitly_consumed(self):
         profile = self.proxy.RenderProfile("clay", 6, (160, 90))
@@ -181,19 +180,43 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
             with self.subTest(function=name):
                 self.assertIn("profile", inspect.signature(getattr(self.proxy, name)).parameters)
 
+    def test_every_shot_must_round_to_at_least_one_effective_frame(self):
+        profile = self.proxy.RenderProfile("diagnostic", 6, (160, 90))
+        script = types.SimpleNamespace(
+            shots=(
+                types.SimpleNamespace(shot_id="s01", duration=1.0),
+                types.SimpleNamespace(shot_id="s02", duration=0.01),
+            )
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"s02.*0\.01.*6 fps.*0 frames",
+        ):
+            self.proxy.validate_shot_frame_counts(script, profile)
+
 
 @unittest.skipUnless(BLENDER.is_file(), f"Blender missing at {BLENDER}")
 class BlenderClayRenderProfileIntegrationTests(unittest.TestCase):
-    def test_real_clay_render_persists_and_decodes_the_effective_profile(self):
+    def write_short_inputs(self, directory: Path) -> tuple[Path, Path]:
         document = json.loads(SHOT_SCRIPT_PATH.read_text(encoding="utf-8"))
         document["fps"] = 99
         document["shots"] = document["shots"][:1]
         document["shots"][0]["duration"] = 1.0
+        shotscript = directory / "short_shotscript.json"
+        shotscript.write_text(json.dumps(document), encoding="utf-8")
 
+        trajectory_document = json.loads(TRAJECTORY_PATH.read_text(encoding="utf-8"))
+        trajectory_document["duration_seconds"] = 1.0
+        trajectory_document["sample_count"] = 7
+        trajectory = directory / "short_trajectory.json"
+        trajectory.write_text(json.dumps(trajectory_document), encoding="utf-8")
+        return shotscript, trajectory
+
+    def test_real_clay_render_persists_and_decodes_the_effective_profile(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
-            shotscript = directory / "short_shotscript.json"
-            shotscript.write_text(json.dumps(document), encoding="utf-8")
+            shotscript, _trajectory = self.write_short_inputs(directory)
             output = directory / "clay"
             completed = subprocess.run(
                 [
@@ -307,6 +330,152 @@ print("BLENDER_CLAY_PROBE=" + json.dumps(payload, sort_keys=True))
                 },
             )
             self.assertEqual(probe["frame_end"], 6)
+
+    def test_real_trajectory_overlays_follow_style_without_changing_animation(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            shotscript, trajectory = self.write_short_inputs(directory)
+            profiles = {}
+            for style in ("diagnostic", "clay"):
+                output = directory / style
+                completed = subprocess.run(
+                    [
+                        str(BLENDER),
+                        "--background",
+                        "--factory-startup",
+                        "-F",
+                        "FFMPEG",
+                        "--python",
+                        str(PROXY_PATH),
+                        "--",
+                        "--shotscript",
+                        str(shotscript),
+                        "--trajectory",
+                        str(trajectory),
+                        "--output-dir",
+                        str(output),
+                        "--render-style",
+                        style,
+                        "--fps",
+                        "6",
+                        "--resolution",
+                        "160x90",
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=120,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stdout + completed.stderr,
+                )
+                self.assertIn(
+                    "TRAJECTORY_PROXY_OK",
+                    completed.stdout + completed.stderr,
+                )
+
+                probe_script = """
+import bpy
+import json
+
+scene = bpy.context.scene
+
+def rounded(values):
+    return [round(float(value), 6) for value in values]
+
+def transform_samples(obj):
+    samples = []
+    for frame in range(scene.frame_start, scene.frame_end + 1):
+        scene.frame_set(frame)
+        samples.append({
+            "frame": frame,
+            "location": rounded(obj.matrix_world.translation),
+            "rotation": rounded(obj.rotation_euler),
+        })
+    return samples
+
+def keyframes(owner):
+    action = owner.animation_data.action if owner.animation_data else None
+    if action is None:
+        return []
+    if hasattr(action, "fcurves"):
+        curves = action.fcurves
+    else:
+        curves = [
+            curve
+            for layer in action.layers
+            for strip in layer.strips
+            for channelbag in strip.channelbags
+            for curve in channelbag.fcurves
+        ]
+    return sorted(
+        (
+            curve.data_path,
+            curve.array_index,
+            [[round(float(value), 6) for value in point.co] for point in curve.keyframe_points],
+        )
+        for curve in curves
+    )
+
+camera = bpy.data.objects["DirectorCamera"]
+actors = [bpy.data.objects[name] for name in ("actor_a", "actor_b")]
+payload = {
+    "overlays": {
+        obj.name: bool(obj.hide_render)
+        for obj in bpy.data.objects
+        if obj.name.startswith(("TrajectoryCurve_", "TrajectoryPoint_", "TrajectoryLabel_"))
+    },
+    "transforms": {
+        "camera": transform_samples(camera),
+        **{actor.name: transform_samples(actor) for actor in actors},
+    },
+    "keyframes": {
+        "camera": keyframes(camera),
+        "camera_data": keyframes(camera.data),
+        **{actor.name: keyframes(actor) for actor in actors},
+    },
+}
+print("BLENDER_STYLE_PROBE=" + json.dumps(payload, sort_keys=True))
+"""
+                probed = subprocess.run(
+                    [
+                        str(BLENDER),
+                        "--background",
+                        str(output / "trajectory_proxy.blend"),
+                        "--python-expr",
+                        probe_script,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=60,
+                )
+                self.assertEqual(probed.returncode, 0, probed.stdout + probed.stderr)
+                evidence = probed.stdout + probed.stderr
+                lines = [
+                    line
+                    for line in evidence.splitlines()
+                    if line.startswith("BLENDER_STYLE_PROBE=")
+                ]
+                self.assertTrue(lines, evidence)
+                line = lines[0]
+                profiles[style] = json.loads(line.partition("=")[2])
+
+            diagnostic = profiles["diagnostic"]
+            clay = profiles["clay"]
+            self.assertTrue(diagnostic["overlays"])
+            self.assertEqual(set(diagnostic["overlays"]), set(clay["overlays"]))
+            self.assertTrue(all(not hidden for hidden in diagnostic["overlays"].values()))
+            self.assertTrue(all(clay["overlays"].values()))
+            self.assertEqual(diagnostic["transforms"], clay["transforms"])
+            self.assertEqual(diagnostic["keyframes"], clay["keyframes"])
+            self.assertTrue(diagnostic["keyframes"]["camera"])
+            self.assertTrue(diagnostic["keyframes"]["actor_a"])
 
 
 if __name__ == "__main__":

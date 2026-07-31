@@ -106,7 +106,35 @@ def effective_material_color(
 
 
 def hide_in_clay(object_name: str) -> bool:
-    return object_name == "action_axis" or object_name.endswith("_label")
+    return (
+        object_name == "action_axis"
+        or object_name.endswith("_label")
+        or object_name.startswith(
+            ("TrajectoryCurve_", "TrajectoryPoint_", "TrajectoryLabel_")
+        )
+    )
+
+
+def apply_render_visibility(profile: RenderProfile):
+    hide_diagnostics = profile.style == "clay"
+    for obj in bpy.data.objects:
+        if hide_in_clay(obj.name):
+            obj.hide_render = hide_diagnostics
+
+
+def validate_shot_frame_counts(
+    script: ShotScript, profile: RenderProfile
+) -> dict[str, int]:
+    frame_counts: dict[str, int] = {}
+    for shot in script.shots:
+        frame_count = int(round(shot.duration * profile.fps))
+        if frame_count < 1:
+            raise ValueError(
+                f"{shot.shot_id} duration {shot.duration:g}s at {profile.fps} fps "
+                f"rounds to {frame_count} frames; increase --fps or shot duration"
+            )
+        frame_counts[shot.shot_id] = frame_count
+    return frame_counts
 
 
 def create_material(
@@ -352,6 +380,7 @@ def configure_scene(
     script: ShotScript,
     profile: RenderProfile = DEFAULT_RENDER_PROFILE,
 ):
+    shot_frame_counts = validate_shot_frame_counts(script, profile)
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
@@ -380,10 +409,7 @@ def configure_scene(
         actor.actor_id: create_actor(profile, actor, actor_index)
         for actor_index, actor in enumerate(script.shots[0].actors)
     }
-    if profile.style == "clay":
-        for obj in bpy.data.objects:
-            if hide_in_clay(obj.name):
-                obj.hide_render = True
+    apply_render_visibility(profile)
 
     camera_data = bpy.data.cameras.new("DirectorCamera")
     camera = bpy.data.objects.new("DirectorCamera", camera_data)
@@ -407,7 +433,7 @@ def configure_scene(
     frame_cursor = 1
     ranges = []
     for shot in script.shots:
-        shot_frames = int(round(shot.duration * profile.fps))
+        shot_frames = shot_frame_counts[shot.shot_id]
         start_frame = frame_cursor
         end_frame = frame_cursor + shot_frames - 1
         ranges.append((shot, start_frame, end_frame))
@@ -600,6 +626,7 @@ def apply_trajectory(
             "middle_world": rounded_vector(world_points[len(world_points) // 2]),
             "last_world": rounded_vector(world_points[-1]),
         }
+    apply_render_visibility(profile)
     return shot, start_frame, end_frame, applied
 
 
