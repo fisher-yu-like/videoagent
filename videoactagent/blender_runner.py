@@ -2,20 +2,41 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 
-def parse_args() -> argparse.Namespace:
+def positive_int(value: str) -> int:
+    if re.fullmatch(r"[0-9]+", value) is None or int(value) <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return int(value)
+
+
+def resolution_value(value: str) -> tuple[int, int]:
+    match = re.fullmatch(r"([1-9][0-9]*)x([1-9][0-9]*)", value)
+    if match is None:
+        raise argparse.ArgumentTypeError("must be WIDTHxHEIGHT with positive integers")
+    return int(match.group(1)), int(match.group(2))
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--blender", type=Path, required=True)
     parser.add_argument("--shotscript", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
-    return parser.parse_args()
+    parser.add_argument(
+        "--render-style",
+        choices=("diagnostic", "clay"),
+        default="diagnostic",
+    )
+    parser.add_argument("--fps", type=positive_int, default=3)
+    parser.add_argument("--resolution", type=resolution_value, default=(960, 540))
+    return parser.parse_args(argv)
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     compiler = Path(__file__).with_name("blender_proxy.py").resolve()
     command = [
         str(args.blender.resolve()),
@@ -30,6 +51,12 @@ def main() -> int:
         str(args.shotscript.resolve()),
         "--output-dir",
         str(args.output_dir.resolve()),
+        "--render-style",
+        args.render_style,
+        "--fps",
+        str(args.fps),
+        "--resolution",
+        f"{args.resolution[0]}x{args.resolution[1]}",
     ]
     completed = subprocess.run(
         command,

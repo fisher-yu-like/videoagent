@@ -19,18 +19,27 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from videoactagent.shotscript import ActorPlan, Shot, ShotScript, Vec3
+from videoactagent.blender_runner import positive_int, resolution_value
 from videoactagent.trajectory import TrajectoryInstruction
 from videoactagent.trajectory_proxy import camera_world_xy
 
 
-def parse_args() -> argparse.Namespace:
-    argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    if argv is None:
+        argv = sys.argv[sys.argv.index("--") + 1 :] if "--" in sys.argv else []
     parser = argparse.ArgumentParser()
     parser.add_argument("--shotscript", type=Path)
     parser.add_argument("--trajectory", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--keyframes-only", action="store_true")
     parser.add_argument("--keyframe-frames")
+    parser.add_argument(
+        "--render-style",
+        choices=("diagnostic", "clay"),
+        default="diagnostic",
+    )
+    parser.add_argument("--fps", type=positive_int, default=3)
+    parser.add_argument("--resolution", type=resolution_value, default=(960, 540))
     return parser.parse_args(argv)
 
 
@@ -41,7 +50,52 @@ def hex_color(value: str) -> tuple[float, float, float, float]:
     return tuple(int(cleaned[index : index + 2], 16) / 255 for index in (0, 2, 4)) + (1.0,)
 
 
-def create_material(name: str, color: tuple[float, float, float, float], metallic=0.0, roughness=0.5):
+def clay_actor_color(actor_index: int) -> tuple[float, float, float, float]:
+    if type(actor_index) is not int or actor_index < 0:
+        raise ValueError("actor_index must be a non-negative integer")
+    value = actor_index + 1
+    fraction = 0.0
+    denominator = 1.0
+    while value:
+        value, remainder = divmod(value, 2)
+        denominator *= 2.0
+        fraction += remainder / denominator
+    gray = 0.2 + 0.6 * fraction
+    return gray, gray, gray, 1.0
+
+
+def effective_material_color(
+    render_style: str,
+    color: tuple[float, float, float, float],
+    clay_gray: float | None = None,
+) -> tuple[float, float, float, float]:
+    if render_style == "diagnostic":
+        return color
+    if render_style != "clay":
+        raise ValueError(f"unsupported render style: {render_style}")
+    gray = (
+        float(clay_gray)
+        if clay_gray is not None
+        else 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2]
+    )
+    return gray, gray, gray, color[3]
+
+
+def hide_in_clay(object_name: str) -> bool:
+    return object_name == "action_axis" or object_name.endswith("_label")
+
+
+_ACTIVE_RENDER_STYLE = "diagnostic"
+
+
+def create_material(
+    name: str,
+    color: tuple[float, float, float, float],
+    metallic=0.0,
+    roughness=0.5,
+    clay_gray: float | None = None,
+):
+    color = effective_material_color(_ACTIVE_RENDER_STYLE, color, clay_gray)
     material = bpy.data.materials.new(name)
     material.diffuse_color = color
     with warnings.catch_warnings():
@@ -59,7 +113,7 @@ def create_emissive_material(name: str, color: tuple[float, float, float, float]
     principled = material.node_tree.nodes.get("Principled BSDF")
     emission = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
     if emission is not None:
-        emission.default_value = color
+        emission.default_value = effective_material_color(_ACTIVE_RENDER_STYLE, color)
     strength = principled.inputs.get("Emission Strength")
     if strength is not None:
         strength.default_value = 4.0
@@ -195,10 +249,15 @@ def create_environment(preset: str):
     builder()
 
 
-def create_actor(actor: ActorPlan):
+def create_actor(actor: ActorPlan, actor_index: int):
     root = bpy.data.objects.new(actor.actor_id, None)
     bpy.context.collection.objects.link(root)
-    material = create_material(f"{actor.actor_id}_mat", hex_color(actor.color), roughness=0.55)
+    material = create_material(
+        f"{actor.actor_id}_mat",
+        hex_color(actor.color),
+        roughness=0.55,
+        clay_gray=clay_actor_color(actor_index)[0],
+    )
 
     bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.34, depth=1.45, location=(0, 0, 0.95))
     body = bpy.context.object
@@ -260,7 +319,14 @@ def point_camera(camera, target: Vector):
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
-def configure_scene(script: ShotScript):
+def configure_scene(
+    script: ShotScript,
+    render_style: str = "diagnostic",
+    fps: int = 3,
+    resolution: tuple[int, int] = (960, 540),
+):
+    global _ACTIVE_RENDER_STYLE
+    _ACTIVE_RENDER_STYLE = render_style
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
@@ -271,10 +337,10 @@ def configure_scene(script: ShotScript):
     scene = bpy.context.scene
     bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
     scene.render.engine = "BLENDER_EEVEE"
-    scene.render.resolution_x = 960
-    scene.render.resolution_y = 540
+    scene.render.resolution_x = resolution[0]
+    scene.render.resolution_y = resolution[1]
     scene.render.resolution_percentage = 100
-    scene.render.fps = script.fps
+    scene.render.fps = fps
     if scene.render.image_settings.file_format != "FFMPEG":
         raise RuntimeError("launch Blender with '-F FFMPEG' for MP4 output")
     scene.render.ffmpeg.format = "MPEG4"
@@ -286,9 +352,13 @@ def configure_scene(script: ShotScript):
     create_environment(script.environment_preset)
 
     actor_roots = {
-        actor.actor_id: create_actor(actor)
-        for actor in script.shots[0].actors
+        actor.actor_id: create_actor(actor, actor_index)
+        for actor_index, actor in enumerate(script.shots[0].actors)
     }
+    if render_style == "clay":
+        for obj in bpy.data.objects:
+            if hide_in_clay(obj.name):
+                obj.hide_render = True
 
     camera_data = bpy.data.cameras.new("DirectorCamera")
     camera = bpy.data.objects.new("DirectorCamera", camera_data)
@@ -312,7 +382,7 @@ def configure_scene(script: ShotScript):
     frame_cursor = 1
     ranges = []
     for shot in script.shots:
-        shot_frames = int(round(shot.duration * script.fps))
+        shot_frames = int(round(shot.duration * fps))
         start_frame = frame_cursor
         end_frame = frame_cursor + shot_frames - 1
         ranges.append((shot, start_frame, end_frame))
@@ -568,12 +638,20 @@ def render_keyframes_in_png_process(
     ]
 
 
-def render_outputs(script: ShotScript, output_dir: Path):
+def render_outputs(
+    script: ShotScript,
+    output_dir: Path,
+    render_style: str = "diagnostic",
+    fps: int = 3,
+    resolution: tuple[int, int] = (960, 540),
+):
     output_dir = output_dir.resolve()
     keyframe_dir = output_dir / "keyframes"
     keyframe_dir.mkdir(parents=True, exist_ok=True)
 
-    scene, actor_roots, camera, ranges = configure_scene(script)
+    scene, actor_roots, camera, ranges = configure_scene(
+        script, render_style, fps, resolution
+    )
     blend_path = output_dir / "station_proxy.blend"
     video_path = output_dir / "station_proxy.mp4"
     report_path = output_dir / "trajectory_report.json"
@@ -633,6 +711,11 @@ def render_outputs(script: ShotScript, output_dir: Path):
         "scene_frame_start": scene.frame_start,
         "scene_frame_end": scene.frame_end,
         "rendered_frames": scene.frame_end - scene.frame_start + 1,
+        "render_style": render_style,
+        "effective_profile": {
+            "fps": scene.render.fps,
+            "resolution": [scene.render.resolution_x, scene.render.resolution_y],
+        },
         "fps": scene.render.fps,
         "resolution": [scene.render.resolution_x, scene.render.resolution_y],
         "shots": shot_reports,
@@ -671,10 +754,15 @@ def render_trajectory_outputs(
     shotscript_path: Path,
     trajectory_path: Path,
     output_dir: Path,
+    render_style: str = "diagnostic",
+    fps: int = 3,
+    resolution: tuple[int, int] = (960, 540),
 ):
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
-    scene, actor_roots, camera, ranges = configure_scene(script)
+    scene, actor_roots, camera, ranges = configure_scene(
+        script, render_style, fps, resolution
+    )
     shot, start_frame, end_frame, applied = apply_trajectory(
         script, instruction, actor_roots, camera, ranges
     )
@@ -712,6 +800,11 @@ def render_trajectory_outputs(
         "schema_version": "0.1",
         "renderer": "blender",
         "blender_version": bpy.app.version_string,
+        "render_style": render_style,
+        "effective_profile": {
+            "fps": scene.render.fps,
+            "resolution": [scene.render.resolution_x, scene.render.resolution_y],
+        },
         "shotscript_sha256": sha256_file(shotscript_path),
         "trajectory_sha256": sha256_file(trajectory_path),
         "controlled_shot": {
@@ -796,9 +889,18 @@ def main():
             args.shotscript,
             args.trajectory,
             args.output_dir,
+            args.render_style,
+            args.fps,
+            args.resolution,
         )
     else:
-        render_outputs(script, args.output_dir)
+        render_outputs(
+            script,
+            args.output_dir,
+            args.render_style,
+            args.fps,
+            args.resolution,
+        )
 
 
 if __name__ == "__main__":
