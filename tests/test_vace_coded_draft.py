@@ -246,8 +246,13 @@ class VaceCodedDraftTests(unittest.TestCase):
                     "source/clay.mp4",
                     "source/coded_draft_bundle.json",
                     "source/coded_draft_manifest.json",
+                    "source/prompt.txt",
                     "source/semantic_plan.json",
                 ],
+            )
+            self.assertEqual(
+                job["prompt"]["normalization"],
+                "utf8_snapshot_exact_then_strip_outer_whitespace",
             )
             self.assertEqual(
                 job["evidence"],
@@ -328,6 +333,64 @@ class VaceCodedDraftTests(unittest.TestCase):
             job["motion_semantics"]["keyframes"][0]["t"] = 999
             job["motion_semantics"]["keyframes"][0]["source_frame_index"] = -42
             job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+            with self.assertRaises(VaceCodedDraftError):
+                verify_vace_coded_draft_job(job_path)
+
+    def test_job_rejects_coordinated_prompt_tampering_against_bound_snapshot(self):
+        from videoactagent.vace_coded_draft import (
+            VaceCodedDraftError,
+            build_vace_coded_draft_job,
+            verify_vace_coded_draft_job,
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, manifest = _make_coded_draft(root / "coded")
+            job_path = build_vace_coded_draft_job(bundle, manifest, root / "job")
+            job_root = job_path.parent
+            bundle_snapshot = job_root / "source" / "coded_draft_bundle.json"
+            manifest_snapshot = job_root / "source" / "coded_draft_manifest.json"
+
+            injected = "SYNCHRONIZED UNBOUND prompt"
+            bundle_document = json.loads(bundle_snapshot.read_text(encoding="utf-8"))
+            bundle_document["story_prompt"] = injected
+            bundle_snapshot.write_text(json.dumps(bundle_document, indent=2), encoding="utf-8")
+            bundle_record = _record(bundle_snapshot, job_root)
+
+            manifest_document = json.loads(manifest_snapshot.read_text(encoding="utf-8"))
+            manifest_document["outputs"]["bundle"] = {
+                "path": "bundle.json",
+                "bytes": bundle_record["bytes"],
+                "sha256": bundle_record["sha256"],
+            }
+            for index, record in enumerate(manifest_document["artifact_inventory"]):
+                if record["path"] == "bundle.json":
+                    manifest_document["artifact_inventory"][index] = dict(
+                        manifest_document["outputs"]["bundle"]
+                    )
+            manifest_snapshot.write_text(
+                json.dumps(manifest_document, indent=2), encoding="utf-8"
+            )
+            manifest_record = _record(manifest_snapshot, job_root)
+
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["source"]["coded_draft_bundle"] = bundle_record
+            job["source"]["coded_draft_manifest"] = manifest_record
+            for index, record in enumerate(job["inventory"]):
+                if record["path"] == bundle_record["path"]:
+                    job["inventory"][index] = bundle_record
+                if record["path"] == manifest_record["path"]:
+                    job["inventory"][index] = manifest_record
+            appearance = job["prompt"]["components"]["appearance_instruction"]
+            prompt_text = f"{injected} {appearance}"
+            job["prompt"]["components"]["story_prompt"] = injected
+            job["prompt"]["text"] = prompt_text
+            job["prompt"]["sha256"] = hashlib.sha256(
+                prompt_text.encode("utf-8")
+            ).hexdigest()
+            job["mapping"]["prompt"] = prompt_text
+            job_path.write_text(json.dumps(job, indent=2), encoding="utf-8")
+
             with self.assertRaises(VaceCodedDraftError):
                 verify_vace_coded_draft_job(job_path)
 

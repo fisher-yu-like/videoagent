@@ -45,6 +45,7 @@ _JOB_ARTIFACT_PATHS = (
     "source/clay.mp4",
     "source/coded_draft_bundle.json",
     "source/coded_draft_manifest.json",
+    "source/prompt.txt",
     "source/semantic_plan.json",
 )
 
@@ -479,6 +480,7 @@ def _verified_coded_draft(
         "media": media,
         "semantic_path": semantic_path,
         "semantic_sha256": _sha256(semantic_path),
+        "prompt_path": prompt_path,
         **provenance,
     }
 
@@ -577,6 +579,11 @@ def build_vace_coded_draft_job(
             staging / "source" / "semantic_plan.json",
             "source/semantic_plan.json",
         )
+        prompt_record = _copy_snapshot(
+            verified["prompt_path"],
+            staging / "source" / "prompt.txt",
+            "source/prompt.txt",
+        )
         clay_target = staging / "source" / "clay.mp4"
         clay_base = _copy_snapshot(
             verified["clay_path"], clay_target, "source/clay.mp4"
@@ -619,6 +626,7 @@ def build_vace_coded_draft_job(
                     clay_record,
                     bundle_record,
                     manifest_record,
+                    prompt_record,
                     semantic_record,
                 )
             ),
@@ -633,6 +641,7 @@ def build_vace_coded_draft_job(
             "source": {
                 "coded_draft_bundle": bundle_record,
                 "coded_draft_manifest": manifest_record,
+                "prompt_snapshot": prompt_record,
                 "semantic_plan": semantic_record,
                 "conditioning_video": clay_record,
                 "source_bundle_backend_consumed": False,
@@ -643,6 +652,7 @@ def build_vace_coded_draft_job(
                 "text": prompt_text,
                 "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
                 "components": components,
+                "normalization": "utf8_snapshot_exact_then_strip_outer_whitespace",
             },
             "motion_semantics": {
                 "semantic_plan_sha256": semantic_record["sha256"],
@@ -737,12 +747,25 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         raise VaceCodedDraftError("VACE job identity contract is invalid")
     inventory = _verify_job_inventory(root, job.get("inventory"))
     source = job.get("source")
-    if not isinstance(source, Mapping) or source.get("source_bundle_backend_consumed") is not False:
+    expected_source_fields = {
+        "coded_draft_bundle",
+        "coded_draft_manifest",
+        "prompt_snapshot",
+        "semantic_plan",
+        "conditioning_video",
+        "source_bundle_backend_consumed",
+    }
+    if (
+        not isinstance(source, Mapping)
+        or set(source) != expected_source_fields
+        or source.get("source_bundle_backend_consumed") is not False
+    ):
         raise VaceCodedDraftError("VACE source contract is invalid")
     snapshot_paths: dict[str, Path] = {}
     for name, expected in (
         ("coded_draft_bundle", "source/coded_draft_bundle.json"),
         ("coded_draft_manifest", "source/coded_draft_manifest.json"),
+        ("prompt_snapshot", "source/prompt.txt"),
         ("semantic_plan", "source/semantic_plan.json"),
     ):
         snapshot_paths[name] = _verify_record(
@@ -772,6 +795,12 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     source_semantic = _read_object(
         snapshot_paths["semantic_plan"], "snapshotted semantic plan"
     )
+    try:
+        source_prompt_text = snapshot_paths["prompt_snapshot"].read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeError) as exc:
+        raise VaceCodedDraftError(f"cannot read snapshotted prompt: {exc}") from exc
     if (
         source_bundle.get("story_id") != job.get("story_id")
         or source_manifest.get("story_id") != job.get("story_id")
@@ -802,6 +831,9 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         or prompt_binding != source_manifest.get("sources", {}).get("prompt")
         or prompt_binding.get("verified_equal") is not True
         or prompt_binding.get("original_sha256") != prompt_binding.get("snapshot_sha256")
+        or prompt_binding.get("bytes") != source["prompt_snapshot"]["bytes"]
+        or prompt_binding.get("snapshot_sha256") != source["prompt_snapshot"]["sha256"]
+        or source_bundle.get("story_prompt") != source_prompt_text
     ):
         raise VaceCodedDraftError("snapshotted prompt binding is invalid")
     original_clay = source_bundle.get("conditioning_video")
@@ -857,6 +889,7 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         "text": prompt_text,
         "sha256": hashlib.sha256(prompt_text.encode("utf-8")).hexdigest(),
         "components": dict(components),
+        "normalization": "utf8_snapshot_exact_then_strip_outer_whitespace",
     }
     if prompt != expected_prompt:
         raise VaceCodedDraftError("VACE prompt hash or text mismatch")
@@ -957,6 +990,7 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
                 clay,
                 source["coded_draft_bundle"],
                 source["coded_draft_manifest"],
+                source["prompt_snapshot"],
                 source["semantic_plan"],
             )
         ),
