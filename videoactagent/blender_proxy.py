@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import hashlib
 import json
 import math
@@ -22,6 +23,31 @@ from videoactagent.shotscript import ActorPlan, Shot, ShotScript, Vec3
 from videoactagent.blender_runner import positive_int, resolution_value
 from videoactagent.trajectory import TrajectoryInstruction
 from videoactagent.trajectory_proxy import camera_world_xy
+
+
+@dataclass(frozen=True)
+class RenderProfile:
+    style: str
+    fps: int
+    resolution: tuple[int, int]
+
+    def __post_init__(self):
+        if self.style not in {"diagnostic", "clay"}:
+            raise ValueError(f"unsupported render style: {self.style}")
+        if type(self.fps) is not int or self.fps <= 0:
+            raise ValueError("fps must be a positive integer")
+        if (
+            not isinstance(self.resolution, tuple)
+            or len(self.resolution) != 2
+            or any(type(value) is not int or value <= 0 for value in self.resolution)
+        ):
+            raise ValueError("resolution must contain two positive integers")
+
+    def as_dict(self) -> dict[str, object]:
+        return {"fps": self.fps, "resolution": list(self.resolution)}
+
+
+DEFAULT_RENDER_PROFILE = RenderProfile("diagnostic", 3, (960, 540))
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -65,14 +91,12 @@ def clay_actor_color(actor_index: int) -> tuple[float, float, float, float]:
 
 
 def effective_material_color(
-    render_style: str,
+    profile: RenderProfile,
     color: tuple[float, float, float, float],
     clay_gray: float | None = None,
 ) -> tuple[float, float, float, float]:
-    if render_style == "diagnostic":
+    if profile.style == "diagnostic":
         return color
-    if render_style != "clay":
-        raise ValueError(f"unsupported render style: {render_style}")
     gray = (
         float(clay_gray)
         if clay_gray is not None
@@ -85,17 +109,15 @@ def hide_in_clay(object_name: str) -> bool:
     return object_name == "action_axis" or object_name.endswith("_label")
 
 
-_ACTIVE_RENDER_STYLE = "diagnostic"
-
-
 def create_material(
+    profile: RenderProfile,
     name: str,
     color: tuple[float, float, float, float],
     metallic=0.0,
     roughness=0.5,
     clay_gray: float | None = None,
 ):
-    color = effective_material_color(_ACTIVE_RENDER_STYLE, color, clay_gray)
+    color = effective_material_color(profile, color, clay_gray)
     material = bpy.data.materials.new(name)
     material.diffuse_color = color
     with warnings.catch_warnings():
@@ -108,12 +130,18 @@ def create_material(
     return material
 
 
-def create_emissive_material(name: str, color: tuple[float, float, float, float]):
-    material = create_material(name, color, metallic=0.0, roughness=0.25)
+def create_emissive_material(
+    profile: RenderProfile,
+    name: str,
+    color: tuple[float, float, float, float],
+):
+    material = create_material(
+        profile, name, color, metallic=0.0, roughness=0.25
+    )
     principled = material.node_tree.nodes.get("Principled BSDF")
     emission = principled.inputs.get("Emission Color") or principled.inputs.get("Emission")
     if emission is not None:
-        emission.default_value = effective_material_color(_ACTIVE_RENDER_STYLE, color)
+        emission.default_value = effective_material_color(profile, color)
     strength = principled.inputs.get("Emission Strength")
     if strength is not None:
         strength.default_value = 4.0
@@ -150,36 +178,36 @@ def add_uv_sphere(name: str, location, radius, material):
     return obj
 
 
-def create_action_axis():
+def create_action_axis(profile: RenderProfile):
     axis_material = create_material(
-        "axis_mat", (0.85, 0.12, 0.12, 1.0), roughness=0.5
+        profile, "axis_mat", (0.85, 0.12, 0.12, 1.0), roughness=0.5
     )
     add_cube("action_axis", (0, 0, 0.035), (5.0, 0.025, 0.025), axis_material)
 
 
-def create_station_environment():
-    platform_material = create_material("platform_mat", (0.32, 0.34, 0.37, 1.0), roughness=0.85)
-    edge_material = create_material("safety_line_mat", (0.95, 0.72, 0.08, 1.0), roughness=0.65)
-    rail_material = create_material("rail_mat", (0.08, 0.09, 0.11, 1.0), metallic=0.75, roughness=0.28)
-    sleeper_material = create_material("sleeper_mat", (0.24, 0.13, 0.08, 1.0), roughness=0.9)
+def create_station_environment(profile: RenderProfile):
+    platform_material = create_material(profile, "platform_mat", (0.32, 0.34, 0.37, 1.0), roughness=0.85)
+    edge_material = create_material(profile, "safety_line_mat", (0.95, 0.72, 0.08, 1.0), roughness=0.65)
+    rail_material = create_material(profile, "rail_mat", (0.08, 0.09, 0.11, 1.0), metallic=0.75, roughness=0.28)
+    sleeper_material = create_material(profile, "sleeper_mat", (0.24, 0.13, 0.08, 1.0), roughness=0.9)
 
     add_cube("platform", (0, 0, -0.15), (5.5, 2.5, 0.15), platform_material)
     add_cube("safety_line", (0, 2.15, 0.02), (5.3, 0.07, 0.025), edge_material)
-    create_action_axis()
+    create_action_axis(profile)
     for y in (3.0, 3.8):
         add_cube(f"rail_{y}", (0, y, -0.05), (6.0, 0.06, 0.06), rail_material)
     for index, x in enumerate(range(-5, 6)):
         add_cube(f"sleeper_{index}", (x, 3.4, -0.12), (0.08, 0.75, 0.05), sleeper_material)
 
 
-def create_city_crosswalk_environment():
-    asphalt = create_material("asphalt_mat", (0.075, 0.085, 0.095, 1.0), roughness=0.92)
-    stripe = create_material("crosswalk_mat", (0.86, 0.88, 0.84, 1.0), roughness=0.72)
-    curb = create_material("curb_mat", (0.38, 0.40, 0.42, 1.0), roughness=0.82)
-    building_a = create_material("building_a_mat", (0.27, 0.38, 0.48, 1.0), roughness=0.78)
-    building_b = create_material("building_b_mat", (0.48, 0.29, 0.24, 1.0), roughness=0.78)
-    window = create_emissive_material("window_mat", (0.95, 0.69, 0.22, 1.0))
-    pole = create_material("street_pole_mat", (0.07, 0.08, 0.09, 1.0), metallic=0.65, roughness=0.3)
+def create_city_crosswalk_environment(profile: RenderProfile):
+    asphalt = create_material(profile, "asphalt_mat", (0.075, 0.085, 0.095, 1.0), roughness=0.92)
+    stripe = create_material(profile, "crosswalk_mat", (0.86, 0.88, 0.84, 1.0), roughness=0.72)
+    curb = create_material(profile, "curb_mat", (0.38, 0.40, 0.42, 1.0), roughness=0.82)
+    building_a = create_material(profile, "building_a_mat", (0.27, 0.38, 0.48, 1.0), roughness=0.78)
+    building_b = create_material(profile, "building_b_mat", (0.48, 0.29, 0.24, 1.0), roughness=0.78)
+    window = create_emissive_material(profile, "window_mat", (0.95, 0.69, 0.22, 1.0))
+    pole = create_material(profile, "street_pole_mat", (0.07, 0.08, 0.09, 1.0), metallic=0.65, roughness=0.3)
 
     add_cube("road", (0, 0, -0.14), (6.0, 3.2, 0.14), asphalt)
     for index, x in enumerate((-3.6, -2.4, -1.2, 0.0, 1.2, 2.4, 3.6)):
@@ -192,16 +220,16 @@ def create_city_crosswalk_environment():
     for index, x in enumerate((-5.0, 5.0)):
         add_cylinder(f"street_pole_{index}", (x, 2.9, 1.5), 0.07, 3.0, pole)
         add_uv_sphere(f"street_lamp_{index}", (x, 2.9, 3.05), 0.18, window)
-    create_action_axis()
+    create_action_axis(profile)
 
 
-def create_forest_path_environment():
-    grass = create_material("grass_mat", (0.12, 0.29, 0.10, 1.0), roughness=0.95)
-    path = create_material("path_mat", (0.40, 0.27, 0.14, 1.0), roughness=0.98)
-    trunk = create_material("trunk_mat", (0.20, 0.095, 0.035, 1.0), roughness=0.95)
-    foliage_a = create_material("foliage_a_mat", (0.07, 0.24, 0.055, 1.0), roughness=0.9)
-    foliage_b = create_material("foliage_b_mat", (0.13, 0.38, 0.08, 1.0), roughness=0.9)
-    stone = create_material("stone_mat", (0.28, 0.31, 0.29, 1.0), roughness=1.0)
+def create_forest_path_environment(profile: RenderProfile):
+    grass = create_material(profile, "grass_mat", (0.12, 0.29, 0.10, 1.0), roughness=0.95)
+    path = create_material(profile, "path_mat", (0.40, 0.27, 0.14, 1.0), roughness=0.98)
+    trunk = create_material(profile, "trunk_mat", (0.20, 0.095, 0.035, 1.0), roughness=0.95)
+    foliage_a = create_material(profile, "foliage_a_mat", (0.07, 0.24, 0.055, 1.0), roughness=0.9)
+    foliage_b = create_material(profile, "foliage_b_mat", (0.13, 0.38, 0.08, 1.0), roughness=0.9)
+    stone = create_material(profile, "stone_mat", (0.28, 0.31, 0.29, 1.0), roughness=1.0)
 
     add_cube("forest_ground", (0, 0.8, -0.16), (6.0, 4.0, 0.16), grass)
     add_cube("forest_path", (0, 0, -0.005), (5.4, 1.15, 0.025), path)
@@ -212,15 +240,15 @@ def create_forest_path_environment():
         add_uv_sphere(f"tree_crown_{index}", (x, y, 2.75), 1.05, foliage)
     for index, x in enumerate((-4.2, -2.8, 2.6, 4.2)):
         add_uv_sphere(f"path_stone_{index}", (x, -1.45, 0.12), 0.16, stone)
-    create_action_axis()
+    create_action_axis(profile)
 
 
-def create_studio_room_environment():
-    floor = create_material("studio_floor_mat", (0.17, 0.18, 0.20, 1.0), roughness=0.7)
-    wall = create_material("studio_wall_mat", (0.30, 0.23, 0.35, 1.0), roughness=0.82)
-    panel = create_material("acoustic_panel_mat", (0.08, 0.10, 0.14, 1.0), roughness=0.9)
-    sofa = create_material("sofa_mat", (0.08, 0.28, 0.34, 1.0), roughness=0.75)
-    warm = create_emissive_material("studio_warm_mat", (1.0, 0.42, 0.12, 1.0))
+def create_studio_room_environment(profile: RenderProfile):
+    floor = create_material(profile, "studio_floor_mat", (0.17, 0.18, 0.20, 1.0), roughness=0.7)
+    wall = create_material(profile, "studio_wall_mat", (0.30, 0.23, 0.35, 1.0), roughness=0.82)
+    panel = create_material(profile, "acoustic_panel_mat", (0.08, 0.10, 0.14, 1.0), roughness=0.9)
+    sofa = create_material(profile, "sofa_mat", (0.08, 0.28, 0.34, 1.0), roughness=0.75)
+    warm = create_emissive_material(profile, "studio_warm_mat", (1.0, 0.42, 0.12, 1.0))
 
     add_cube("studio_floor", (0, 0.5, -0.14), (6.0, 4.0, 0.14), floor)
     add_cube("studio_back_wall", (0, 4.0, 2.8), (6.0, 0.12, 3.0), wall)
@@ -230,7 +258,7 @@ def create_studio_room_environment():
     add_cube("studio_sofa_base", (3.7, 2.75, 0.48), (1.15, 0.42, 0.48), sofa)
     add_cube("studio_sofa_back", (3.7, 3.08, 1.05), (1.15, 0.16, 0.72), sofa)
     add_cube("studio_light_bar", (-3.8, 3.72, 2.75), (0.07, 0.05, 1.1), warm)
-    create_action_axis()
+    create_action_axis(profile)
 
 
 ENVIRONMENT_BUILDERS = {
@@ -241,18 +269,19 @@ ENVIRONMENT_BUILDERS = {
 }
 
 
-def create_environment(preset: str):
+def create_environment(profile: RenderProfile, preset: str):
     try:
         builder = ENVIRONMENT_BUILDERS[preset]
     except KeyError as exc:
         raise ValueError(f"unsupported environment preset: {preset}") from exc
-    builder()
+    builder(profile)
 
 
-def create_actor(actor: ActorPlan, actor_index: int):
+def create_actor(profile: RenderProfile, actor: ActorPlan, actor_index: int):
     root = bpy.data.objects.new(actor.actor_id, None)
     bpy.context.collection.objects.link(root)
     material = create_material(
+        profile,
         f"{actor.actor_id}_mat",
         hex_color(actor.color),
         roughness=0.55,
@@ -321,12 +350,8 @@ def point_camera(camera, target: Vector):
 
 def configure_scene(
     script: ShotScript,
-    render_style: str = "diagnostic",
-    fps: int = 3,
-    resolution: tuple[int, int] = (960, 540),
+    profile: RenderProfile = DEFAULT_RENDER_PROFILE,
 ):
-    global _ACTIVE_RENDER_STYLE
-    _ACTIVE_RENDER_STYLE = render_style
     bpy.ops.object.select_all(action="SELECT")
     bpy.ops.object.delete(use_global=False)
     for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
@@ -337,10 +362,10 @@ def configure_scene(
     scene = bpy.context.scene
     bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
     scene.render.engine = "BLENDER_EEVEE"
-    scene.render.resolution_x = resolution[0]
-    scene.render.resolution_y = resolution[1]
+    scene.render.resolution_x = profile.resolution[0]
+    scene.render.resolution_y = profile.resolution[1]
     scene.render.resolution_percentage = 100
-    scene.render.fps = fps
+    scene.render.fps = profile.fps
     if scene.render.image_settings.file_format != "FFMPEG":
         raise RuntimeError("launch Blender with '-F FFMPEG' for MP4 output")
     scene.render.ffmpeg.format = "MPEG4"
@@ -349,13 +374,13 @@ def configure_scene(
     scene.render.film_transparent = False
     scene.world.color = (0.035, 0.055, 0.09)
 
-    create_environment(script.environment_preset)
+    create_environment(profile, script.environment_preset)
 
     actor_roots = {
-        actor.actor_id: create_actor(actor, actor_index)
+        actor.actor_id: create_actor(profile, actor, actor_index)
         for actor_index, actor in enumerate(script.shots[0].actors)
     }
-    if render_style == "clay":
+    if profile.style == "clay":
         for obj in bpy.data.objects:
             if hide_in_clay(obj.name):
                 obj.hide_render = True
@@ -382,7 +407,7 @@ def configure_scene(
     frame_cursor = 1
     ranges = []
     for shot in script.shots:
-        shot_frames = int(round(shot.duration * fps))
+        shot_frames = int(round(shot.duration * profile.fps))
         start_frame = frame_cursor
         end_frame = frame_cursor + shot_frames - 1
         ranges.append((shot, start_frame, end_frame))
@@ -494,6 +519,7 @@ def _add_control_marker(track_id: str, index: int, world: Vector, material):
 
 
 def apply_trajectory(
+    profile: RenderProfile,
     script: ShotScript,
     instruction: TrajectoryInstruction,
     actor_roots,
@@ -510,13 +536,13 @@ def apply_trajectory(
         raise ValueError("trajectory duration does not match ShotScript shot")
 
     camera_material = create_emissive_material(
-        "trajectory_camera_material", (1.0, 0.02, 0.72, 1.0)
+        profile, "trajectory_camera_material", (1.0, 0.02, 0.72, 1.0)
     )
     actor_material = create_emissive_material(
-        "trajectory_actor_material", (0.02, 0.95, 1.0, 1.0)
+        profile, "trajectory_actor_material", (0.02, 0.95, 1.0, 1.0)
     )
     anchor_material = create_emissive_material(
-        "trajectory_anchor_material", (0.95, 0.9, 0.05, 1.0)
+        profile, "trajectory_anchor_material", (0.95, 0.9, 0.05, 1.0)
     )
     applied = {}
 
@@ -641,17 +667,13 @@ def render_keyframes_in_png_process(
 def render_outputs(
     script: ShotScript,
     output_dir: Path,
-    render_style: str = "diagnostic",
-    fps: int = 3,
-    resolution: tuple[int, int] = (960, 540),
+    profile: RenderProfile = DEFAULT_RENDER_PROFILE,
 ):
     output_dir = output_dir.resolve()
     keyframe_dir = output_dir / "keyframes"
     keyframe_dir.mkdir(parents=True, exist_ok=True)
 
-    scene, actor_roots, camera, ranges = configure_scene(
-        script, render_style, fps, resolution
-    )
+    scene, actor_roots, camera, ranges = configure_scene(script, profile)
     blend_path = output_dir / "station_proxy.blend"
     video_path = output_dir / "station_proxy.mp4"
     report_path = output_dir / "trajectory_report.json"
@@ -711,11 +733,8 @@ def render_outputs(
         "scene_frame_start": scene.frame_start,
         "scene_frame_end": scene.frame_end,
         "rendered_frames": scene.frame_end - scene.frame_start + 1,
-        "render_style": render_style,
-        "effective_profile": {
-            "fps": scene.render.fps,
-            "resolution": [scene.render.resolution_x, scene.render.resolution_y],
-        },
+        "render_style": profile.style,
+        "effective_profile": profile.as_dict(),
         "fps": scene.render.fps,
         "resolution": [scene.render.resolution_x, scene.render.resolution_y],
         "shots": shot_reports,
@@ -754,17 +773,13 @@ def render_trajectory_outputs(
     shotscript_path: Path,
     trajectory_path: Path,
     output_dir: Path,
-    render_style: str = "diagnostic",
-    fps: int = 3,
-    resolution: tuple[int, int] = (960, 540),
+    profile: RenderProfile = DEFAULT_RENDER_PROFILE,
 ):
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
-    scene, actor_roots, camera, ranges = configure_scene(
-        script, render_style, fps, resolution
-    )
+    scene, actor_roots, camera, ranges = configure_scene(script, profile)
     shot, start_frame, end_frame, applied = apply_trajectory(
-        script, instruction, actor_roots, camera, ranges
+        profile, script, instruction, actor_roots, camera, ranges
     )
 
     blend_path = output_dir / "trajectory_proxy.blend"
@@ -800,11 +815,8 @@ def render_trajectory_outputs(
         "schema_version": "0.1",
         "renderer": "blender",
         "blender_version": bpy.app.version_string,
-        "render_style": render_style,
-        "effective_profile": {
-            "fps": scene.render.fps,
-            "resolution": [scene.render.resolution_x, scene.render.resolution_y],
-        },
+        "render_style": profile.style,
+        "effective_profile": profile.as_dict(),
         "shotscript_sha256": sha256_file(shotscript_path),
         "trajectory_sha256": sha256_file(trajectory_path),
         "controlled_shot": {
@@ -881,6 +893,7 @@ def main():
     if args.shotscript is None:
         raise ValueError("--shotscript is required")
     script = ShotScript.from_path(args.shotscript)
+    profile = RenderProfile(args.render_style, args.fps, args.resolution)
     if args.trajectory is not None:
         instruction = TrajectoryInstruction.from_path(args.trajectory)
         render_trajectory_outputs(
@@ -889,18 +902,10 @@ def main():
             args.shotscript,
             args.trajectory,
             args.output_dir,
-            args.render_style,
-            args.fps,
-            args.resolution,
+            profile,
         )
     else:
-        render_outputs(
-            script,
-            args.output_dir,
-            args.render_style,
-            args.fps,
-            args.resolution,
-        )
+        render_outputs(script, args.output_dir, profile)
 
 
 if __name__ == "__main__":
