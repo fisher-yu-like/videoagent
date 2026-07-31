@@ -18,7 +18,9 @@ from videoactagent.director_loop import (
     preview_prompt,
     session_document,
     verify_workspace,
+    _parser,
 )
+from videoactagent.restyle_prompt import RESTYLE_COMPILER_VERSION
 from videoactagent.trajectory_prompt import PROMPT_COMPILER_VERSION
 
 
@@ -28,10 +30,56 @@ BLENDER = Path(r"D:\blender\blender.exe")
 
 
 class DirectorLoopTests(unittest.TestCase):
-    def make_workspace(self, root: str) -> Path:
+    def make_workspace(self, root: str, restyle_profile: Path | None = None) -> Path:
         self.assertTrue(BUNDLE.is_file(), f"missing real D0 bundle: {BUNDLE}")
         self.assertTrue(BLENDER.is_file(), f"missing Blender: {BLENDER}")
-        return prepare_workspace(BUNDLE, BLENDER, Path(root) / "director")
+        return prepare_workspace(
+            BUNDLE, BLENDER, Path(root) / "director",
+            restyle_profile_path=restyle_profile,
+        )
+
+    def test_prepare_snapshots_exact_supplied_restyle_profile_with_provenance(self) -> None:
+        source_bytes = (ROOT / "configs" / "restyle" / "station_reunion.json").read_bytes()
+        with tempfile.TemporaryDirectory() as root:
+            profile = Path(root) / "profile.json"
+            profile.write_bytes(source_bytes)
+            manifest = self.make_workspace(root, profile)
+            profile.write_text("source drift after prepare", encoding="utf-8")
+            workspace = verify_workspace(manifest)
+            record = workspace["document"]["source"]["restyle_profile"]
+            snapshot = manifest.parent / record["path"]
+
+            self.assertEqual(record["provenance"], "provided")
+            self.assertEqual(snapshot.read_bytes(), source_bytes)
+            self.assertEqual(record["bytes"], len(source_bytes))
+            self.assertEqual(record["sha256"], hashlib.sha256(source_bytes).hexdigest())
+
+    def test_prepare_derives_canonical_generic_profile_without_story_motion(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            workspace = verify_workspace(manifest)
+            record = workspace["document"]["source"]["restyle_profile"]
+            snapshot = manifest.parent / record["path"]
+            profile = json.loads(snapshot.read_text(encoding="utf-8"))
+
+            self.assertEqual(record["provenance"], "derived_generic")
+            self.assertEqual(
+                [subject["actor_id"] for subject in profile["subjects"]],
+                workspace["document"]["actors"],
+            )
+            self.assertIn("station", profile["environment"])
+            self.assertNotIn("walks from the far left", snapshot.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot.read_bytes(), json.dumps(
+                profile, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+            ).encode("utf-8") + b"\n")
+
+    def test_prepare_cli_accepts_restyle_profile(self) -> None:
+        profile = ROOT / "configs" / "restyle" / "station_reunion.json"
+        args = _parser().parse_args([
+            "prepare", "--bundle", str(BUNDLE), "--blender", str(BLENDER),
+            "--output-dir", "workspace", "--restyle-profile", str(profile),
+        ])
+        self.assertEqual(args.restyle_profile, profile)
 
     def director_payload(self, manifest: Path, boundary: str = "K0") -> dict:
         session = session_document(manifest)
@@ -91,6 +139,18 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertTrue((iteration / "input" / "actor_trajectory.json").is_file())
             self.assertTrue((iteration / "input" / "camera_trajectory.json").is_file())
             self.assertTrue((iteration / "input" / "compiled_prompt.txt").is_file())
+            self.assertTrue((iteration / "input" / "trajectory_prompt.txt").is_file())
+            self.assertTrue((iteration / "input" / "restyle_prompt.txt").is_file())
+            self.assertEqual(
+                (iteration / "input" / "compiled_prompt.txt").read_bytes(),
+                (iteration / "input" / "trajectory_prompt.txt").read_bytes(),
+            )
+            self.assertEqual(
+                job["source"]["restyle_profile"],
+                json.loads(manifest.read_text(encoding="utf-8"))["source"]["restyle_profile"],
+            )
+            self.assertEqual(job["trajectory_compiler_version"], PROMPT_COMPILER_VERSION)
+            self.assertEqual(job["restyle_compiler_version"], RESTYLE_COMPILER_VERSION)
             self.assertFalse((iteration / "approval.json").exists())
             self.assertFalse(any(path.name.startswith("vace") for path in iteration.rglob("*")))
 
@@ -110,12 +170,17 @@ class DirectorLoopTests(unittest.TestCase):
             }
             self.assertEqual(after, before)
             self.assertEqual((manifest.parent / "state.json").read_bytes(), state_before)
-            self.assertEqual(
-                preview["prompt_compiler_version"], PROMPT_COMPILER_VERSION
-            )
+            self.assertEqual(set(preview), {
+                "trajectory_compiler_version", "restyle_compiler_version",
+                "trajectory_prompt", "restyle_prompt",
+            })
+            self.assertEqual(preview["trajectory_compiler_version"], PROMPT_COMPILER_VERSION)
+            self.assertEqual(preview["restyle_compiler_version"], RESTYLE_COMPILER_VERSION)
             job = prepare_iteration(manifest, payload_value)
-            compiled = (job.parent / "input" / "compiled_prompt.txt").read_text(encoding="utf-8").strip()
-            self.assertEqual(compiled, preview["prompt"])
+            trajectory = (job.parent / "input" / "trajectory_prompt.txt").read_text(encoding="utf-8").strip()
+            restyle = (job.parent / "input" / "restyle_prompt.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(trajectory, preview["trajectory_prompt"])
+            self.assertEqual(restyle, preview["restyle_prompt"])
 
     def test_approval_rejects_unrendered_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -140,6 +205,12 @@ class DirectorLoopTests(unittest.TestCase):
 
             self.assertEqual(exported["iteration_id"], "D1")
             self.assertEqual(
+                exported["compiled_prompt"]["sha256"],
+                exported["trajectory_prompt"]["sha256"],
+            )
+            self.assertIn("restyle_prompt", exported)
+            self.assertIn("restyle_profile", exported)
+            self.assertEqual(
                 exported["approval"]["sha256"],
                 hashlib.sha256(approval.read_bytes()).hexdigest(),
             )
@@ -154,6 +225,28 @@ class DirectorLoopTests(unittest.TestCase):
             diagnostic.write_bytes(diagnostic.read_bytes() + b"tamper")
             with self.assertRaisesRegex(DirectorLoopError, "hash"):
                 export_approved_iteration(manifest)
+
+    def test_prompt_and_profile_tampering_each_blocks_approved_export(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(
+                root, ROOT / "configs" / "restyle" / "station_reunion.json"
+            )
+            job = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            publish_iteration(manifest, job, d0 / "diagnostic.mp4", d0 / "clay.mp4")
+            approve_iteration(manifest, "D1", "sy")
+            exported = export_approved_iteration(manifest)
+
+            for name in (
+                "trajectory_prompt", "restyle_prompt", "compiled_prompt", "restyle_profile"
+            ):
+                with self.subTest(name=name):
+                    path = manifest.parent / exported[name]["path"]
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"tamper")
+                    with self.assertRaisesRegex(DirectorLoopError, "hash/size mismatch"):
+                        export_approved_iteration(manifest)
+                    path.write_bytes(original)
 
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))
@@ -200,10 +293,24 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn('id="visual-style"', html)
         self.assertIn('id="mood"', html)
         self.assertIn('id="prompt-preview"', html)
-        self.assertIn('id="prompt-output"', html)
+        self.assertIn('id="trajectory-prompt-output"', html)
+        self.assertIn('id="restyle-prompt-output"', html)
         self.assertIn("预览自动 Prompt", html)
         self.assertIn("/api/prompt-preview", html)
-        self.assertIn('id="prompt-output" readonly', html)
+        self.assertIn('id="trajectory-prompt-output" readonly', html)
+        self.assertIn('id="restyle-prompt-output" readonly', html)
+        self.assertNotIn('textarea id="prompt"', html)
+
+    def test_panel_switches_diagnostic_and_clay_without_changing_iteration(self) -> None:
+        html = (ROOT / "static" / "director_panel.html").read_text(encoding="utf-8")
+        self.assertIn('id="proxy-view"', html)
+        self.assertIn('value="diagnostic"', html)
+        self.assertIn('value="clay"', html)
+        self.assertIn("只有中性粘土视图会送入生成", html)
+        self.assertIn("session.current.diagnostic_url", html)
+        self.assertIn("session.current.clay_url", html)
+        self.assertIn("selectedProxyView", html)
+        self.assertNotIn("$('proxy-view').value='diagnostic'", html)
 
     def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
         from videoactagent.vace_coded_draft import (
@@ -223,6 +330,8 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertTrue(verified["director_binding"]["approved"])
         self.assertEqual(verified["mapping"]["src_video"], "control/src_video.mp4")
         self.assertIsNone(verified["mapping"]["src_ref_images"])
+        self.assertIn("K0 to K1", verified["prompt"]["text"])
+        self.assertNotIn("Subjects and wardrobe", verified["prompt"]["text"])
 
 
 if __name__ == "__main__":

@@ -21,6 +21,12 @@ from videoactagent.trajectory_prompt import (
     TrajectoryPromptError,
     compile_trajectory_prompt,
 )
+from videoactagent.restyle_prompt import (
+    RESTYLE_COMPILER_VERSION,
+    RestylePromptError,
+    compile_restyle_prompt,
+    load_restyle_profile,
+)
 
 
 SCHEMA_VERSION = "1.0"
@@ -74,6 +80,8 @@ class CameraKeyframe:
 class CompiledDirectorAnnotation:
     actor_trajectory: TrajectoryInstruction
     camera_trajectory: tuple[CameraKeyframe, ...]
+    trajectory_prompt: str
+    restyle_prompt: str
     compiled_prompt: str
     canonical_annotation: bytes
     camera_document: bytes
@@ -187,6 +195,7 @@ def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
         "story_id", "shot_id", "duration_seconds", "sample_count", "actors", "keyframes",
         "inheritance_sha256", "inherited_keyframes", "story_prompt",
         "appearance_instruction",
+        "restyle_profile",
     }
     if set(value) != required:
         raise DirectorAnnotationError("director contract fields are invalid")
@@ -235,11 +244,23 @@ def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
         raise DirectorAnnotationError("contract.story_prompt must be non-empty")
     if not isinstance(appearance, str) or not appearance.strip():
         raise DirectorAnnotationError("contract.appearance_instruction must be non-empty")
+    profile_value = value.get("restyle_profile")
+    if not isinstance(profile_value, Mapping):
+        raise DirectorAnnotationError("contract.restyle_profile must be an object")
+    try:
+        profile = load_restyle_profile(profile_value)
+    except RestylePromptError as exc:
+        raise DirectorAnnotationError(f"contract.restyle_profile is invalid: {exc}") from exc
+    if profile.scene_id != story_id:
+        raise DirectorAnnotationError("contract.restyle_profile scene_id differs from story_id")
+    if {subject.actor_id for subject in profile.subjects} != set(actors):
+        raise DirectorAnnotationError("contract.restyle_profile subjects differ from actors")
     return {
         "story_id": story_id, "shot_id": shot_id, "duration_seconds": duration,
         "sample_count": sample_count, "actors": actors, "keyframes": frames,
         "inheritance_sha256": inheritance_sha256, "inherited_keyframes": inherited,
         "story_prompt": story_prompt.strip(), "appearance_instruction": appearance.strip(),
+        "restyle_profile": profile,
     }
 
 
@@ -249,9 +270,20 @@ def compile_director_annotation(
     if not isinstance(payload, Mapping):
         raise DirectorAnnotationError("annotation must be one object")
     payload_fields = set(payload)
-    if payload_fields == set(_PAYLOAD_FIELDS) | {"prompt_compiler_version"}:
+    compiler_fields = payload_fields - set(_PAYLOAD_FIELDS)
+    if compiler_fields:
+        if compiler_fields not in (
+            {"prompt_compiler_version"},
+            {"prompt_compiler_version", "restyle_compiler_version"},
+        ):
+            _exact(payload, _PAYLOAD_FIELDS, "annotation")
         if payload.get("prompt_compiler_version") != PROMPT_COMPILER_VERSION:
             raise DirectorAnnotationError("prompt_compiler_version is invalid")
+        if (
+            "restyle_compiler_version" in compiler_fields
+            and payload.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
+        ):
+            raise DirectorAnnotationError("restyle_compiler_version is invalid")
     else:
         _exact(payload, _PAYLOAD_FIELDS, "annotation")
     if payload.get("schema_version") != SCHEMA_VERSION:
@@ -362,6 +394,7 @@ def compile_director_annotation(
         "inherited_locked_values": submitted_inherited, "keyframes": normalized_frames,
         "visual_style": visual_style, "mood": mood,
         "prompt_compiler_version": PROMPT_COMPILER_VERSION,
+        "restyle_compiler_version": RESTYLE_COMPILER_VERSION,
     }
     camera_doc = {
         "schema_version": SCHEMA_VERSION, "scene_id": expected["story_id"],
@@ -370,7 +403,7 @@ def compile_director_annotation(
         "states": [camera.to_dict() for camera in cameras],
     }
     try:
-        compiled_prompt = compile_trajectory_prompt(
+        trajectory_prompt = compile_trajectory_prompt(
             story_prompt=expected["story_prompt"],
             appearance_instruction=expected["appearance_instruction"],
             duration_seconds=expected["duration_seconds"],
@@ -380,10 +413,20 @@ def compile_director_annotation(
         )
     except TrajectoryPromptError as exc:
         raise DirectorAnnotationError(f"cannot compile trajectory prompt: {exc}") from exc
+    try:
+        restyle_prompt = compile_restyle_prompt(
+            profile=expected["restyle_profile"],
+            trajectory_prompt=trajectory_prompt,
+            duration_seconds=expected["duration_seconds"],
+        )
+    except RestylePromptError as exc:
+        raise DirectorAnnotationError(f"cannot compile restyle prompt: {exc}") from exc
     return CompiledDirectorAnnotation(
         actor_trajectory=actor_trajectory,
         camera_trajectory=tuple(cameras),
-        compiled_prompt=compiled_prompt,
+        trajectory_prompt=trajectory_prompt,
+        restyle_prompt=restyle_prompt,
+        compiled_prompt=trajectory_prompt,
         canonical_annotation=_canonical(normalized),
         camera_document=_canonical(camera_doc),
     )

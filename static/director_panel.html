@@ -13,6 +13,11 @@
   <section class="panel">
     <h2>完整 Blender Proxy 视频</h2>
     <video id="proxy" controls preload="metadata"></video>
+    <div class="row">
+      <label for="proxy-view">当前视图</label>
+      <select id="proxy-view"><option value="diagnostic">诊断视图（编辑默认）</option><option value="clay">中性粘土视图</option></select>
+    </div>
+    <p class="warning">只有中性粘土视图会送入生成；诊断视图仅用于轨迹和镜头检查。</p>
     <div class="boundary">
       <label for="frozen-boundary"><strong>锁定起点：</strong></label>
       <select id="frozen-boundary" required>
@@ -54,7 +59,8 @@
       <div class="field"><label>情绪</label><select id="mood"><option value="source_default">沿用原始设定</option><option value="warm">温暖</option><option value="neutral">中性</option><option value="tense">紧张</option></select></div>
     </div>
     <div class="actions"><button id="prompt-preview">预览自动 Prompt</button></div>
-    <textarea id="prompt-output" readonly placeholder="完成所有人物轨迹后点击“预览自动 Prompt”"></textarea>
+    <div class="field"><label>轨迹 Prompt（VACE 兼容输入）</label><textarea id="trajectory-prompt-output" readonly placeholder="完成所有人物轨迹后点击“预览自动 Prompt”"></textarea></div>
+    <div class="field"><label>真人重绘 Prompt</label><textarea id="restyle-prompt-output" readonly placeholder="由结构化人物档案和轨迹事实自动生成"></textarea></div>
     <p id="prompt-meta" class="hint">由本地确定性编译器生成，不调用 LLM/API。</p>
     <div class="actions"><button id="previous">← 上一个 K</button><button id="save-key">保存当前 K</button><button id="next">下一个 K →</button></div>
     <div class="actions"><button id="generate" class="render">生成下一版 Proxy <span hidden>Generate next proxy</span></button><button id="approve-button" class="approve">批准当前 Proxy <span hidden>Approve current proxy</span></button></div>
@@ -78,7 +84,7 @@
 </section>
 <script>
 'use strict';
-let session=null,current=0,mode=null,pollTimer=null,boundaryIndex=null;
+let session=null,current=0,mode=null,pollTimer=null,boundaryIndex=null,selectedProxyView='diagnostic';
 const frames=new Map(),plane=document.getElementById('plane'),ctx=plane.getContext('2d');
 const colors=['#f59e0b','#3b82f6','#a78bfa'];
 const $=id=>document.getElementById(id);
@@ -92,7 +98,9 @@ function locked(i){return boundaryIndex!==null&&i<=boundaryIndex;}
 function finite(v){return v!==''&&Number.isFinite(Number(v));}
 function cameraSource(i){return JSON.stringify(dataFor(i).camera)===JSON.stringify(session.inherited_keyframes[i].camera)?'inherited':'human_modified';}
 function refreshCameraSource(){const isLocked=locked(current);$('camera-source').textContent=boundaryIndex===null?'镜头来源：尚未选择锁定起点':isLocked?'镜头来源：锁定的当前 Proxy':cameraSource(current)==='inherited'?'镜头来源：来自当前 Proxy，可修改':'镜头来源：人工修改';}
-function invalidatePrompt(){if($('prompt-output').value){$('prompt-output').value='';$('prompt-meta').textContent='轨迹或镜头已变化，请重新预览。';}}
+function invalidatePrompt(){if($('trajectory-prompt-output').value||$('restyle-prompt-output').value){$('trajectory-prompt-output').value='';$('restyle-prompt-output').value='';$('prompt-meta').textContent='轨迹或镜头已变化，请重新预览。';}}
+function setProxySource(){if(!session)return;const media=session.current.media[selectedProxyView],url=selectedProxyView==='clay'?session.current.clay_url:session.current.diagnostic_url;$('proxy-view').value=selectedProxyView;$('proxy').src=url+'?sha='+media.decoded_pixel_sha256;}
+$('proxy-view').onchange=e=>{selectedProxyView=e.target.value;setProxySource();};
 function persistFields(){if(!session||locked(current))return;const d=dataFor(current);d.camera.position=d.camera.position||[null,null,null];d.camera.look_at=d.camera.look_at||[null,null,null];d.camera.position[2]=finite($('camera-z').value)?Number($('camera-z').value):null;d.camera.look_at[2]=finite($('look-z').value)?Number($('look-z').value):null;d.camera.focal_length_mm=finite($('focal').value)?Number($('focal').value):null;d.camera.shot_size=$('shot').value;d.camera.interpolation=$('interpolation').value;d.camera.roll_degrees=finite($('roll').value)?Number($('roll').value):null;}
 function loadFields(){const d=dataFor(current),c=d.camera||{},isLocked=locked(current);$('key-title').textContent=session.keyframes[current].id+' 导演参数'+(isLocked?'（已锁定）':'');$('camera-x').value=c.position&&c.position[0]!=null?Number(c.position[0]).toFixed(3):'';$('camera-y').value=c.position&&c.position[1]!=null?Number(c.position[1]).toFixed(3):'';$('camera-z').value=c.position&&c.position[2]!=null?c.position[2]:'';$('look-x').value=c.look_at&&c.look_at[0]!=null?Number(c.look_at[0]).toFixed(3):'';$('look-y').value=c.look_at&&c.look_at[1]!=null?Number(c.look_at[1]).toFixed(3):'';$('look-z').value=c.look_at&&c.look_at[2]!=null?c.look_at[2]:'';$('focal').value=c.focal_length_mm??'';$('shot').value=c.shot_size||'';$('interpolation').value=c.interpolation||'';$('roll').value=c.roll_degrees??'';refreshCameraSource();editableControls.forEach(id=>$(id).disabled=isLocked);renderTimeline();draw();}
 function missingFields(i){const d=dataFor(i),c=d.camera||{},missing=[];session.actors.forEach(a=>{if(!Array.isArray(d.actors[a]))missing.push(a+' 人物点')});if(!c.position||!Number.isFinite(c.position[0])||!Number.isFinite(c.position[1])||!Number.isFinite(c.position[2]))missing.push('摄像机位置 X/Y/Z');if(!c.look_at||!Number.isFinite(c.look_at[0])||!Number.isFinite(c.look_at[1])||!Number.isFinite(c.look_at[2]))missing.push('摄像机注视点 X/Y/Z');if(!Number.isFinite(c.focal_length_mm))missing.push('焦距');if(!c.shot_size)missing.push('景别');if(!c.interpolation)missing.push('插值方式');if(!Number.isFinite(c.roll_degrees))missing.push('画面倾斜 Roll');return missing;}
@@ -115,12 +123,12 @@ $('save-key').onclick=()=>{persistFields();const missing=missingFields(current);
 $('previous').onclick=()=>selectKey(current-1,true);$('next').onclick=()=>selectKey(current+1,true);
 function payloadFrame(i){const k=session.keyframes[i];if(locked(i))return{...clone(session.inherited_keyframes[i]),camera_source:'inherited'};const d=dataFor(i);return{id:k.id,t:k.t,actors:Object.fromEntries(session.actors.map(a=>[a,{x:d.actors[a][0],y:d.actors[a][1]}])),camera:clone(d.camera),camera_source:cameraSource(i)};}
 function buildPayload(){persistFields();if(boundaryIndex===null)throw new Error('请先选择锁定起点');const incomplete=session.keyframes.map((k,i)=>({key:k.id,missing:missingFields(i)})).filter(x=>x.missing.length);if(incomplete.length)throw new Error(incomplete.map(x=>x.key+' 还缺少：'+x.missing.join('、')).join('\n'));const author=$('author').value.trim();if(!author)throw new Error('标注人必填');return{schema_version:'1.0',author_id:author,iteration_id:session.next_iteration_id,parent_iteration_id:session.current.iteration_id,auto_filled_values:0,visual_style:$('visual-style').value,mood:$('mood').value,frozen_through_keyframe:'K'+boundaryIndex,inheritance_sha256:session.inheritance_sha256,inherited_locked_values:clone(session.inherited_keyframes.slice(0,boundaryIndex+1)),keyframes:session.keyframes.map((_,i)=>payloadFrame(i))};}
-$('prompt-preview').onclick=async()=>{try{const response=await fetch('/api/prompt-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())}),body=await response.json();if(!response.ok)throw new Error(body.error||'Prompt 预览失败');$('prompt-output').value=body.prompt;$('prompt-meta').textContent='编译器 '+body.prompt_compiler_version+' · SHA-256 '+body.sha256;}catch(e){$('status').textContent=e.message;}};
+$('prompt-preview').onclick=async()=>{try{const response=await fetch('/api/prompt-preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())}),body=await response.json();if(!response.ok)throw new Error(body.error||'Prompt 预览失败');$('trajectory-prompt-output').value=body.trajectory_prompt;$('restyle-prompt-output').value=body.restyle_prompt;$('prompt-meta').textContent='轨迹编译器 '+body.trajectory_compiler_version+' · 真人重绘编译器 '+body.restyle_compiler_version;}catch(e){$('status').textContent=e.message;}};
 ['visual-style','mood'].forEach(id=>$(id).addEventListener('input',invalidatePrompt));
 $('generate').onclick=async()=>{try{const response=await fetch('/api/iterations',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(buildPayload())});const body=await response.json();if(!response.ok)throw new Error(body.error||'提交失败');$('status').textContent='真实 Blender 作业已排队: '+body.job_id;$('generate').disabled=true;poll(body.job_id);}catch(e){$('status').textContent=e.message;}};
 async function poll(job){clearTimeout(pollTimer);const response=await fetch('/api/jobs/'+job),body=await response.json();$('status').textContent='Blender 状态: '+body.status+(body.error?'\n'+body.error:'');if(body.status==='succeeded'){await loadSession();return}if(body.status==='failed'){$('generate').disabled=false;return}pollTimer=setTimeout(()=>poll(job),1200);}
 $('approve-button').onclick=async()=>{const author=$('author').value.trim();if(!author){$('status').textContent='标注人必填';return}if(!confirm('确认已经检查完整视频，并锁定 '+session.current.iteration_id+' 给 VACE？'))return;const response=await fetch('/api/iterations/'+session.current.iteration_id+'/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author_id:author})}),body=await response.json();$('status').textContent=response.ok?'已批准，VACE 门禁已开放':body.error;await loadSession();};
-async function loadSession(){session=await (await fetch('/api/session')).json();$('version').textContent=session.story_id+' · '+session.current.iteration_id;$('approval').textContent=session.approved_iteration?'已批准 '+session.approved_iteration:'未批准';$('proxy').src=session.current.diagnostic_url+'?sha='+session.current.media.diagnostic.decoded_pixel_sha256;$('approve-button').disabled=session.current.iteration_id==='D0'||Boolean(session.approved_iteration);$('generate').disabled=Boolean(session.approved_iteration)||Boolean(session.pending_job&&session.pending_job.status!=='failed');$('frozen-boundary').value='';boundaryIndex=null;frames.clear();renderModes();loadFields();if(session.pending_job&&!['succeeded','failed'].includes(session.pending_job.status))poll(session.pending_job.job_id);}
+async function loadSession(){session=await (await fetch('/api/session')).json();$('version').textContent=session.story_id+' · '+session.current.iteration_id;$('approval').textContent=session.approved_iteration?'已批准 '+session.approved_iteration:'未批准';setProxySource();$('approve-button').disabled=session.current.iteration_id==='D0'||Boolean(session.approved_iteration);$('generate').disabled=Boolean(session.approved_iteration)||Boolean(session.pending_job&&session.pending_job.status!=='failed');$('frozen-boundary').value='';boundaryIndex=null;frames.clear();renderModes();loadFields();if(session.pending_job&&!['succeeded','failed'].includes(session.pending_job.status))poll(session.pending_job.job_id);}
 loadSession().catch(e=>$('status').textContent=e.message);
 </script>
 </body></html>
