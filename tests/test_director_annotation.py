@@ -15,7 +15,7 @@ from videoactagent.director_annotation import (
 
 
 def contract() -> dict:
-    return {
+    value = {
         "story_id": "station_reunion",
         "shot_id": "whole",
         "duration_seconds": 5.0,
@@ -29,36 +29,48 @@ def contract() -> dict:
             {"id": "K4", "t": 1.0},
         ],
     }
+    inherited = payload_keyframes(value["keyframes"])
+    value["inheritance_sha256"] = "a" * 64
+    value["inherited_keyframes"] = inherited
+    return value
+
+
+def payload_keyframes(keys: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": item["id"],
+            "t": item["t"],
+            "actors": {
+                "actor_a": {"x": 0.16 + index * 0.11, "y": 0.5},
+                "actor_b": {"x": 0.67, "y": 0.5},
+            },
+            "camera": {
+                "position": [0.0 + index * 0.1, -10.0, 6.0],
+                "look_at": [0.0 + index * 0.1, 0.0, 1.0],
+                "focal_length_mm": 35.0 + index,
+                "shot_size": "wide",
+                "interpolation": "linear",
+                "roll_degrees": 0.0,
+            },
+            "visible_state": f"K{index} visible station state.",
+        }
+        for index, item in enumerate(keys)
+    ]
 
 
 def payload() -> dict:
-    keys = contract()["keyframes"]
+    expected = contract()
+    frames = payload_keyframes(expected["keyframes"])
     return {
         "schema_version": "1.0",
         "author_id": "sy",
         "iteration_id": "D1",
         "parent_iteration_id": "D0",
         "auto_filled_values": 0,
-        "keyframes": [
-            {
-                "id": item["id"],
-                "t": item["t"],
-                "actors": {
-                    "actor_a": {"x": 0.16 + index * 0.11, "y": 0.5},
-                    "actor_b": {"x": 0.67, "y": 0.5},
-                },
-                "camera": {
-                    "position": [0.0 + index * 0.1, -10.0, 6.0],
-                    "look_at": [0.0 + index * 0.1, 0.0, 1.0],
-                    "focal_length_mm": 35.0 + index,
-                    "shot_size": "wide",
-                    "interpolation": "linear",
-                    "roll_degrees": 0.0,
-                },
-                "visible_state": f"K{index} visible station state.",
-            }
-            for index, item in enumerate(keys)
-        ],
+        "frozen_through_keyframe": "K0",
+        "inheritance_sha256": expected["inheritance_sha256"],
+        "inherited_locked_values": deepcopy(frames[:1]),
+        "keyframes": frames,
     }
 
 
@@ -134,6 +146,40 @@ class DirectorAnnotationTests(unittest.TestCase):
         unknown["keyframes"][0]["surprise"] = True
         with self.assertRaisesRegex(DirectorAnnotationError, "fields"):
             compile_director_annotation(unknown, contract())
+
+    def test_k2_boundary_accepts_exact_locked_prefix(self) -> None:
+        value = payload()
+        value["frozen_through_keyframe"] = "K2"
+        value["inherited_locked_values"] = deepcopy(contract()["inherited_keyframes"][:3])
+        compile_director_annotation(value, contract())
+
+    def test_k2_boundary_rejects_changed_locked_actor(self) -> None:
+        value = payload()
+        value["frozen_through_keyframe"] = "K2"
+        value["inherited_locked_values"] = deepcopy(contract()["inherited_keyframes"][:3])
+        value["keyframes"][1]["actors"]["actor_a"]["x"] += 0.01
+        with self.assertRaisesRegex(DirectorAnnotationError, "locked inherited"):
+            compile_director_annotation(value, contract())
+
+    def test_k2_boundary_rejects_changed_boundary_camera_or_prompt(self) -> None:
+        for field in ("camera", "visible_state"):
+            with self.subTest(field=field):
+                value = payload()
+                value["frozen_through_keyframe"] = "K2"
+                value["inherited_locked_values"] = deepcopy(contract()["inherited_keyframes"][:3])
+                if field == "camera":
+                    value["keyframes"][2]["camera"]["roll_degrees"] = 2.0
+                else:
+                    value["keyframes"][2]["visible_state"] = "changed"
+                with self.assertRaisesRegex(DirectorAnnotationError, "locked inherited"):
+                    compile_director_annotation(value, contract())
+
+    def test_k4_cannot_be_frozen_boundary(self) -> None:
+        value = payload()
+        value["frozen_through_keyframe"] = "K4"
+        value["inherited_locked_values"] = deepcopy(contract()["inherited_keyframes"])
+        with self.assertRaisesRegex(DirectorAnnotationError, "editable suffix"):
+            compile_director_annotation(value, contract())
 
 
 if __name__ == "__main__":

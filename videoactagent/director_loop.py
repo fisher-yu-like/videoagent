@@ -293,11 +293,123 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
 def _contract(workspace: Mapping[str, Any]) -> dict[str, Any]:
     doc = workspace["document"]
     timeline = doc["timeline"]
+    inheritance = derive_inherited_keyframes(workspace)
     return {
         "story_id": doc["story_id"], "shot_id": doc["shot_id"],
         "duration_seconds": timeline["duration_seconds"],
         "sample_count": timeline["frame_count"], "actors": doc["actors"],
         "keyframes": [{"id": item["id"], "t": item["t"]} for item in doc["keyframes"]],
+        "inheritance_sha256": inheritance["inheritance_sha256"],
+        "inherited_keyframes": inheritance["keyframes"],
+    }
+
+
+def _lerp(start: object, end: object, t: float, label: str) -> list[float]:
+    if (
+        not isinstance(start, list) or not isinstance(end, list)
+        or len(start) != 3 or len(end) != 3
+        or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in start + end)
+    ):
+        raise DirectorLoopError(f"{label} must contain two 3D points")
+    return [round(float(a) + (float(b) - float(a)) * t, 12) for a, b in zip(start, end)]
+
+
+def derive_inherited_keyframes(workspace: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive the exact, source-bound K0--K4 state inherited by the next revision."""
+    root = workspace["root"]
+    doc = workspace["document"]
+    state = workspace["state"]
+    directory, current = _iteration(root, state["current_iteration"])
+    if current.get("human_authored") is True:
+        annotation_path = _verify_record(
+            root, current.get("inputs", {}).get("annotation"), "current annotation"
+        )
+        annotation = _read(annotation_path, "current annotation")
+        frames = annotation.get("keyframes")
+        if not isinstance(frames, list) or len(frames) != 5:
+            raise DirectorLoopError("current annotation must contain K0--K4")
+        inherited = json.loads(json.dumps(frames))
+        source = {
+            "iteration": _record(directory / "iteration.json", root),
+            "annotation": _record(annotation_path, root),
+        }
+    else:
+        shotscript_path = _verify_record(root, doc["source"]["shotscript"], "ShotScript")
+        semantic_path = _verify_record(root, doc["source"]["semantic_plan"], "semantic plan")
+        script = _read(shotscript_path, "ShotScript")
+        semantic = _read(semantic_path, "semantic plan")
+        shots = script.get("shots")
+        if not isinstance(shots, list) or len(shots) != 1 or not isinstance(shots[0], Mapping):
+            raise DirectorLoopError("director loop requires one whole-shot ShotScript")
+        shot = shots[0]
+        raw_actors = shot.get("actors")
+        camera = shot.get("camera")
+        bounds = doc["world_bounds"]
+        if not isinstance(raw_actors, list) or not isinstance(camera, Mapping):
+            raise DirectorLoopError("ShotScript actors or camera are invalid")
+        actor_specs = {
+            item.get("id"): item for item in raw_actors if isinstance(item, Mapping)
+        }
+        if set(actor_specs) != set(doc["actors"]):
+            raise DirectorLoopError("ShotScript actors differ from director manifest")
+        visible = {
+            item.get("id"): item.get("visible_state")
+            for item in semantic.get("semantic_keyframes", []) if isinstance(item, Mapping)
+        }
+        inherited = []
+        for frame in doc["keyframes"]:
+            t = float(frame["t"])
+            world_positions = {
+                actor: _lerp(actor_specs[actor].get("start"), actor_specs[actor].get("end"), t, actor)
+                for actor in doc["actors"]
+            }
+            actor_points = {
+                actor: {
+                    "x": round((point[0] - bounds[0]) / (bounds[1] - bounds[0]), 12),
+                    "y": round((bounds[3] - point[1]) / (bounds[3] - bounds[2]), 12),
+                }
+                for actor, point in world_positions.items()
+            }
+            camera_position = _lerp(camera.get("start"), camera.get("end"), t, "camera")
+            target = camera.get("look_at")
+            if target == "fixed_actors_midpoint":
+                positions = [
+                    _lerp(actor_specs[a].get("start"), actor_specs[a].get("start"), 0.0, a)
+                    for a in doc["actors"]
+                ]
+            elif target == "actors_midpoint":
+                positions = list(world_positions.values())
+            elif target in world_positions:
+                positions = [world_positions[target]]
+            else:
+                raise DirectorLoopError("ShotScript camera look_at is unsupported")
+            look_at = [
+                round(sum(point[axis] for point in positions) / len(positions), 12)
+                for axis in range(2)
+            ] + [1.25]
+            description = visible.get(frame["id"])
+            if not isinstance(description, str) or not description.strip():
+                raise DirectorLoopError(f"semantic visible state is missing for {frame['id']}")
+            inherited.append({
+                "id": frame["id"], "t": t, "actors": actor_points,
+                "camera": {
+                    "position": camera_position, "look_at": look_at,
+                    "focal_length_mm": float(camera.get("focal_length_mm")),
+                    "shot_size": camera.get("shot_size"), "interpolation": "linear",
+                    "roll_degrees": 0.0,
+                },
+                "visible_state": description.strip(),
+            })
+        source = {
+            "iteration": _record(directory / "iteration.json", root),
+            "shotscript": _record(shotscript_path, root),
+            "semantic_plan": _record(semantic_path, root),
+        }
+    binding = {"source": source, "keyframes": inherited}
+    return {
+        "keyframes": inherited,
+        "inheritance_sha256": hashlib.sha256(_json_bytes(binding)).hexdigest(),
+        "source": source,
     }
 
 
@@ -474,6 +586,7 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
     doc = workspace["document"]
     state = workspace["state"]
     _directory, current = _iteration(root, state["current_iteration"])
+    inheritance = derive_inherited_keyframes(workspace)
     result = {
         "schema_version": SCHEMA_VERSION, "story_id": doc["story_id"],
         "shot_id": doc["shot_id"], "actors": doc["actors"],
@@ -489,6 +602,9 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         "next_iteration_id": f"D{state['next_iteration']}",
         "approved_iteration": state["approved_iteration"],
         "human_values_present": state["current_iteration"] != "D0",
+        "inherited_keyframes": inheritance["keyframes"],
+        "inheritance_sha256": inheritance["inheritance_sha256"],
+        "inheritance_source": inheritance["source"],
     }
     if current.get("human_authored") is True:
         annotation_path = _verify_record(

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
 
-from tests.test_director_annotation import payload
 from videoactagent.director_loop import (
     DirectorLoopError,
     approve_iteration,
@@ -31,6 +31,23 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertTrue(BLENDER.is_file(), f"missing Blender: {BLENDER}")
         return prepare_workspace(BUNDLE, BLENDER, Path(root) / "director")
 
+    def director_payload(self, manifest: Path, boundary: str = "K0") -> dict:
+        session = session_document(manifest)
+        boundary_index = int(boundary[1:])
+        return {
+            "schema_version": "1.0",
+            "author_id": "sy",
+            "iteration_id": session["next_iteration_id"],
+            "parent_iteration_id": session["current"]["iteration_id"],
+            "auto_filled_values": 0,
+            "frozen_through_keyframe": boundary,
+            "inheritance_sha256": session["inheritance_sha256"],
+            "inherited_locked_values": deepcopy(
+                session["inherited_keyframes"][:boundary_index + 1]
+            ),
+            "keyframes": deepcopy(session["inherited_keyframes"]),
+        }
+
     def test_prepare_exposes_complete_real_d0_video_and_five_markers(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             manifest = self.make_workspace(root)
@@ -42,12 +59,21 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertEqual(session["current"]["diagnostic_url"], "/media/D0/diagnostic.mp4")
         self.assertEqual(session["current"]["media"]["diagnostic"]["frame_count"], 120)
         self.assertEqual([item["id"] for item in session["keyframes"]], [f"K{i}" for i in range(5)])
+        self.assertEqual(len(session["inherited_keyframes"]), 5)
+        self.assertEqual(
+            session["inherited_keyframes"][0]["actors"]["actor_a"],
+            {"x": 0.16, "y": 0.5},
+        )
+        self.assertEqual(
+            session["inherited_keyframes"][0]["camera"]["position"],
+            [0.0, -10.0, 6.0],
+        )
         self.assertFalse(session["human_values_present"])
 
     def test_prepare_iteration_writes_only_human_inputs_and_queued_job(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             manifest = self.make_workspace(root)
-            job_path = prepare_iteration(manifest, payload())
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
             job = json.loads(job_path.read_text(encoding="utf-8"))
             iteration = job_path.parent
 
@@ -63,7 +89,7 @@ class DirectorLoopTests(unittest.TestCase):
     def test_approval_rejects_unrendered_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             manifest = self.make_workspace(root)
-            prepare_iteration(manifest, payload())
+            prepare_iteration(manifest, self.director_payload(manifest))
             with self.assertRaisesRegex(DirectorLoopError, "succeeded"):
                 approve_iteration(manifest, "D1", "sy")
 
@@ -71,19 +97,24 @@ class DirectorLoopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             manifest = self.make_workspace(root)
             verify_workspace(manifest)
-            job = prepare_iteration(manifest, payload())
+            job = prepare_iteration(manifest, self.director_payload(manifest))
             d0 = manifest.parent / "iterations" / "D0"
             publish_iteration(
                 manifest, job,
                 d0 / "diagnostic.mp4", d0 / "clay.mp4",
             )
             approval = approve_iteration(manifest, "D1", "sy")
+            inherited = session_document(manifest)["inherited_keyframes"]
             exported = export_approved_iteration(manifest)
 
             self.assertEqual(exported["iteration_id"], "D1")
             self.assertEqual(
                 exported["approval"]["sha256"],
                 hashlib.sha256(approval.read_bytes()).hexdigest(),
+            )
+            self.assertEqual(
+                inherited,
+                json.loads((manifest.parent / exported["annotation"]["path"]).read_text(encoding="utf-8"))["keyframes"],
             )
             diagnostic = manifest.parent / exported["diagnostic"]["path"]
             diagnostic.write_bytes(diagnostic.read_bytes() + b"tamper")
@@ -117,7 +148,7 @@ class DirectorLoopTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             manifest = self.make_workspace(root)
-            job = prepare_iteration(manifest, payload())
+            job = prepare_iteration(manifest, self.director_payload(manifest))
             d0 = manifest.parent / "iterations" / "D0"
             publish_iteration(manifest, job, d0 / "diagnostic.mp4", d0 / "clay.mp4")
             approve_iteration(manifest, "D1", "sy")

@@ -20,12 +20,14 @@ from videoactagent.trajectory import (
 
 SCHEMA_VERSION = "1.0"
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ITERATION = re.compile(r"^D(?:0|[1-9][0-9]*)$")
 _SHOT_SIZES = frozenset({"extreme_wide", "wide", "medium", "close", "extreme_close"})
 _INTERPOLATIONS = frozenset({"linear", "bezier", "constant"})
 _PAYLOAD_FIELDS = frozenset({
     "schema_version", "author_id", "iteration_id", "parent_iteration_id",
-    "auto_filled_values", "keyframes",
+    "auto_filled_values", "frozen_through_keyframe", "inheritance_sha256",
+    "inherited_locked_values", "keyframes",
 })
 _KEYFRAME_FIELDS = frozenset({"id", "t", "actors", "camera", "visible_state"})
 _CAMERA_FIELDS = frozenset({
@@ -118,9 +120,65 @@ def _canonical(value: object) -> bytes:
         raise DirectorAnnotationError(f"annotation is not canonical JSON: {exc}") from exc
 
 
+def _normalize_frame(
+    raw: object, schedule: Mapping[str, object], actors: Sequence[str], label: str
+) -> dict[str, Any]:
+    if not isinstance(raw, Mapping):
+        raise DirectorAnnotationError(f"{label} must be an object")
+    _exact(raw, _KEYFRAME_FIELDS, label)
+    time = _unit(raw.get("t"), f"{label}.t")
+    if raw.get("id") != schedule["id"] or time != schedule["t"]:
+        raise DirectorAnnotationError("annotation keyframe schedule differs from contract")
+    actors_value = raw.get("actors")
+    if not isinstance(actors_value, Mapping) or set(actors_value) != set(actors):
+        raise DirectorAnnotationError(f"{label}.actors must contain every actor exactly once")
+    normalized_actors: dict[str, dict[str, float]] = {}
+    for actor in actors:
+        point = actors_value[actor]
+        if not isinstance(point, Mapping) or set(point) != {"x", "y"}:
+            raise DirectorAnnotationError(f"{label}.{actor} point fields are invalid")
+        normalized_actors[actor] = {
+            "x": _unit(point.get("x"), f"{label}.{actor}.x"),
+            "y": _unit(point.get("y"), f"{label}.{actor}.y"),
+        }
+    camera_value = raw.get("camera")
+    if not isinstance(camera_value, Mapping):
+        raise DirectorAnnotationError(f"{label}.camera is required")
+    _exact(camera_value, _CAMERA_FIELDS, f"{label}.camera")
+    position = _vector3(camera_value.get("position"), f"{label}.camera.position")
+    look_at = _vector3(camera_value.get("look_at"), f"{label}.camera.look_at")
+    if position == look_at:
+        raise DirectorAnnotationError(f"{label}.camera.look_at must differ from position")
+    focal = _number(camera_value.get("focal_length_mm"), f"{label}.camera.focal_length_mm")
+    if not 1.0 <= focal <= 300.0:
+        raise DirectorAnnotationError(f"{label}.camera.focal_length_mm must be in [1, 300]")
+    shot_size = camera_value.get("shot_size")
+    if shot_size not in _SHOT_SIZES:
+        raise DirectorAnnotationError(f"{label}.camera.shot_size is invalid")
+    interpolation = camera_value.get("interpolation")
+    if interpolation not in _INTERPOLATIONS:
+        raise DirectorAnnotationError(f"{label}.camera.interpolation is invalid")
+    roll = _number(camera_value.get("roll_degrees"), f"{label}.camera.roll_degrees")
+    if not -180.0 <= roll <= 180.0:
+        raise DirectorAnnotationError(f"{label}.camera.roll_degrees must be in [-180, 180]")
+    visible = raw.get("visible_state")
+    if not isinstance(visible, str) or not visible.strip():
+        raise DirectorAnnotationError(f"{label}.visible_state is required")
+    return {
+        "id": schedule["id"], "t": time, "actors": normalized_actors,
+        "camera": {
+            "position": list(position), "look_at": list(look_at),
+            "focal_length_mm": focal, "shot_size": shot_size,
+            "interpolation": interpolation, "roll_degrees": roll,
+        },
+        "visible_state": visible.strip(),
+    }
+
+
 def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
     required = {
-        "story_id", "shot_id", "duration_seconds", "sample_count", "actors", "keyframes"
+        "story_id", "shot_id", "duration_seconds", "sample_count", "actors", "keyframes",
+        "inheritance_sha256", "inherited_keyframes",
     }
     if set(value) != required:
         raise DirectorAnnotationError("director contract fields are invalid")
@@ -153,9 +211,20 @@ def _contract(value: Mapping[str, Any]) -> dict[str, Any]:
     times = [frame["t"] for frame in frames]
     if times != sorted(times) or len(set(times)) != len(times) or times[0] != 0.0 or times[-1] != 1.0:
         raise DirectorAnnotationError("contract keyframe schedule is invalid")
+    inheritance_sha256 = value.get("inheritance_sha256")
+    if not isinstance(inheritance_sha256, str) or not _SHA256.fullmatch(inheritance_sha256):
+        raise DirectorAnnotationError("contract inheritance_sha256 is invalid")
+    inherited_value = value.get("inherited_keyframes")
+    if not isinstance(inherited_value, list) or len(inherited_value) != 5:
+        raise DirectorAnnotationError("contract inherited_keyframes must contain K0--K4")
+    inherited = [
+        _normalize_frame(raw, schedule, actors, f"contract inherited K{index}")
+        for index, (raw, schedule) in enumerate(zip(inherited_value, frames))
+    ]
     return {
         "story_id": story_id, "shot_id": shot_id, "duration_seconds": duration,
         "sample_count": sample_count, "actors": actors, "keyframes": frames,
+        "inheritance_sha256": inheritance_sha256, "inherited_keyframes": inherited,
     }
 
 
@@ -182,6 +251,21 @@ def compile_director_annotation(
         raise DirectorAnnotationError("auto_filled_values must be exactly 0")
 
     expected = _contract(contract)
+    boundary = payload.get("frozen_through_keyframe")
+    if boundary not in {"K0", "K1", "K2", "K3"}:
+        raise DirectorAnnotationError("frozen boundary must leave an editable suffix (K0--K3)")
+    boundary_index = int(str(boundary)[1:])
+    if payload.get("inheritance_sha256") != expected["inheritance_sha256"]:
+        raise DirectorAnnotationError("inheritance_sha256 differs from director contract")
+    inherited_value = payload.get("inherited_locked_values")
+    if not isinstance(inherited_value, list) or len(inherited_value) != boundary_index + 1:
+        raise DirectorAnnotationError("inherited_locked_values must end at the frozen boundary")
+    submitted_inherited = [
+        _normalize_frame(raw, expected["keyframes"][index], expected["actors"], f"inherited K{index}")
+        for index, raw in enumerate(inherited_value)
+    ]
+    if submitted_inherited != expected["inherited_keyframes"][:boundary_index + 1]:
+        raise DirectorAnnotationError("locked inherited values differ from their source")
     frames_value = payload.get("keyframes")
     if not isinstance(frames_value, list) or len(frames_value) != 5:
         raise DirectorAnnotationError("annotation must contain exactly K0--K4")
@@ -191,45 +275,20 @@ def compile_director_annotation(
     prompts: list[str] = []
     normalized_frames = []
     for index, (raw, schedule) in enumerate(zip(frames_value, expected["keyframes"])):
-        if not isinstance(raw, Mapping):
-            raise DirectorAnnotationError(f"K{index} must be an object")
-        _exact(raw, _KEYFRAME_FIELDS, f"K{index}")
-        time = _unit(raw.get("t"), f"K{index}.t")
-        if raw.get("id") != schedule["id"] or time != schedule["t"]:
-            raise DirectorAnnotationError("annotation keyframe schedule differs from contract")
-        actors_value = raw.get("actors")
-        if not isinstance(actors_value, Mapping) or set(actors_value) != set(expected["actors"]):
-            raise DirectorAnnotationError(f"K{index}.actors must contain every actor exactly once")
-        normalized_actors: dict[str, dict[str, float]] = {}
+        normalized = _normalize_frame(raw, schedule, expected["actors"], f"K{index}")
+        time = normalized["t"]
         for actor in expected["actors"]:
-            point = actors_value[actor]
-            if not isinstance(point, Mapping) or set(point) != {"x", "y"}:
-                raise DirectorAnnotationError(f"K{index}.{actor} point fields are invalid")
-            x = _unit(point.get("x"), f"K{index}.{actor}.x")
-            y = _unit(point.get("y"), f"K{index}.{actor}.y")
-            actor_points[actor].append(TrajectoryPoint(t=time, x=x, y=y, visible=True))
-            normalized_actors[actor] = {"x": x, "y": y}
-
-        camera_value = raw.get("camera")
-        if not isinstance(camera_value, Mapping):
-            raise DirectorAnnotationError(f"K{index}.camera is required")
-        _exact(camera_value, _CAMERA_FIELDS, f"K{index}.camera")
-        position = _vector3(camera_value.get("position"), f"K{index}.camera.position")
-        look_at = _vector3(camera_value.get("look_at"), f"K{index}.camera.look_at")
-        if position == look_at:
-            raise DirectorAnnotationError(f"K{index}.camera.look_at must differ from position")
-        focal = _number(camera_value.get("focal_length_mm"), f"K{index}.camera.focal_length_mm")
-        if not 1.0 <= focal <= 300.0:
-            raise DirectorAnnotationError(f"K{index}.camera.focal_length_mm must be in [1, 300]")
-        shot_size = camera_value.get("shot_size")
-        if shot_size not in _SHOT_SIZES:
-            raise DirectorAnnotationError(f"K{index}.camera.shot_size is invalid")
-        interpolation = camera_value.get("interpolation")
-        if interpolation not in _INTERPOLATIONS:
-            raise DirectorAnnotationError(f"K{index}.camera.interpolation is invalid")
-        roll = _number(camera_value.get("roll_degrees"), f"K{index}.camera.roll_degrees")
-        if not -180.0 <= roll <= 180.0:
-            raise DirectorAnnotationError(f"K{index}.camera.roll_degrees must be in [-180, 180]")
+            point = normalized["actors"][actor]
+            actor_points[actor].append(TrajectoryPoint(
+                t=time, x=point["x"], y=point["y"], visible=True
+            ))
+        camera_value = normalized["camera"]
+        position = tuple(camera_value["position"])
+        look_at = tuple(camera_value["look_at"])
+        focal = camera_value["focal_length_mm"]
+        shot_size = camera_value["shot_size"]
+        interpolation = camera_value["interpolation"]
+        roll = camera_value["roll_degrees"]
         camera = CameraKeyframe(
             keyframe_id=schedule["id"], t=time, position=position, look_at=look_at,
             focal_length_mm=focal, shot_size=str(shot_size),
@@ -237,23 +296,15 @@ def compile_director_annotation(
         )
         cameras.append(camera)
 
-        visible = raw.get("visible_state")
-        if not isinstance(visible, str) or not visible.strip():
-            raise DirectorAnnotationError(f"K{index}.visible_state is required")
-        visible = visible.strip()
+        visible = normalized["visible_state"]
         prompts.append(
             f"{schedule['id']} (t={time:g}): {visible} Camera: {shot_size}, "
             f"{focal:g} mm, position {list(position)}, look_at {list(look_at)}."
         )
-        normalized_frames.append({
-            "id": schedule["id"], "t": time, "actors": normalized_actors,
-            "camera": {
-                "position": list(position), "look_at": list(look_at),
-                "focal_length_mm": focal, "shot_size": shot_size,
-                "interpolation": interpolation, "roll_degrees": roll,
-            },
-            "visible_state": visible,
-        })
+        normalized_frames.append(normalized)
+
+    if normalized_frames[:boundary_index + 1] != expected["inherited_keyframes"][:boundary_index + 1]:
+        raise DirectorAnnotationError("locked inherited keyframes were modified")
 
     tracks = tuple(
         TrajectoryTrack(
@@ -270,7 +321,9 @@ def compile_director_annotation(
     normalized = {
         "schema_version": SCHEMA_VERSION, "author_id": author.strip(),
         "iteration_id": iteration, "parent_iteration_id": parent,
-        "auto_filled_values": 0, "keyframes": normalized_frames,
+        "auto_filled_values": 0, "frozen_through_keyframe": boundary,
+        "inheritance_sha256": expected["inheritance_sha256"],
+        "inherited_locked_values": submitted_inherited, "keyframes": normalized_frames,
     }
     camera_doc = {
         "schema_version": SCHEMA_VERSION, "scene_id": expected["story_id"],
