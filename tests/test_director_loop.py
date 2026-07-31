@@ -805,6 +805,82 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertFalse((iteration / "approval.json").exists())
             self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
 
+    def test_mutated_staged_media_backups_cannot_corrupt_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            diagnostic_path = job_path.parent / "diagnostic.mp4"
+            clay_path = job_path.parent / "clay.mp4"
+            diagnostic_before = b"pre-existing diagnostic bytes\n"
+            clay_before = b"pre-existing clay bytes\n"
+            diagnostic_path.write_bytes(diagnostic_before)
+            clay_path.write_bytes(clay_before)
+            job_before = job_path.read_bytes()
+            state_before = state_path.read_bytes()
+            job = json.loads(job_before)
+            input_paths = {
+                name: job_path.parent / record["path"]
+                for name, record in job["inputs"].items()
+            }
+            input_bytes = {name: path.read_bytes() for name, path in input_paths.items()}
+            d0 = manifest.parent / "iterations" / "D0"
+            real_atomic_copy = director_loop_module._atomic_copy
+            real_verify = director_loop_module.verify_workspace
+            mutated = False
+            verifications = 0
+
+            def mutate_media_backups(source: Path, target: Path) -> None:
+                nonlocal mutated
+                if not mutated and ".publish-" in source.as_posix():
+                    staging = next(
+                        parent for parent in source.parents
+                        if parent.name.startswith(".publish-")
+                    )
+                    media_backup = staging / "original" / "media"
+                    media_target = media_backup if media_backup.exists() else staging / "media"
+                    (media_target / "diagnostic.mp4").write_bytes(
+                        b"forged diagnostic staging bytes\n"
+                    )
+                    (media_target / "clay.mp4").write_bytes(
+                        b"forged clay staging bytes\n"
+                    )
+                    mutated = True
+                real_atomic_copy(source, target)
+
+            def fail_final_verification(path: Path | str) -> dict:
+                nonlocal verifications
+                verifications += 1
+                if verifications == 2:
+                    raise DirectorLoopError("injected final verification failure")
+                return real_verify(path)
+
+            with (
+                mock.patch(
+                    "videoactagent.director_loop._atomic_copy",
+                    side_effect=mutate_media_backups,
+                ),
+                mock.patch(
+                    "videoactagent.director_loop.verify_workspace",
+                    side_effect=fail_final_verification,
+                ),
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "injected final verification"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            self.assertTrue(mutated)
+            self.assertEqual(diagnostic_path.read_bytes(), diagnostic_before)
+            self.assertEqual(clay_path.read_bytes(), clay_before)
+            self.assertEqual(job_path.read_bytes(), job_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            for name, path in input_paths.items():
+                self.assertEqual(path.read_bytes(), input_bytes[name], name)
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertFalse((job_path.parent / "approval.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))
         self.assertEqual(byte_range("bytes=10-19", 100), (10, 19, True))

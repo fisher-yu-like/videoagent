@@ -812,13 +812,18 @@ def _verify_human_iteration_semantics(
             raise DirectorLoopError(f"{iteration_id} {style} semantic media mismatch")
 
 
-def _backup_if_present(path: Path, backup: Path, label: str) -> Path | None:
+def _snapshot_existing_bytes(path: Path, label: str) -> bytes | None:
     if not path.exists():
         return None
     if not path.is_file():
         raise DirectorLoopError(f"existing {label} is not a file")
-    _snapshot_source_file(path, backup, label)
-    return backup
+    try:
+        data = path.read_bytes()
+        if path.read_bytes() != data:
+            raise DirectorLoopError(f"existing {label} changed while snapshotting")
+    except OSError as exc:
+        raise DirectorLoopError(f"cannot snapshot existing {label}: {exc}") from exc
+    return data
 
 
 def _restore_publication(
@@ -1003,17 +1008,14 @@ def publish_iteration(
                 (target, data)
                 for target, _staged, data in input_snapshots.values()
             )
-            media_backup = staging / "original" / "media"
             backups.extend([
                 (
                     diagnostic,
-                    _backup_if_present(
-                        diagnostic, media_backup / "diagnostic.mp4", "diagnostic media"
-                    ),
+                    _snapshot_existing_bytes(diagnostic, "diagnostic media"),
                 ),
                 (
                     clay,
-                    _backup_if_present(clay, media_backup / "clay.mp4", "clay media"),
+                    _snapshot_existing_bytes(clay, "clay media"),
                 ),
                 (iteration_path, None),
                 (job_path, job_bytes),
