@@ -15,6 +15,7 @@ import unittest
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest import mock
 
 import imageio_ffmpeg
 
@@ -209,46 +210,49 @@ class ManualAnnotationTests(unittest.TestCase):
 
         session_dir = self.root / "annotation"
         session = prepare_workspace(self.index, session_dir, workspace=self.root)
-        payload = self._payload(session, "reference", "story_a", "draft")
+        payload = self._payload(session, "reference", "story_a")
         payload["target_id"] = "../story_a"
         with self.assertRaisesRegex(ValueError, "target_id must be a safe token"):
             save_annotation(session_dir, payload)
 
     def test_result_requires_hash_bound_reviewed_reference_annotation(self) -> None:
-        from videoactagent.manual_annotation import save_annotation
+        from videoactagent.manual_annotation import review_annotation, save_annotation
 
         session_dir = self.root / "annotation"
         session = __import__(
             "videoactagent.manual_annotation", fromlist=["prepare_workspace"]
         ).prepare_workspace(self.index, session_dir, workspace=self.root)
 
-        reference_payload = self._payload(session, "reference", "story_a", "reviewed")
-        reference = save_annotation(session_dir, reference_payload)
+        reference_payload = self._payload(session, "reference", "story_a")
+        draft_reference = save_annotation(session_dir, reference_payload)
+        self.assertEqual(draft_reference["annotation_status"], "draft")
+        reference = review_annotation(
+            session_dir, "reference", "story_a", reviewer_id="reviewer_1"
+        )
         reference_path = session_dir / "annotations" / "reference__story_a.json"
         reference_sha = _sha(reference_path)
         self.assertTrue(reference["eligible_for_paper"])
+        self.assertEqual(reference["review"]["reviewer_id"], "reviewer_1")
+        self.assertTrue(reference["review"]["reviewed_at_utc"].endswith("Z"))
 
-        result_payload = self._payload(
-            session, "result", "story_a__kling", "reviewed", reference_sha
-        )
+        result_payload = self._payload(session, "result", "story_a__kling", reference_sha)
         result_payload["actors"]["actor_a"][0]["identity"] = "ambiguous"
-        result = save_annotation(session_dir, result_payload)
+        draft_result = save_annotation(session_dir, result_payload)
+        result = review_annotation(
+            session_dir, "result", "story_a__kling", reviewer_id="reviewer_2"
+        )
         self.assertEqual(result["reference_annotation_sha256"], reference_sha)
-        self.assertFalse(result["actors"]["actor_a"][0]["geometry_eligible"])
+        self.assertFalse(draft_result["actors"]["actor_a"][0]["geometry_eligible"])
         self.assertTrue(result["actors"]["actor_b"][0]["geometry_eligible"])
         self.assertEqual(result["camera"]["category"], "pan_left")
         self.assertNotIn("pose", result["camera"])
         self.assertTrue(result["eligible_for_paper"])
 
-        wrong = self._payload(
-            session, "result", "story_a__kling", "reviewed", "f" * 64
-        )
+        wrong = self._payload(session, "result", "story_a__kling", "f" * 64)
         with self.assertRaisesRegex(ValueError, "reference annotation SHA-256 mismatch"):
             save_annotation(session_dir, wrong)
 
-        forbidden_pose = self._payload(
-            session, "result", "story_a__kling", "reviewed", reference_sha
-        )
+        forbidden_pose = self._payload(session, "result", "story_a__kling", reference_sha)
         forbidden_pose["camera"]["pose"] = [0, 0, 0]
         with self.assertRaisesRegex(ValueError, "category, intensity, and confidence only"):
             save_annotation(session_dir, forbidden_pose)
@@ -259,7 +263,7 @@ class ManualAnnotationTests(unittest.TestCase):
         session_dir = self.root / "annotation"
         session = prepare_workspace(self.index, session_dir, workspace=self.root)
         annotation = save_annotation(
-            session_dir, self._payload(session, "reference", "story_a", "draft")
+            session_dir, self._payload(session, "reference", "story_a")
         )
         self.assertFalse(annotation["eligible_for_paper"])
 
@@ -267,13 +271,17 @@ class ManualAnnotationTests(unittest.TestCase):
         from videoactagent.manual_annotation import (
             annotation_is_paper_eligible,
             prepare_workspace,
+            review_annotation,
             save_annotation,
         )
 
         session_dir = self.root / "annotation"
         session = prepare_workspace(self.index, session_dir, workspace=self.root)
-        reviewed = save_annotation(
-            session_dir, self._payload(session, "reference", "story_a", "reviewed")
+        save_annotation(
+            session_dir, self._payload(session, "reference", "story_a")
+        )
+        reviewed = review_annotation(
+            session_dir, "reference", "story_a", reviewer_id="reviewer_1"
         )
         current_reference = session_dir / "annotations" / "reference__story_a.json"
         reviewed_sha = _sha(current_reference)
@@ -281,18 +289,19 @@ class ManualAnnotationTests(unittest.TestCase):
         self.assertTrue(snapshot.is_file())
         self.assertEqual(_sha(snapshot), reviewed_sha)
 
-        result = save_annotation(
+        save_annotation(
             session_dir,
-            self._payload(
-                session, "result", "story_a__kling", "reviewed", reviewed_sha
-            ),
+            self._payload(session, "result", "story_a__kling", reviewed_sha),
+        )
+        result = review_annotation(
+            session_dir, "result", "story_a__kling", reviewer_id="reviewer_2"
         )
         result_path = session_dir / "annotations" / "result__story_a__kling.json"
         self.assertTrue(result["eligible_for_paper"])
         self.assertTrue(annotation_is_paper_eligible(session_dir, result_path))
 
         save_annotation(
-            session_dir, self._payload(session, "reference", "story_a", "draft")
+            session_dir, self._payload(session, "reference", "story_a")
         )
         self.assertEqual(
             json.loads(current_reference.read_text(encoding="utf-8"))["annotation_status"],
@@ -301,6 +310,121 @@ class ManualAnnotationTests(unittest.TestCase):
         self.assertEqual(_sha(snapshot), reviewed_sha)
         self.assertTrue(annotation_is_paper_eligible(session_dir, result_path))
         self.assertEqual(reviewed["annotation_status"], "reviewed")
+
+    def test_first_save_cannot_self_declare_reviewed_and_review_requires_identity(self) -> None:
+        from videoactagent.manual_annotation import (
+            prepare_workspace,
+            review_annotation,
+            save_annotation,
+        )
+
+        session_dir = self.root / "annotation"
+        session = prepare_workspace(self.index, session_dir, workspace=self.root)
+        payload = self._payload(session, "reference", "story_a")
+        payload["annotation_status"] = "reviewed"
+        with self.assertRaisesRegex(ValueError, "first annotation save must be draft"):
+            save_annotation(session_dir, payload)
+        payload["annotation_status"] = "draft"
+        save_annotation(session_dir, payload)
+        with self.assertRaisesRegex(ValueError, "reviewer_id"):
+            review_annotation(session_dir, "reference", "story_a", reviewer_id="  ")
+
+    def test_paper_eligibility_rejects_orphan_and_tampered_annotations(self) -> None:
+        from videoactagent.manual_annotation import annotation_is_paper_eligible
+
+        session_dir, result_path = self._reviewed_result()
+        original = result_path.read_bytes()
+        value = json.loads(original)
+        orphan = session_dir / "annotations" / "orphan.json"
+        orphan.write_bytes(original)
+        self.assertFalse(annotation_is_paper_eligible(session_dir, orphan))
+
+        manifest_path = session_dir / "session_manifest.json"
+        manifest_bytes = manifest_path.read_bytes()
+        manifest_path.write_bytes(manifest_bytes + b" ")
+        self.assertFalse(annotation_is_paper_eligible(session_dir, result_path))
+        manifest_path.write_bytes(manifest_bytes)
+
+        mutations = (
+            lambda item: item.__setitem__("session_manifest_sha256", "0" * 64),
+            lambda item: item.__setitem__("video_sha256", "0" * 64),
+            lambda item: item["actors"]["actor_a"][0].__setitem__(
+                "frame_sha256", "0" * 64
+            ),
+            lambda item: item["actors"].pop("actor_b"),
+            lambda item: item["camera"].__setitem__("pose", [0, 0, 0]),
+        )
+        for mutate in mutations:
+            changed = json.loads(original)
+            mutate(changed)
+            result_path.write_text(json.dumps(changed), encoding="utf-8")
+            self.assertFalse(annotation_is_paper_eligible(session_dir, result_path))
+        result_path.write_bytes(original)
+
+    def test_frame_tamper_blocks_serving_saving_and_eligibility(self) -> None:
+        from http.server import ThreadingHTTPServer
+
+        from videoactagent.manual_annotation import (
+            _handler,
+            annotation_is_paper_eligible,
+            save_annotation,
+        )
+
+        session_dir, result_path = self._reviewed_result()
+        manifest = json.loads(
+            (session_dir / "session_manifest.json").read_text(encoding="utf-8")
+        )
+        frame_record = manifest["items"][0]["video"]["frames"][0]
+        frame = session_dir / frame_record["path"]
+        reference_sha = json.loads(result_path.read_text(encoding="utf-8"))[
+            "reference_annotation_sha256"
+        ]
+        frame.write_bytes(b"not a png")
+        self.assertFalse(annotation_is_paper_eligible(session_dir, result_path))
+        with self.assertRaisesRegex(ValueError, "frame.*(SHA|PNG)"):
+            save_annotation(
+                session_dir,
+                self._payload(manifest, "result", "story_a__kling", reference_sha),
+            )
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(session_dir))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            url = (
+                "http://127.0.0.1:"
+                + str(server.server_address[1])
+                + "/"
+                + frame_record["path"]
+            )
+            with self.assertRaises(urllib.error.HTTPError) as raised:
+                urllib.request.urlopen(url, timeout=5)
+            self.assertEqual(raised.exception.code, 409)
+            raised.exception.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_prepare_detects_source_index_change_during_decode(self) -> None:
+        import videoactagent.manual_annotation as module
+
+        original = module._decode_bound_video
+        changed = False
+
+        def mutate_index(*args, **kwargs):
+            nonlocal changed
+            result = original(*args, **kwargs)
+            if not changed:
+                changed = True
+                self.index.write_bytes(self.index.read_bytes() + b" ")
+            return result
+
+        with mock.patch.object(module, "_decode_bound_video", side_effect=mutate_index):
+            with self.assertRaisesRegex(ValueError, "full result index changed"):
+                module.prepare_workspace(
+                    self.index, self.root / "annotation", workspace=self.root
+                )
 
     def test_html_avoids_template_literals_and_exposes_required_controls(self) -> None:
         html = (ROOT / "static" / "manual_annotation.html").read_text(encoding="utf-8")
@@ -311,10 +435,17 @@ class ManualAnnotationTests(unittest.TestCase):
             "camera-category",
             "camera-intensity",
             "camera-confidence",
-            "annotation-status",
+            "reviewer-id",
+            "review-button",
             "/annotation",
+            "/review",
+            "targetStates",
+            "currentImage = null",
+            'canvas.style.pointerEvents = "none"',
         ):
             self.assertIn(token, html)
+        self.assertIn("function decisionKey(targetType, targetId", html)
+        self.assertNotIn('id="annotation-status"', html)
 
     def test_cli_dispatches_annotate_help(self) -> None:
         import io
@@ -335,7 +466,10 @@ class ManualAnnotationTests(unittest.TestCase):
         from videoactagent.manual_annotation import _handler, prepare_workspace
 
         session_dir = self.root / "annotation"
-        prepare_workspace(self.index, session_dir, workspace=self.root)
+        session = prepare_workspace(self.index, session_dir, workspace=self.root)
+        from videoactagent.manual_annotation import save_annotation
+
+        save_annotation(session_dir, self._payload(session, "reference", "story_a"))
         server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(session_dir))
         self.assertEqual(server.server_address[0], "127.0.0.1")
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -344,11 +478,32 @@ class ManualAnnotationTests(unittest.TestCase):
             base = "http://127.0.0.1:" + str(server.server_address[1])
             with urllib.request.urlopen(base + "/session", timeout=5) as response:
                 self.assertEqual(response.status, 200)
+            frame = session["references"]["story_a"]["video"]["frames"][0]
+            with urllib.request.urlopen(base + "/" + frame["path"], timeout=5) as response:
+                self.assertEqual(response.status, 200)
+                self.assertEqual(hashlib.sha256(response.read()).hexdigest(), frame["sha256"])
             request = urllib.request.Request(base + "/frames/%2e%2e/session_manifest.json")
             with self.assertRaises(urllib.error.HTTPError) as raised:
                 urllib.request.urlopen(request, timeout=5)
             self.assertEqual(raised.exception.code, 400)
             raised.exception.close()
+            review_data = json.dumps(
+                {
+                    "target_type": "reference",
+                    "target_id": "story_a",
+                    "reviewer_id": "reviewer_http",
+                }
+            ).encode("utf-8")
+            review_request = urllib.request.Request(
+                base + "/review",
+                data=review_data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(review_request, timeout=5) as response:
+                reviewed = json.loads(response.read())
+            self.assertEqual(reviewed["annotation_status"], "reviewed")
+            self.assertEqual(reviewed["review"]["reviewer_id"], "reviewer_http")
         finally:
             server.shutdown()
             server.server_close()
@@ -359,7 +514,6 @@ class ManualAnnotationTests(unittest.TestCase):
         session: dict,
         target_type: str,
         target_id: str,
-        status: str,
         reference_sha: str | None = None,
     ) -> dict:
         if target_type == "reference":
@@ -383,7 +537,7 @@ class ManualAnnotationTests(unittest.TestCase):
             "schema_version": "1.0",
             "target_type": target_type,
             "target_id": target_id,
-            "annotation_status": status,
+            "annotation_status": "draft",
             "reference_annotation_sha256": reference_sha,
             "actors": actors,
             "camera": {
@@ -392,6 +546,29 @@ class ManualAnnotationTests(unittest.TestCase):
                 "confidence": 0.8,
             },
         }
+
+    def _reviewed_result(self) -> tuple[Path, Path]:
+        from videoactagent.manual_annotation import (
+            prepare_workspace,
+            review_annotation,
+            save_annotation,
+        )
+
+        session_dir = self.root / "annotation"
+        session = prepare_workspace(self.index, session_dir, workspace=self.root)
+        save_annotation(session_dir, self._payload(session, "reference", "story_a"))
+        review_annotation(
+            session_dir, "reference", "story_a", reviewer_id="reviewer_1"
+        )
+        reference_path = session_dir / "annotations" / "reference__story_a.json"
+        save_annotation(
+            session_dir,
+            self._payload(session, "result", "story_a__kling", _sha(reference_path)),
+        )
+        review_annotation(
+            session_dir, "result", "story_a__kling", reviewer_id="reviewer_2"
+        )
+        return session_dir, session_dir / "annotations" / "result__story_a__kling.json"
 
 
 if __name__ == "__main__":

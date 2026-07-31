@@ -16,8 +16,10 @@ import re
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -31,7 +33,7 @@ SCHEMA_VERSION = "1.0"
 NORMALIZED_TIMEPOINTS = (0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0)
 VISIBILITY_VALUES = frozenset({"visible", "occluded", "out_of_frame", "ambiguous"})
 IDENTITY_VALUES = frozenset({"confirmed", "probable", "ambiguous", "unknown"})
-ANNOTATION_STATES = frozenset({"draft", "reviewed", "adjudicated"})
+ANNOTATION_STATES = frozenset({"draft", "reviewed"})
 CAMERA_CATEGORIES = frozenset(
     {
         "static",
@@ -72,10 +74,10 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _load_object(path: Path, label: str) -> dict[str, Any]:
+def _parse_object(data: bytes, label: str) -> dict[str, Any]:
     try:
         value = json.loads(
-            path.read_bytes().decode("utf-8", errors="strict"),
+            data.decode("utf-8", errors="strict"),
             object_pairs_hook=_reject_duplicate_keys,
             parse_constant=lambda token: (_ for _ in ()).throw(
                 ValueError(f"non-finite JSON number: {token}")
@@ -86,6 +88,10 @@ def _load_object(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"{label} must contain one JSON object")
     return value
+
+
+def _load_object(path: Path, label: str) -> dict[str, Any]:
+    return _parse_object(path.read_bytes(), label)
 
 
 def _json_bytes(value: object) -> bytes:
@@ -288,7 +294,9 @@ def prepare_workspace(
         raise ValueError(f"full result index is not a file: {index}")
     if output.exists():
         raise FileExistsError(f"annotation workspace already exists: {output}")
-    value = _load_object(index, "full result index")
+    index_bytes = index.read_bytes()
+    index_sha256 = hashlib.sha256(index_bytes).hexdigest()
+    value = _parse_object(index_bytes, "full result index")
     rows = value.get("rows")
     if not isinstance(rows, list) or not rows:
         raise ValueError("full result index rows must be a non-empty list")
@@ -383,10 +391,12 @@ def prepare_workspace(
             "coordinate_space": "normalized_0_1_top_left",
             "camera_observation_space": "observable_background_motion_only",
             "normalized_timepoints": list(NORMALIZED_TIMEPOINTS),
-            "source_index_sha256": sha256_file(index),
+            "source_index_sha256": index_sha256,
             "references": references,
             "items": items,
         }
+        if not index.is_file() or index.read_bytes() != index_bytes:
+            raise ValueError("full result index changed during workspace preparation")
         _atomic_write(staging / "session_manifest.json", _json_bytes(session))
         os.replace(staging, output)
         return session
@@ -429,14 +439,332 @@ def _target(
     return target
 
 
+_FRAME_KEYS = frozenset(
+    {"frame", "t", "time_seconds", "path", "sha256", "width", "height"}
+)
+_ANNOTATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "evidence_type",
+        "coordinate_space",
+        "camera_observation_space",
+        "target_type",
+        "target_id",
+        "story_id",
+        "video_sha256",
+        "session_manifest_sha256",
+        "reference_annotation_sha256",
+        "annotation_status",
+        "eligible_for_paper",
+        "review",
+        "actors",
+        "camera",
+    }
+)
+_SAVED_SAMPLE_KEYS = frozenset(
+    {
+        "frame",
+        "t",
+        "frame_sha256",
+        "footpoint",
+        "visibility",
+        "identity",
+        "geometry_eligible",
+    }
+)
+
+
+def _sha256_text(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{label} must be a lowercase SHA-256")
+    return value
+
+
+def _session(session_root: Path) -> tuple[dict[str, Any], Path, str]:
+    manifest_path = session_root / "session_manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError("session manifest is missing")
+    data = manifest_path.read_bytes()
+    session = _parse_object(data, "annotation session")
+    if (
+        session.get("schema_version") != SCHEMA_VERSION
+        or session.get("evidence_type") != "human_comparison_annotation_session"
+        or session.get("coordinate_space") != "normalized_0_1_top_left"
+        or session.get("camera_observation_space")
+        != "observable_background_motion_only"
+    ):
+        raise ValueError("annotation session schema is invalid")
+    return session, manifest_path, hashlib.sha256(data).hexdigest()
+
+
+def _frame_path(session_root: Path, frame: Mapping[str, object]) -> Path:
+    if set(frame) != _FRAME_KEYS:
+        raise ValueError("session frame fields do not match the schema")
+    declared = frame.get("path")
+    if not isinstance(declared, str) or not declared.startswith("frames/"):
+        raise ValueError("session frame path is invalid")
+    relative = Path(declared)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError("session frame path is invalid")
+    return _below(session_root / relative, session_root / "frames", "session frame")
+
+
+def _verify_frame_file(
+    session_root: Path, frame: Mapping[str, object]
+) -> tuple[Path, bytes]:
+    path = _frame_path(session_root, frame)
+    if not path.is_file():
+        raise ValueError("session frame is missing")
+    data = path.read_bytes()
+    expected_sha = _sha256_text(frame.get("sha256"), "session frame SHA-256")
+    if hashlib.sha256(data).hexdigest() != expected_sha:
+        raise ValueError("session frame SHA-256 mismatch")
+    try:
+        with Image.open(BytesIO(data)) as image:
+            image.load()
+            if image.format != "PNG":
+                raise ValueError("session frame is not a PNG")
+            actual_size = [image.width, image.height]
+    except OSError as exc:
+        raise ValueError("session frame PNG decode failed") from exc
+    if actual_size != [frame.get("width"), frame.get("height")]:
+        raise ValueError("session frame PNG dimensions mismatch")
+    return path, data
+
+
+def _verify_target_video(session_root: Path, target: Mapping[str, object]) -> Mapping[str, object]:
+    video = target.get("video")
+    if not isinstance(video, Mapping):
+        raise ValueError("target video metadata is unavailable")
+    expected_video_keys = {
+        "sha256",
+        "bytes",
+        "frame_count",
+        "fps",
+        "duration_seconds",
+        "size",
+        "frames",
+    }
+    if set(video) != expected_video_keys:
+        raise ValueError("target video metadata fields do not match the schema")
+    _sha256_text(video.get("sha256"), "target video SHA-256")
+    frame_count = video.get("frame_count")
+    if type(frame_count) is not int or frame_count < 9:
+        raise ValueError("target video frame_count is invalid")
+    size = video.get("size")
+    if (
+        not isinstance(size, list)
+        or len(size) != 2
+        or any(type(item) is not int or item <= 0 for item in size)
+    ):
+        raise ValueError("target video size is invalid")
+    frames = video.get("frames")
+    if not isinstance(frames, list) or len(frames) != len(NORMALIZED_TIMEPOINTS):
+        raise ValueError("target video protocol frames are invalid")
+    expected_indices = frame_indices_for_count(frame_count)
+    for expected_index, expected_t, frame in zip(
+        expected_indices, NORMALIZED_TIMEPOINTS, frames
+    ):
+        if not isinstance(frame, Mapping):
+            raise ValueError("session frame must be an object")
+        if frame.get("frame") != expected_index or frame.get("t") != expected_t:
+            raise ValueError("session frame/time protocol mismatch")
+        if [frame.get("width"), frame.get("height")] != size:
+            raise ValueError("session frame dimensions differ from target video")
+        _verify_frame_file(session_root, frame)
+    return video
+
+
+def _annotation_path(
+    session_root: Path, target_type: str, target_id: str
+) -> Path:
+    annotation_root = session_root / "annotations"
+    return _below(
+        annotation_root / f"{target_type}__{target_id}.json",
+        annotation_root,
+        "annotation",
+    )
+
+
+def _review_is_valid(value: object) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {"reviewer_id", "reviewed_at_utc"}:
+        return False
+    reviewer = value.get("reviewer_id")
+    timestamp = value.get("reviewed_at_utc")
+    if not isinstance(reviewer, str) or not reviewer.strip() or not isinstance(timestamp, str):
+        return False
+    if not timestamp.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(parsed)
+
+
+def _validate_reference_snapshot(
+    session_root: Path,
+    reference_sha: object,
+    reference_id: str,
+    story_id: object,
+) -> dict[str, Any]:
+    digest = _sha256_text(reference_sha, "reference annotation SHA-256")
+    annotation_root = session_root / "annotations"
+    snapshot = _below(
+        annotation_root / "by_sha256" / f"{digest}.json",
+        annotation_root,
+        "reference annotation snapshot",
+    )
+    if not snapshot.is_file() or sha256_file(snapshot) != digest:
+        raise ValueError("reference annotation SHA-256 mismatch")
+    value = _load_object(snapshot, "reference annotation snapshot")
+    validated = _validate_annotation_value(
+        session_root, snapshot, value, snapshot_sha=digest
+    )
+    if (
+        validated["target_type"] != "reference"
+        or validated["target_id"] != reference_id
+        or validated["story_id"] != story_id
+        or validated["annotation_status"] != "reviewed"
+    ):
+        raise ValueError("reference annotation provenance mismatch")
+    return validated
+
+
+def _validate_annotation_value(
+    session_root: Path,
+    path: Path,
+    value: Mapping[str, object],
+    *,
+    snapshot_sha: str | None = None,
+) -> dict[str, Any]:
+    if set(value) != _ANNOTATION_KEYS:
+        raise ValueError("stored annotation fields do not match the schema")
+    session, _manifest_path, manifest_sha = _session(session_root)
+    if (
+        value.get("schema_version") != SCHEMA_VERSION
+        or value.get("evidence_type") != "human_comparison_annotation"
+        or value.get("coordinate_space") != session["coordinate_space"]
+        or value.get("camera_observation_space")
+        != "observable_background_motion_only"
+    ):
+        raise ValueError("stored annotation schema is invalid")
+    target_type = value.get("target_type")
+    target_id = _safe_token(value.get("target_id"), "target_id")
+    if target_type not in {"reference", "result"}:
+        raise ValueError("stored annotation target_type is invalid")
+    target = _target(session, target_type, target_id)
+    annotation_root = session_root / "annotations"
+    resolved = _below(path, annotation_root, "annotation")
+    if snapshot_sha is None:
+        if resolved != _annotation_path(session_root, target_type, target_id):
+            raise ValueError("annotation filename does not match its target")
+    else:
+        expected_snapshot = _below(
+            annotation_root / "by_sha256" / f"{snapshot_sha}.json",
+            annotation_root,
+            "reference annotation snapshot",
+        )
+        if (
+            resolved != expected_snapshot
+            or hashlib.sha256(_json_bytes(value)).hexdigest() != snapshot_sha
+        ):
+            raise ValueError("reference snapshot filename/content mismatch")
+    video = _verify_target_video(session_root, target)
+    if value.get("story_id") != target.get("story_id"):
+        raise ValueError("annotation story provenance mismatch")
+    if value.get("video_sha256") != video.get("sha256"):
+        raise ValueError("annotation video SHA-256 mismatch")
+    if value.get("session_manifest_sha256") != manifest_sha:
+        raise ValueError("annotation session manifest SHA-256 mismatch")
+    frames = video["frames"]
+    actor_ids = target.get("actor_ids")
+    actors = value.get("actors")
+    if (
+        not isinstance(actor_ids, list)
+        or not isinstance(actors, Mapping)
+        or set(actors) != set(actor_ids)
+    ):
+        raise ValueError("stored actors do not match the target")
+    for actor_id in actor_ids:
+        samples = actors.get(actor_id)
+        if not isinstance(samples, list) or len(samples) != len(frames):
+            raise ValueError("stored actor sample count is invalid")
+        for frame, sample in zip(frames, samples):
+            if not isinstance(frame, Mapping) or not isinstance(sample, Mapping):
+                raise ValueError("stored actor sample is invalid")
+            if set(sample) != _SAVED_SAMPLE_KEYS:
+                raise ValueError("stored actor sample fields do not match the schema")
+            if (
+                sample.get("frame") != frame.get("frame")
+                or sample.get("t") != frame.get("t")
+                or sample.get("frame_sha256") != frame.get("sha256")
+            ):
+                raise ValueError("stored actor frame provenance mismatch")
+            visibility = sample.get("visibility")
+            identity = sample.get("identity")
+            if visibility not in VISIBILITY_VALUES or identity not in IDENTITY_VALUES:
+                raise ValueError("stored visibility or identity is invalid")
+            footpoint = sample.get("footpoint")
+            if visibility == "visible":
+                if not isinstance(footpoint, Mapping) or set(footpoint) != {"x", "y"}:
+                    raise ValueError("stored visible sample has no footpoint")
+                _unit(footpoint["x"], "stored footpoint x")
+                _unit(footpoint["y"], "stored footpoint y")
+            elif footpoint is not None:
+                raise ValueError("stored non-visible sample has a footpoint")
+            expected_eligibility = visibility == "visible" and identity in {
+                "confirmed",
+                "probable",
+            }
+            if sample.get("geometry_eligible") is not expected_eligibility:
+                raise ValueError("stored geometry eligibility is inconsistent")
+    camera = value.get("camera")
+    if not isinstance(camera, Mapping) or set(camera) != {
+        "category",
+        "intensity",
+        "confidence",
+    }:
+        raise ValueError("stored camera fields do not match the schema")
+    if camera.get("category") not in CAMERA_CATEGORIES:
+        raise ValueError("stored camera category is invalid")
+    if camera.get("intensity") not in CAMERA_INTENSITIES:
+        raise ValueError("stored camera intensity is invalid")
+    _unit(camera.get("confidence"), "stored camera confidence")
+    state = value.get("annotation_status")
+    if state == "draft":
+        if value.get("review") is not None or value.get("eligible_for_paper") is not False:
+            raise ValueError("draft annotation review state is invalid")
+    elif state == "reviewed":
+        if not _review_is_valid(value.get("review")):
+            raise ValueError("reviewed annotation metadata is invalid")
+        if value.get("eligible_for_paper") is not True:
+            raise ValueError("reviewed annotation eligibility field is inconsistent")
+    else:
+        raise ValueError("stored annotation status is invalid")
+    if target_type == "reference":
+        if value.get("reference_annotation_sha256") is not None:
+            raise ValueError("reference annotation cannot bind a reference")
+    else:
+        reference_id = _safe_token(target.get("reference_id"), "reference_id")
+        _validate_reference_snapshot(
+            session_root,
+            value.get("reference_annotation_sha256"),
+            reference_id,
+            target.get("story_id"),
+        )
+    return dict(value)
+
+
 def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[str, object]:
     """Validate and atomically save one explicit human annotation payload."""
 
     session_root = Path(session_dir).resolve()
-    manifest_path = session_root / "session_manifest.json"
-    if not manifest_path.is_file():
-        raise ValueError("session manifest is missing")
-    session = _load_object(manifest_path, "annotation session")
+    session, _manifest_path, manifest_sha = _session(session_root)
     if not isinstance(payload, Mapping):
         raise ValueError("annotation payload must be an object")
     expected_keys = {
@@ -458,8 +786,8 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
     if not isinstance(target_type, str) or not isinstance(target_id, str):
         raise ValueError("annotation target identifiers must be strings")
     target_id = _safe_token(target_id, "target_id")
-    if state not in ANNOTATION_STATES:
-        raise ValueError("annotation_status must be draft, reviewed, or adjudicated")
+    if state != "draft":
+        raise ValueError("first annotation save must be draft")
     target = _target(session, target_type, target_id)
     reference_sha: str | None = None
     if target_type == "reference":
@@ -475,28 +803,10 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
             character not in "0123456789abcdef" for character in reference_sha
         ):
             raise ValueError("reference annotation SHA-256 mismatch")
-        annotation_root = session_root / "annotations"
-        reference_path = _below(
-            annotation_root / "by_sha256" / f"{reference_sha}.json",
-            annotation_root,
-            "reference annotation snapshot",
+        _validate_reference_snapshot(
+            session_root, reference_sha, reference_id, target.get("story_id")
         )
-        if not reference_path.is_file():
-            raise ValueError("reference annotation SHA-256 mismatch")
-        reference_value = _load_object(reference_path, "reference annotation")
-        if sha256_file(reference_path) != reference_sha:
-            raise ValueError("reference annotation SHA-256 mismatch")
-        if reference_value.get("annotation_status") not in {"reviewed", "adjudicated"}:
-            raise ValueError("result requires a reviewed/adjudicated reference annotation")
-        if (
-            reference_value.get("target_type") != "reference"
-            or reference_value.get("target_id") != reference_id
-            or reference_value.get("story_id") != target.get("story_id")
-        ):
-            raise ValueError("reference annotation provenance mismatch")
-    video = target.get("video")
-    if not isinstance(video, Mapping) or not isinstance(video.get("frames"), list):
-        raise ValueError("target video metadata is unavailable")
+    video = _verify_target_video(session_root, target)
     frames = video["frames"]
     actors = payload["actors"]
     actor_ids = target.get("actor_ids")
@@ -561,10 +871,11 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         "target_id": target_id,
         "story_id": target["story_id"],
         "video_sha256": video["sha256"],
-        "session_manifest_sha256": sha256_file(manifest_path),
+        "session_manifest_sha256": manifest_sha,
         "reference_annotation_sha256": reference_sha,
         "annotation_status": state,
-        "eligible_for_paper": state in {"reviewed", "adjudicated"},
+        "eligible_for_paper": False,
+        "review": None,
         "actors": saved_actors,
         "camera": {
             "category": camera["category"],
@@ -572,16 +883,60 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
             "confidence": _unit(camera["confidence"], "camera confidence"),
         },
     }
-    filename = f"{target_type}__{target_id}.json"
-    annotation_root = session_root / "annotations"
-    output = _below(annotation_root / filename, annotation_root, "annotation")
+    output = _annotation_path(session_root, target_type, target_id)
     data = _json_bytes(saved)
-    if target_type == "reference" and state in {"reviewed", "adjudicated"}:
+    _validate_annotation_value(session_root, output, saved)
+    _atomic_write(output, data)
+    return saved
+
+
+def review_annotation(
+    session_dir: Path,
+    target_type: str,
+    target_id: str,
+    *,
+    reviewer_id: str,
+) -> dict[str, object]:
+    """Independently promote an existing validated draft to reviewed."""
+
+    session_root = Path(session_dir).resolve()
+    if not isinstance(reviewer_id, str) or not reviewer_id.strip():
+        raise ValueError("reviewer_id must be non-empty")
+    reviewer = reviewer_id.strip()
+    if any(ord(character) < 32 for character in reviewer) or len(reviewer) > 200:
+        raise ValueError("reviewer_id is invalid")
+    if target_type not in {"reference", "result"}:
+        raise ValueError("target_type must be reference or result")
+    target_id = _safe_token(target_id, "target_id")
+    output = _annotation_path(session_root, target_type, target_id)
+    if not output.is_file():
+        raise ValueError("draft annotation must be saved before review")
+    draft = _validate_annotation_value(
+        session_root, output, _load_object(output, "draft annotation")
+    )
+    if draft["annotation_status"] != "draft":
+        raise ValueError("only an existing draft can be reviewed")
+    reviewed = dict(draft)
+    reviewed["annotation_status"] = "reviewed"
+    reviewed["eligible_for_paper"] = True
+    reviewed["review"] = {
+        "reviewer_id": reviewer,
+        "reviewed_at_utc": datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+    data = _json_bytes(reviewed)
+    _validate_annotation_value(session_root, output, reviewed)
+    if target_type == "reference":
         digest = hashlib.sha256(data).hexdigest()
+        annotation_root = session_root / "annotations"
         snapshot = _below(
             annotation_root / "by_sha256" / f"{digest}.json",
             annotation_root,
             "reference annotation snapshot",
+        )
+        _validate_annotation_value(
+            session_root, snapshot, reviewed, snapshot_sha=digest
         )
         if snapshot.exists():
             if not snapshot.is_file() or snapshot.read_bytes() != data:
@@ -589,7 +944,7 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         else:
             _atomic_write(snapshot, data)
     _atomic_write(output, data)
-    return saved
+    return reviewed
 
 
 def annotation_is_paper_eligible(
@@ -605,38 +960,53 @@ def annotation_is_paper_eligible(
     annotation = _below(candidate, annotation_root, "annotation")
     if not annotation.is_file():
         raise ValueError("annotation is not a file")
-    value = _load_object(annotation, "annotation")
-    if value.get("annotation_status") not in {"reviewed", "adjudicated"}:
+    try:
+        validated = _validate_annotation_value(
+            session_root, annotation, _load_object(annotation, "annotation")
+        )
+    except (OSError, TypeError, ValueError):
         return False
-    if value.get("target_type") == "reference":
-        return True
-    if value.get("target_type") != "result":
-        raise ValueError("annotation target_type is invalid")
-    reference_sha = value.get("reference_annotation_sha256")
-    if (
-        not isinstance(reference_sha, str)
-        or len(reference_sha) != 64
-        or any(character not in "0123456789abcdef" for character in reference_sha)
-    ):
-        return False
-    snapshot = _below(
-        annotation_root / "by_sha256" / f"{reference_sha}.json",
-        annotation_root,
-        "reference annotation snapshot",
+    return validated["annotation_status"] == "reviewed" and _review_is_valid(
+        validated["review"]
     )
-    if not snapshot.is_file() or sha256_file(snapshot) != reference_sha:
-        return False
-    reference = _load_object(snapshot, "reference annotation snapshot")
-    return bool(
-        reference.get("annotation_status") in {"reviewed", "adjudicated"}
-        and reference.get("target_type") == "reference"
-        and reference.get("target_id") == value.get("story_id")
-        and reference.get("story_id") == value.get("story_id")
+
+
+def _frame_allowlist(session_dir: Path) -> tuple[dict[str, Mapping[str, object]], str]:
+    session, _manifest, manifest_sha = _session(session_dir)
+    targets: list[Mapping[str, object]] = []
+    references = session.get("references")
+    items = session.get("items")
+    if not isinstance(references, Mapping) or not isinstance(items, list):
+        raise ValueError("annotation session target collections are invalid")
+    targets.extend(
+        target for target in references.values() if isinstance(target, Mapping)
     )
+    targets.extend(
+        target
+        for target in items
+        if isinstance(target, Mapping) and target.get("disabled") is not True
+    )
+    allowed: dict[str, Mapping[str, object]] = {}
+    for target in targets:
+        video = target.get("video")
+        frames = video.get("frames") if isinstance(video, Mapping) else None
+        if not isinstance(frames, list):
+            raise ValueError("annotation session target frames are invalid")
+        for frame in frames:
+            if not isinstance(frame, Mapping):
+                raise ValueError("annotation session frame is invalid")
+            _frame_path(session_dir, frame)
+            route = "/" + str(frame["path"])
+            previous = allowed.get(route)
+            if previous is not None and previous != frame:
+                raise ValueError("conflicting session frame allowlist entry")
+            allowed[route] = frame
+    return allowed, manifest_sha
 
 
 def _handler(session_dir: Path) -> type[BaseHTTPRequestHandler]:
     html = Path(__file__).resolve().parents[1] / "static" / "manual_annotation.html"
+    allowed_frames, allowed_manifest_sha = _frame_allowlist(session_dir)
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: HTTPStatus, body: bytes, content_type: str) -> None:
@@ -677,19 +1047,19 @@ def _handler(session_dir: Path) -> type[BaseHTTPRequestHandler]:
                 )
                 return
             if route.startswith("/frames/"):
-                relative = Path(route.removeprefix("/"))
-                if relative.is_absolute() or ".." in relative.parts:
-                    self._error("invalid frame path")
+                frame_record = allowed_frames.get(route)
+                if frame_record is None:
+                    self._error("frame is not in the session allowlist")
                     return
                 try:
-                    frame = _below(session_dir / relative, session_dir / "frames", "frame")
-                except ValueError as exc:
-                    self._error(str(exc))
+                    _current, _path, current_manifest_sha = _session(session_dir)
+                    if current_manifest_sha != allowed_manifest_sha:
+                        raise ValueError("session manifest changed after server start")
+                    _frame, frame_bytes = _verify_frame_file(session_dir, frame_record)
+                except (OSError, TypeError, ValueError) as exc:
+                    self._error(str(exc), HTTPStatus.CONFLICT)
                     return
-                if not frame.is_file():
-                    self._error("frame not found", HTTPStatus.NOT_FOUND)
-                    return
-                self._send(HTTPStatus.OK, frame.read_bytes(), "image/png")
+                self._send(HTTPStatus.OK, frame_bytes, "image/png")
                 return
             if route.startswith("/annotations/"):
                 name = route.removeprefix("/annotations/")
@@ -711,7 +1081,8 @@ def _handler(session_dir: Path) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:  # noqa: N802
             if not self._guard(True):
                 return
-            if urlsplit(self.path).path != "/annotation":
+            route = urlsplit(self.path).path
+            if route not in {"/annotation", "/review"}:
                 self._error("route not found", HTTPStatus.NOT_FOUND)
                 return
             try:
@@ -730,7 +1101,21 @@ def _handler(session_dir: Path) -> type[BaseHTTPRequestHandler]:
                         ValueError(f"non-finite JSON number: {token}")
                     ),
                 )
-                saved = save_annotation(session_dir, payload)
+                if route == "/annotation":
+                    saved = save_annotation(session_dir, payload)
+                else:
+                    if not isinstance(payload, Mapping) or set(payload) != {
+                        "target_type",
+                        "target_id",
+                        "reviewer_id",
+                    }:
+                        raise ValueError("review payload fields do not match the schema")
+                    saved = review_annotation(
+                        session_dir,
+                        payload["target_type"],
+                        payload["target_id"],
+                        reviewer_id=payload["reviewer_id"],
+                    )
             except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
                 self._error(str(exc))
                 return

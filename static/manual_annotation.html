@@ -68,14 +68,9 @@
       </select>
     </label>
     <label>Confidence <input id="camera-confidence" type="number" min="0" max="1" step="0.05" placeholder="0..1"></label>
-    <label>Status
-      <select id="annotation-status">
-        <option value="draft">draft</option>
-        <option value="reviewed">reviewed</option>
-        <option value="adjudicated">adjudicated</option>
-      </select>
-    </label>
-    <button id="save">Save human annotation</button>
+    <button id="save">Save draft annotation</button>
+    <label>Reviewer ID <input id="reviewer-id" type="text" placeholder="independent reviewer"></label>
+    <button id="review-button">Review saved draft</button>
   </div>
   <div id="status"></div>
 </main>
@@ -89,21 +84,47 @@ var currentFrame = 0;
 var currentImage = null;
 var decisions = new Map();
 var referenceHashes = new Map();
+var targetStates = new Map();
 var loadToken = 0;
+var loading = true;
+var saving = false;
+var ready = false;
 var canvas = document.querySelector("#canvas");
 var context = canvas.getContext("2d");
 var statusNode = document.querySelector("#status");
 
-function decisionKey(targetId, actorId, frame) {
-  return targetId + "|" + actorId + "|" + String(frame);
+function targetKey(target) { return target.target_type + "|" + target.target_id; }
+function decisionKey(targetType, targetId, actorId, frame) {
+  return targetType + "|" + targetId + "|" + actorId + "|" + String(frame);
 }
 function frameRecord() { return currentTarget.video.frames[currentFrame]; }
 function setStatus(message) { statusNode.textContent = message; }
+function setInteractive(enabled) {
+  canvas.style.pointerEvents = enabled ? "auto" : "none";
+  document.querySelector("#save").disabled = !enabled || saving;
+  document.querySelector("#review-button").disabled = !enabled || saving;
+  document.querySelector("#previous").disabled = !enabled || currentFrame === 0;
+  document.querySelector("#next").disabled = !enabled || !currentTarget || currentFrame === currentTarget.video.frames.length - 1;
+}
+function saveTargetState() {
+  if (!currentTarget) return;
+  targetStates.set(targetKey(currentTarget), {
+    category: document.querySelector("#camera-category").value,
+    intensity: document.querySelector("#camera-intensity").value,
+    confidence: document.querySelector("#camera-confidence").value
+  });
+}
+function restoreTargetState() {
+  var state = targetStates.get(targetKey(currentTarget)) || {category: "", intensity: "", confidence: ""};
+  document.querySelector("#camera-category").value = state.category;
+  document.querySelector("#camera-intensity").value = state.intensity;
+  document.querySelector("#camera-confidence").value = state.confidence;
+}
 function draw() {
   if (!currentImage || !currentTarget || !currentActor) return;
   context.clearRect(0, 0, canvas.width, canvas.height);
   context.drawImage(currentImage, 0, 0, canvas.width, canvas.height);
-  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  var key = decisionKey(currentTarget.target_type, currentTarget.target_id, currentActor, frameRecord().frame);
   var value = decisions.get(key);
   if (value && value.footpoint) {
     context.beginPath();
@@ -122,19 +143,37 @@ function showFrame(index) {
   var record = frameRecord();
   var token = ++loadToken;
   var image = new Image();
+  loading = true;
+  ready = false;
+  currentImage = null;
+  context.clearRect(0, 0, canvas.width, canvas.height);
+  canvas.style.pointerEvents = "none";
+  setInteractive(false);
   setStatus("Loading real decoded frame " + String(record.frame) + "...");
   image.onload = function () {
     if (token !== loadToken) return;
     currentImage = image;
+    loading = false;
+    ready = true;
     canvas.width = record.width;
     canvas.height = record.height;
     setStatus("Frame loaded. Click the actor footpoint only when visibility is visible.");
     draw();
+    setInteractive(true);
   };
-  image.onerror = function () { if (token === loadToken) setStatus("Frame failed to load; nothing was recorded."); };
+  image.onerror = function () {
+    if (token !== loadToken) return;
+    loading = false;
+    ready = false;
+    currentImage = null;
+    context.clearRect(0, 0, canvas.width, canvas.height);
+    setInteractive(false);
+    setStatus("Frame failed to load; nothing was recorded.");
+  };
   image.src = "/" + record.path;
 }
 function selectTarget() {
+  saveTargetState();
   var index = Number(document.querySelector("#target").value);
   currentTarget = targets[index];
   currentFrame = 0;
@@ -147,6 +186,7 @@ function selectTarget() {
     actorSelect.appendChild(option);
   });
   currentActor = currentTarget.actor_ids[0];
+  restoreTargetState();
   showFrame(0);
 }
 function updateCurrentLabels() {
@@ -154,7 +194,7 @@ function updateCurrentLabels() {
   var visibility = document.querySelector("#visibility").value;
   var identity = document.querySelector("#identity").value;
   if (!visibility || !identity) return;
-  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  var key = decisionKey(currentTarget.target_type, currentTarget.target_id, currentActor, frameRecord().frame);
   var previous = decisions.get(key);
   decisions.set(key, {
     frame: frameRecord().frame,
@@ -166,7 +206,7 @@ function updateCurrentLabels() {
   draw();
 }
 canvas.addEventListener("click", function (event) {
-  if (!currentTarget || !currentActor || document.querySelector("#visibility").value !== "visible") {
+  if (loading || !ready || saving || !currentTarget || !currentActor || document.querySelector("#visibility").value !== "visible") {
     setStatus("Choose visible and an identity label before clicking a footpoint.");
     return;
   }
@@ -175,7 +215,7 @@ canvas.addEventListener("click", function (event) {
     return;
   }
   var bounds = canvas.getBoundingClientRect();
-  var key = decisionKey(currentTarget.target_id, currentActor, frameRecord().frame);
+  var key = decisionKey(currentTarget.target_type, currentTarget.target_id, currentActor, frameRecord().frame);
   decisions.set(key, {
     frame: frameRecord().frame,
     t: frameRecord().t,
@@ -191,13 +231,16 @@ canvas.addEventListener("click", function (event) {
 document.querySelector("#visibility").onchange = updateCurrentLabels;
 document.querySelector("#identity").onchange = updateCurrentLabels;
 document.querySelector("#clear").onclick = function () {
-  decisions.delete(decisionKey(currentTarget.target_id, currentActor, frameRecord().frame));
+  decisions.delete(decisionKey(currentTarget.target_type, currentTarget.target_id, currentActor, frameRecord().frame));
   draw();
 };
 document.querySelector("#previous").onclick = function () { showFrame(currentFrame - 1); };
 document.querySelector("#next").onclick = function () { showFrame(currentFrame + 1); };
 document.querySelector("#actor").onchange = function (event) { currentActor = event.target.value; draw(); };
 document.querySelector("#target").onchange = selectTarget;
+document.querySelector("#camera-category").onchange = saveTargetState;
+document.querySelector("#camera-intensity").onchange = saveTargetState;
+document.querySelector("#camera-confidence").onchange = saveTargetState;
 
 async function sha256Hex(bytes) {
   var digest = await crypto.subtle.digest("SHA-256", bytes);
@@ -209,17 +252,20 @@ async function referenceHash(referenceId) {
   if (!response.ok) throw new Error("Save and review the story reference annotation first.");
   var bytes = await response.arrayBuffer();
   var value = JSON.parse(new TextDecoder().decode(bytes));
-  if (value.annotation_status !== "reviewed" && value.annotation_status !== "adjudicated") throw new Error("Reference annotation must be reviewed or adjudicated.");
+  if (value.annotation_status !== "reviewed") throw new Error("Reference annotation must be independently reviewed.");
   var digest = await sha256Hex(bytes);
   referenceHashes.set(referenceId, digest);
   return digest;
 }
 document.querySelector("#save").onclick = async function () {
   try {
+    if (loading || !ready || saving) throw new Error("Wait for the selected frame to finish loading.");
+    saving = true;
+    setInteractive(false);
     var actors = {};
     currentTarget.actor_ids.forEach(function (actorId) {
       actors[actorId] = currentTarget.video.frames.map(function (frame) {
-        var value = decisions.get(decisionKey(currentTarget.target_id, actorId, frame.frame));
+        var value = decisions.get(decisionKey(currentTarget.target_type, currentTarget.target_id, actorId, frame.frame));
         if (!value || (value.visibility === "visible" && !value.footpoint)) throw new Error("Every actor/frame needs a complete manual decision.");
         return value;
       });
@@ -234,7 +280,7 @@ document.querySelector("#save").onclick = async function () {
       schema_version: "1.0",
       target_type: currentTarget.target_type,
       target_id: currentTarget.target_id,
-      annotation_status: document.querySelector("#annotation-status").value,
+      annotation_status: "draft",
       reference_annotation_sha256: referenceSha,
       actors: actors,
       camera: {category: category, intensity: intensity, confidence: Number(confidenceText)}
@@ -243,10 +289,37 @@ document.querySelector("#save").onclick = async function () {
     var responseBytes = await response.arrayBuffer();
     var saved = JSON.parse(new TextDecoder().decode(responseBytes));
     if (!response.ok) throw new Error(saved.error && saved.error.message ? saved.error.message : "Save rejected");
-    if (currentTarget.target_type === "reference") referenceHashes.set(currentTarget.reference_id, await sha256Hex(responseBytes));
-    setStatus("Human annotation saved. Paper eligibility: " + String(saved.eligible_for_paper));
+    if (currentTarget.target_type === "reference") referenceHashes.delete(currentTarget.reference_id);
+    setStatus("Draft saved. It is not paper-eligible until independent review.");
   } catch (error) {
     setStatus("Save failed: " + String(error));
+  } finally {
+    saving = false;
+    setInteractive(ready);
+  }
+};
+document.querySelector("#review-button").onclick = async function () {
+  try {
+    if (loading || !ready || saving) throw new Error("Wait for the selected frame to finish loading.");
+    var reviewerId = document.querySelector("#reviewer-id").value.trim();
+    if (!reviewerId) throw new Error("Reviewer ID is required for independent review.");
+    saving = true;
+    setInteractive(false);
+    var response = await fetch("/review", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({target_type: currentTarget.target_type, target_id: currentTarget.target_id, reviewer_id: reviewerId})
+    });
+    var responseBytes = await response.arrayBuffer();
+    var reviewed = JSON.parse(new TextDecoder().decode(responseBytes));
+    if (!response.ok) throw new Error(reviewed.error && reviewed.error.message ? reviewed.error.message : "Review rejected");
+    if (currentTarget.target_type === "reference") referenceHashes.set(currentTarget.reference_id, await sha256Hex(responseBytes));
+    setStatus("Reviewed by " + reviewed.review.reviewer_id + " at " + reviewed.review.reviewed_at_utc + ".");
+  } catch (error) {
+    setStatus("Review failed: " + String(error));
+  } finally {
+    saving = false;
+    setInteractive(ready);
   }
 };
 
