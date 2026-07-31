@@ -24,6 +24,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--blender", type=Path, required=True)
     parser.add_argument("--shotscript", type=Path, required=True)
+    parser.add_argument("--trajectory", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--render-style",
@@ -59,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         "--resolution",
         f"{args.resolution[0]}x{args.resolution[1]}",
     ]
+    if args.trajectory is not None:
+        command.extend(["--trajectory", str(args.trajectory.resolve())])
     try:
         completed = subprocess.run(
             command,
@@ -87,8 +90,9 @@ def main(argv: list[str] | None = None) -> int:
     evidence = completed.stdout + completed.stderr
     if completed.returncode != 0 or "Traceback" in completed.stderr:
         return completed.returncode or 1
-    if "BLENDER_PROXY_OK" not in evidence:
-        print("Blender exited without BLENDER_PROXY_OK", file=sys.stderr)
+    marker = "TRAJECTORY_PROXY_OK" if args.trajectory is not None else "BLENDER_PROXY_OK"
+    if marker not in evidence:
+        print(f"Blender exited without {marker}", file=sys.stderr)
         return 1
     return 0
 

@@ -18,6 +18,7 @@ COMMANDS = {
     "stage3-audit": "videoactagent.stage3_audit",
     "stage6-debug": "videoactagent.stage6_debug",
     "trajectory": "videoactagent.trajectory",
+    "trajectory-author": "videoactagent.trajectory_author",
     "trajectory-backend": "videoactagent.trajectory_backend",
     "trajectory-compile": "videoactagent.trajectory_compile",
     "trajectory-editor": "videoactagent.trajectory_editor",

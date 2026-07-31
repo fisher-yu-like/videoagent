@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Trajectory Author</title>
+<style>body{font:15px system-ui;margin:20px;background:#15171a;color:#eee}main{display:grid;grid-template-columns:1fr 1fr;gap:18px}img,canvas{width:100%;border:1px solid #555;background:#222}canvas{aspect-ratio:16/9;cursor:crosshair}.row{display:flex;gap:10px;align-items:center;margin:8px 0}button,select,input{padding:7px}#status{white-space:pre-wrap;color:#9ed}</style></head>
+<body><h1>Human K0–K4 Actor Trajectory</h1><p>Reference is diagnostic only. Click the separate top-down plane; camera stays ShotScript-locked.</p>
+<div class="row"><label>Actor <select id="actor"></select></label><label>K <select id="key"></select></label><label>Author <input id="author" autocomplete="off"></label><button id="save">Save complete trajectory</button></div>
+<main><section><h2>Diagnostic reference</h2><img id="reference"></section><section><h2>Top-down world plane (Y up)</h2><canvas id="plane" width="960" height="540"></canvas><div id="world"></div></section></main><pre id="status"></pre>
+<script>
+'use strict';
+let session=null; const points=new Map();
+const actor=document.getElementById('actor'), key=document.getElementById('key');
+const canvas=document.getElementById('plane'), ctx=canvas.getContext('2d');
+function id(a,k){return a+'::'+k;}
+function currentFrame(){return session.keyframes.find(item=>item.id===key.value);}
+function refreshReference(){const item=currentFrame(); if(item) document.getElementById('reference').src='/files/'+item.diagnostic_frame.path; draw();}
+function world(x,y){const b=session.world_bounds; return [b[0]+x*(b[1]-b[0]),b[3]-y*(b[3]-b[2])];}
+function draw(){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.strokeStyle='#59616a';for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*canvas.width/10,0);ctx.lineTo(i*canvas.width/10,canvas.height);ctx.stroke();ctx.beginPath();ctx.moveTo(0,i*canvas.height/10);ctx.lineTo(canvas.width,i*canvas.height/10);ctx.stroke();}session.actors.forEach((a,j)=>{ctx.fillStyle=['#ff9d3f','#53a8ff','#6bdc78'][j%3];session.keyframes.forEach(k=>{const p=points.get(id(a,k.id));if(p){ctx.beginPath();ctx.arc(p.x*canvas.width,p.y*canvas.height,7,0,Math.PI*2);ctx.fill();}});});}
+canvas.addEventListener('click',event=>{const r=canvas.getBoundingClientRect();const x=(event.clientX-r.left)/r.width,y=(event.clientY-r.top)/r.height;points.set(id(actor.value,key.value),{x,y});const w=world(x,y);document.getElementById('world').textContent='world XY: '+w.map(v=>v.toFixed(3)).join(', ');draw();});
+document.getElementById('save').addEventListener('click',async()=>{const payload=[];session.actors.forEach(a=>session.keyframes.forEach(k=>{const p=points.get(id(a,k.id));if(p)payload.push({actor_id:a,keyframe_id:k.id,t:k.t,x:p.x,y:p.y});}));const response=await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({author_id:document.getElementById('author').value,points:payload})});document.getElementById('status').textContent=JSON.stringify(await response.json(),null,2);});
+key.addEventListener('change',refreshReference);
+fetch('/api/session').then(r=>r.json()).then(value=>{session=value;value.actors.forEach(a=>actor.add(new Option(a,a)));value.keyframes.forEach(k=>key.add(new Option(k.id+' t='+k.t,k.id)));refreshReference();});
+</script></body></html>
