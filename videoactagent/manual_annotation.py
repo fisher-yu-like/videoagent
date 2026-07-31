@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 from collections.abc import Mapping, Sequence
@@ -51,6 +52,7 @@ CAMERA_CATEGORIES = frozenset(
     }
 )
 CAMERA_INTENSITIES = frozenset({"none", "low", "medium", "high", "ambiguous"})
+_SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*", flags=re.ASCII)
 
 
 def sha256_file(path: Path) -> str:
@@ -121,6 +123,19 @@ def _output_path(path: Path, workspace: Path | None) -> Path:
     root = workspace.resolve()
     candidate = path if path.is_absolute() else root / path
     return _below(candidate, root, "output")
+
+
+def _safe_token(value: object, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or value in {".", ".."}
+        or _SAFE_TOKEN.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"{label} must be a safe token matching "
+            "[A-Za-z0-9][A-Za-z0-9_.-]* and cannot be . or .."
+        )
+    return value
 
 
 def _close_reader(reader: object) -> None:
@@ -302,7 +317,9 @@ def prepare_workspace(
                 for item in (story_id, job_id, backend, status)
             ):
                 raise ValueError("result rows require story_id, job_id, backend, and status")
-            assert isinstance(story_id, str) and isinstance(job_id, str)
+            story_id = _safe_token(story_id, "story_id")
+            job_id = _safe_token(job_id, "job_id")
+            backend = _safe_token(backend, "backend")
             if job_id in seen_jobs:
                 raise ValueError(f"duplicate job_id: {job_id}")
             seen_jobs.add(job_id)
@@ -440,6 +457,7 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
     state = payload["annotation_status"]
     if not isinstance(target_type, str) or not isinstance(target_id, str):
         raise ValueError("annotation target identifiers must be strings")
+    target_id = _safe_token(target_id, "target_id")
     if state not in ANNOTATION_STATES:
         raise ValueError("annotation_status must be draft, reviewed, or adjudicated")
     target = _target(session, target_type, target_id)
@@ -448,20 +466,34 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         if payload["reference_annotation_sha256"] is not None:
             raise ValueError("reference annotation cannot bind another reference")
     else:
-        reference_id = target["reference_id"]
+        reference_id = _safe_token(target["reference_id"], "reference_id")
+        reference_sha = _safe_token(
+            payload["reference_annotation_sha256"],
+            "reference_annotation_sha256",
+        )
+        if len(reference_sha) != 64 or any(
+            character not in "0123456789abcdef" for character in reference_sha
+        ):
+            raise ValueError("reference annotation SHA-256 mismatch")
+        annotation_root = session_root / "annotations"
         reference_path = _below(
-            session_root / "annotations" / f"reference__{reference_id}.json",
-            session_root,
-            "reference annotation",
+            annotation_root / "by_sha256" / f"{reference_sha}.json",
+            annotation_root,
+            "reference annotation snapshot",
         )
         if not reference_path.is_file():
-            raise ValueError("reviewed reference annotation must be saved first")
+            raise ValueError("reference annotation SHA-256 mismatch")
         reference_value = _load_object(reference_path, "reference annotation")
+        if sha256_file(reference_path) != reference_sha:
+            raise ValueError("reference annotation SHA-256 mismatch")
         if reference_value.get("annotation_status") not in {"reviewed", "adjudicated"}:
             raise ValueError("result requires a reviewed/adjudicated reference annotation")
-        reference_sha = sha256_file(reference_path)
-        if payload["reference_annotation_sha256"] != reference_sha:
-            raise ValueError("reference annotation SHA-256 mismatch")
+        if (
+            reference_value.get("target_type") != "reference"
+            or reference_value.get("target_id") != reference_id
+            or reference_value.get("story_id") != target.get("story_id")
+        ):
+            raise ValueError("reference annotation provenance mismatch")
     video = target.get("video")
     if not isinstance(video, Mapping) or not isinstance(video.get("frames"), list):
         raise ValueError("target video metadata is unavailable")
@@ -541,9 +573,66 @@ def save_annotation(session_dir: Path, payload: Mapping[str, object]) -> dict[st
         },
     }
     filename = f"{target_type}__{target_id}.json"
-    output = _below(session_root / "annotations" / filename, session_root, "annotation")
-    _atomic_write(output, _json_bytes(saved))
+    annotation_root = session_root / "annotations"
+    output = _below(annotation_root / filename, annotation_root, "annotation")
+    data = _json_bytes(saved)
+    if target_type == "reference" and state in {"reviewed", "adjudicated"}:
+        digest = hashlib.sha256(data).hexdigest()
+        snapshot = _below(
+            annotation_root / "by_sha256" / f"{digest}.json",
+            annotation_root,
+            "reference annotation snapshot",
+        )
+        if snapshot.exists():
+            if not snapshot.is_file() or snapshot.read_bytes() != data:
+                raise ValueError("immutable reference annotation snapshot conflict")
+        else:
+            _atomic_write(snapshot, data)
+    _atomic_write(output, data)
     return saved
+
+
+def annotation_is_paper_eligible(
+    session_dir: Path, annotation_path: Path
+) -> bool:
+    """Revalidate paper eligibility against an immutable reference artifact."""
+
+    session_root = Path(session_dir).resolve()
+    annotation_root = session_root / "annotations"
+    candidate = Path(annotation_path)
+    if not candidate.is_absolute():
+        candidate = annotation_root / candidate
+    annotation = _below(candidate, annotation_root, "annotation")
+    if not annotation.is_file():
+        raise ValueError("annotation is not a file")
+    value = _load_object(annotation, "annotation")
+    if value.get("annotation_status") not in {"reviewed", "adjudicated"}:
+        return False
+    if value.get("target_type") == "reference":
+        return True
+    if value.get("target_type") != "result":
+        raise ValueError("annotation target_type is invalid")
+    reference_sha = value.get("reference_annotation_sha256")
+    if (
+        not isinstance(reference_sha, str)
+        or len(reference_sha) != 64
+        or any(character not in "0123456789abcdef" for character in reference_sha)
+    ):
+        return False
+    snapshot = _below(
+        annotation_root / "by_sha256" / f"{reference_sha}.json",
+        annotation_root,
+        "reference annotation snapshot",
+    )
+    if not snapshot.is_file() or sha256_file(snapshot) != reference_sha:
+        return False
+    reference = _load_object(snapshot, "reference annotation snapshot")
+    return bool(
+        reference.get("annotation_status") in {"reviewed", "adjudicated"}
+        and reference.get("target_type") == "reference"
+        and reference.get("target_id") == value.get("story_id")
+        and reference.get("story_id") == value.get("story_id")
+    )
 
 
 def _handler(session_dir: Path) -> type[BaseHTTPRequestHandler]:

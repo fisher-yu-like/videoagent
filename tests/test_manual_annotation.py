@@ -185,6 +185,35 @@ class ManualAnnotationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "result video SHA-256 mismatch"):
             prepare_workspace(self.index, self.root / "annotation", workspace=self.root)
 
+    def test_prepare_rejects_path_like_job_id_without_overwriting_any_manifest(self) -> None:
+        from videoactagent.manual_annotation import prepare_workspace
+
+        sentinel = self.root / "session_manifest.json"
+        sentinel.write_bytes(b"sentinel-manifest\n")
+        before_index = self.index.read_bytes()
+        value = json.loads(before_index)
+        value["rows"][0]["job_id"] = "../../../session_manifest.json"
+        self.index.write_text(json.dumps(value), encoding="utf-8")
+        malicious_index = self.index.read_bytes()
+        output = self.root / "annotation"
+
+        with self.assertRaisesRegex(ValueError, "job_id must be a safe token"):
+            prepare_workspace(self.index, output, workspace=self.root)
+
+        self.assertEqual(self.index.read_bytes(), malicious_index)
+        self.assertEqual(sentinel.read_bytes(), b"sentinel-manifest\n")
+        self.assertFalse((output / "session_manifest.json").exists())
+
+    def test_save_defensively_rejects_path_like_target_id(self) -> None:
+        from videoactagent.manual_annotation import prepare_workspace, save_annotation
+
+        session_dir = self.root / "annotation"
+        session = prepare_workspace(self.index, session_dir, workspace=self.root)
+        payload = self._payload(session, "reference", "story_a", "draft")
+        payload["target_id"] = "../story_a"
+        with self.assertRaisesRegex(ValueError, "target_id must be a safe token"):
+            save_annotation(session_dir, payload)
+
     def test_result_requires_hash_bound_reviewed_reference_annotation(self) -> None:
         from videoactagent.manual_annotation import save_annotation
 
@@ -233,6 +262,45 @@ class ManualAnnotationTests(unittest.TestCase):
             session_dir, self._payload(session, "reference", "story_a", "draft")
         )
         self.assertFalse(annotation["eligible_for_paper"])
+
+    def test_reviewed_reference_snapshot_survives_current_file_becoming_draft(self) -> None:
+        from videoactagent.manual_annotation import (
+            annotation_is_paper_eligible,
+            prepare_workspace,
+            save_annotation,
+        )
+
+        session_dir = self.root / "annotation"
+        session = prepare_workspace(self.index, session_dir, workspace=self.root)
+        reviewed = save_annotation(
+            session_dir, self._payload(session, "reference", "story_a", "reviewed")
+        )
+        current_reference = session_dir / "annotations" / "reference__story_a.json"
+        reviewed_sha = _sha(current_reference)
+        snapshot = session_dir / "annotations" / "by_sha256" / (reviewed_sha + ".json")
+        self.assertTrue(snapshot.is_file())
+        self.assertEqual(_sha(snapshot), reviewed_sha)
+
+        result = save_annotation(
+            session_dir,
+            self._payload(
+                session, "result", "story_a__kling", "reviewed", reviewed_sha
+            ),
+        )
+        result_path = session_dir / "annotations" / "result__story_a__kling.json"
+        self.assertTrue(result["eligible_for_paper"])
+        self.assertTrue(annotation_is_paper_eligible(session_dir, result_path))
+
+        save_annotation(
+            session_dir, self._payload(session, "reference", "story_a", "draft")
+        )
+        self.assertEqual(
+            json.loads(current_reference.read_text(encoding="utf-8"))["annotation_status"],
+            "draft",
+        )
+        self.assertEqual(_sha(snapshot), reviewed_sha)
+        self.assertTrue(annotation_is_paper_eligible(session_dir, result_path))
+        self.assertEqual(reviewed["annotation_status"], "reviewed")
 
     def test_html_avoids_template_literals_and_exposes_required_controls(self) -> None:
         html = (ROOT / "static" / "manual_annotation.html").read_text(encoding="utf-8")
