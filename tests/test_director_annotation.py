@@ -92,11 +92,14 @@ class DirectorAnnotationTests(unittest.TestCase):
             ["K0", "K1", "K2", "K3", "K4"],
         )
         self.assertEqual(result.camera_trajectory[2].focal_length_mm, 37.0)
-        self.assertIn("actor_a follows the authored path", result.compiled_prompt)
-        self.assertIn("actor_a and actor_b move closer", result.compiled_prompt)
+        self.assertIn("K0 to K1, actor_a moves right", result.compiled_prompt)
+        self.assertIn(
+            "K0 to K1, actor_a and actor_b move closer",
+            result.compiled_prompt,
+        )
         canonical = json.loads(result.canonical_annotation)
         self.assertEqual(canonical["author_id"], "sy")
-        self.assertEqual(canonical["prompt_compiler_version"], "trajectory-facts-v1")
+        self.assertEqual(canonical["prompt_compiler_version"], "trajectory-facts-v2")
         self.assertNotIn("visible_state", canonical["keyframes"][0])
         self.assertEqual(json.loads(result.camera_document)["states"][4]["keyframe_id"], "K4")
 
