@@ -27,7 +27,7 @@ python -m videoactagent.cli director-loop prepare --bundle runs/work/coded_draft
 python -m videoactagent.cli director-loop serve --manifest runs/work/director_loop_v1/station_reunion/director_loop_manifest.json
 ```
 
-打开 `http://127.0.0.1:8769`。先播放完整 Proxy，再选择“锁定起点”：例如选择 K2 会锁定 K0–K2，系统自动带出边界处的人物、摄像机和注视点，你从 K3 开始修改。要改 K2，应选择 K1。页面下方有景别、焦距、插值和画面倾斜的中文说明。
+打开 `http://127.0.0.1:8769`。先播放完整 Proxy，再选择“锁定起点”：例如选择 K2 会锁定 K0–K2，并为 K3/K4 自动初始化当前 Proxy 的完整镜头参数。你只需画人物点、填写 Prompt，并按需修改镜头；要改 K2，应选择 K1。页面会区分继承镜头与人工修改，并在保存时列出具体缺失项。
 
 “生成下一版 Proxy”只调用本机 Blender 并保存不可覆盖的新版本。人工看完并点击“批准当前 Proxy”后，VACE 门禁才会开放；页面不会自动调用 VACE 或付费 API。
 

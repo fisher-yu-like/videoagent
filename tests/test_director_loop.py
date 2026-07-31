@@ -156,6 +156,16 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn("高级镜头参数", html)
         self.assertIn("要修改 K2，请把锁定起点选为 K1", html)
 
+    def test_panel_auto_initializes_camera_with_provenance(self) -> None:
+        html = (ROOT / "static" / "director_panel.html").read_text(encoding="utf-8")
+        self.assertIn("camera_source", html)
+        self.assertIn("来自当前 Proxy，可修改", html)
+        self.assertIn("人工修改", html)
+        self.assertIn("function missingFields", html)
+        self.assertIn("function refreshCameraSource", html)
+        self.assertIn("addEventListener('input'", html)
+        self.assertIn("还缺少：", html)
+
     def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
         from videoactagent.vace_coded_draft import (
             build_vace_director_job,
