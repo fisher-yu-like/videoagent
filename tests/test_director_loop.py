@@ -4,8 +4,12 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
+from unittest import mock
+
+import videoactagent.director_loop as director_loop_module
 
 from videoactagent.director_loop import (
     DirectorLoopError,
@@ -467,6 +471,165 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertEqual(state_path.read_bytes(), state_before)
             state = json.loads(state_path.read_text(encoding="utf-8"))
             self.assertEqual((state["current_iteration"], state["next_iteration"]), ("D0", 1))
+
+    def test_publish_probes_and_commits_the_same_staged_media_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            diagnostic_source = Path(root) / "external-diagnostic.mp4"
+            clay_source = Path(root) / "external-clay.mp4"
+            shutil.copyfile(d0 / "diagnostic.mp4", diagnostic_source)
+            shutil.copyfile(d0 / "clay.mp4", clay_source)
+            diagnostic_before = diagnostic_source.read_bytes()
+            real_media = director_loop_module._media
+            probes = 0
+
+            def mutate_source_after_first_probe(path: Path, timeline: dict) -> dict:
+                nonlocal probes
+                result = real_media(path, timeline)
+                probes += 1
+                if probes == 1:
+                    diagnostic_source.write_bytes(clay_source.read_bytes())
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media",
+                side_effect=mutate_source_after_first_probe,
+            ):
+                iteration_path = publish_iteration(
+                    manifest, job_path, diagnostic_source, clay_source
+                )
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            published_diagnostic = manifest.parent / iteration["diagnostic"]["path"]
+            published_clay = manifest.parent / iteration["clay"]["path"]
+            self.assertEqual(published_diagnostic.read_bytes(), diagnostic_before)
+            self.assertNotEqual(
+                iteration["diagnostic"]["media"]["decoded_pixel_sha256"],
+                iteration["clay"]["media"]["decoded_pixel_sha256"],
+            )
+            self.assertNotEqual(published_diagnostic.read_bytes(), published_clay.read_bytes())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_accepts_validating_status_from_render_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["status"] = "validating"
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+
+            self.assertTrue(iteration_path.is_file())
+            self.assertEqual(
+                json.loads(job_path.read_text(encoding="utf-8"))["status"], "succeeded"
+            )
+
+    def test_publish_rejects_aliased_compiler_input_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["inputs"]["compiled_prompt"] = deepcopy(
+                job["inputs"]["trajectory_prompt"]
+            )
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "input paths must be distinct"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_commits_verified_staged_input_after_queued_input_race(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            prompt_path = job_path.parent / job["inputs"]["restyle_prompt"]["path"]
+            verified_prompt = prompt_path.read_bytes()
+            d0 = manifest.parent / "iterations" / "D0"
+            real_media = director_loop_module._media
+            probes = 0
+
+            def mutate_prompt_after_media_preflight(path: Path, timeline: dict) -> dict:
+                nonlocal probes
+                result = real_media(path, timeline)
+                probes += 1
+                if probes == 2:
+                    prompt_path.write_bytes(b"raced queued restyle prompt\n")
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media",
+                side_effect=mutate_prompt_after_media_preflight,
+            ):
+                iteration_path = publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            published_prompt = manifest.parent / iteration["inputs"]["restyle_prompt"]["path"]
+            self.assertEqual(published_prompt.read_bytes(), verified_prompt)
+            self.assertEqual(
+                iteration["inputs"]["restyle_prompt"]["sha256"],
+                hashlib.sha256(verified_prompt).hexdigest(),
+            )
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_final_verification_failure_restores_every_prepublication_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            input_paths = {
+                name: job_path.parent / record["path"]
+                for name, record in job["inputs"].items()
+            }
+            before = {
+                "job": job_path.read_bytes(),
+                "state": state_path.read_bytes(),
+                **{name: path.read_bytes() for name, path in input_paths.items()},
+            }
+            d0 = manifest.parent / "iterations" / "D0"
+            real_verify = director_loop_module.verify_workspace
+            verifications = 0
+
+            def fail_final_verification(path: Path | str) -> dict:
+                nonlocal verifications
+                verifications += 1
+                if verifications == 2:
+                    raise DirectorLoopError("injected final verification failure")
+                return real_verify(path)
+
+            with mock.patch(
+                "videoactagent.director_loop.verify_workspace",
+                side_effect=fail_final_verification,
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "injected final verification"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            iteration = job_path.parent
+            self.assertEqual(job_path.read_bytes(), before["job"])
+            self.assertEqual(state_path.read_bytes(), before["state"])
+            for name, path in input_paths.items():
+                self.assertEqual(path.read_bytes(), before[name], name)
+            self.assertFalse((iteration / "iteration.json").exists())
+            self.assertFalse((iteration / "diagnostic.mp4").exists())
+            self.assertFalse((iteration / "clay.mp4").exists())
+            self.assertFalse((iteration / "approval.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
 
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))
