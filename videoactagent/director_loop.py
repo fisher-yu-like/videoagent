@@ -36,6 +36,10 @@ from videoactagent.restyle_prompt import (
 
 DIRECTOR_LOOP_SCHEMA_VERSION = "1.1"
 _ITERATION = re.compile(r"^D(?:0|[1-9][0-9]*)$")
+_COMPILER_INPUTS = frozenset({
+    "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
+    "trajectory_prompt", "restyle_prompt",
+})
 _JOB_LOCK = Lock()
 
 
@@ -363,14 +367,10 @@ def _iteration(root: Path, iteration_id: str) -> tuple[Path, dict[str, Any]]:
         ):
             raise DirectorLoopError(f"{iteration_id} compiler version binding is invalid")
         inputs = document.get("inputs")
-        required_inputs = {
-            "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
-            "trajectory_prompt", "restyle_prompt",
-        }
-        if not isinstance(inputs, Mapping) or set(inputs) != required_inputs:
+        if not isinstance(inputs, Mapping) or set(inputs) != _COMPILER_INPUTS:
             raise DirectorLoopError(f"{iteration_id} input inventory is invalid")
         paths = {}
-        for name in required_inputs:
+        for name in _COMPILER_INPUTS:
             if name == "annotation":
                 paths[name] = _verify_annotation_compiler_versions(
                     root, inputs[name], f"{iteration_id} annotation",
@@ -385,6 +385,7 @@ def _iteration(root: Path, iteration_id: str) -> tuple[Path, dict[str, Any]]:
         if not isinstance(source, Mapping) or set(source) != {"restyle_profile"}:
             raise DirectorLoopError(f"{iteration_id} source inventory is invalid")
         _verify_record(root, source["restyle_profile"], f"{iteration_id} restyle_profile")
+        _verify_human_iteration_semantics(root, document, paths)
     return directory, document
 
 
@@ -596,20 +597,72 @@ def _compile_candidate(workspace: Mapping[str, Any], payload: Mapping[str, Any])
         raise DirectorLoopError(str(exc)) from exc
 
 
+def _expected_compiler_artifacts(
+    workspace: Mapping[str, Any], annotation_bytes: bytes, label: str, *,
+    trajectory_version: object, restyle_version: object,
+) -> dict[str, bytes]:
+    annotation = _object_from_bytes(annotation_bytes, f"{label} annotation")
+    if (
+        trajectory_version != PROMPT_COMPILER_VERSION
+        or restyle_version != RESTYLE_COMPILER_VERSION
+        or annotation.get("prompt_compiler_version") != trajectory_version
+        or annotation.get("restyle_compiler_version") != restyle_version
+    ):
+        raise DirectorLoopError(f"{label} annotation compiler version binding is invalid")
+    compiled = _compile_candidate(workspace, annotation)
+    trajectory_bytes = (compiled.trajectory_prompt + "\n").encode("utf-8")
+    return {
+        "annotation": compiled.canonical_annotation,
+        "actor_trajectory": canonical_bytes(compiled.actor_trajectory),
+        "camera_trajectory": compiled.camera_document,
+        "trajectory_prompt": trajectory_bytes,
+        "compiled_prompt": trajectory_bytes,
+        "restyle_prompt": (compiled.restyle_prompt + "\n").encode("utf-8"),
+    }
+
+
+def _verify_compiler_artifact_paths(
+    workspace: Mapping[str, Any], paths: Mapping[str, Path], label: str, *,
+    trajectory_version: object, restyle_version: object,
+) -> dict[str, bytes]:
+    if set(paths) != _COMPILER_INPUTS:
+        raise DirectorLoopError(f"{label} input inventory is invalid")
+    try:
+        resolved = {name: path.resolve(strict=True) for name, path in paths.items()}
+        data = {name: path.read_bytes() for name, path in resolved.items()}
+    except OSError as exc:
+        raise DirectorLoopError(f"cannot read {label} compiler artifacts: {exc}") from exc
+    if len(set(resolved.values())) != len(_COMPILER_INPUTS):
+        raise DirectorLoopError(f"{label} input paths must be distinct")
+    expected = _expected_compiler_artifacts(
+        workspace, data["annotation"], label,
+        trajectory_version=trajectory_version,
+        restyle_version=restyle_version,
+    )
+    for name in sorted(_COMPILER_INPUTS):
+        if data[name] != expected[name]:
+            raise DirectorLoopError(f"compiled director artifact mismatch: {name}")
+    try:
+        changed = [name for name, path in resolved.items() if path.read_bytes() != data[name]]
+    except OSError as exc:
+        raise DirectorLoopError(f"cannot recheck {label} compiler artifacts: {exc}") from exc
+    if changed:
+        raise DirectorLoopError(
+            f"{label} compiler artifacts changed during semantic verification: {changed}"
+        )
+    return data
+
+
 def _snapshot_compiled_job_inputs(
     workspace: Mapping[str, Any], job_path: Path, job: Mapping[str, Any], staging: Path,
 ) -> dict[str, tuple[Path, Path, bytes]]:
     inputs = job.get("inputs")
-    required = {
-        "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
-        "trajectory_prompt", "restyle_prompt",
-    }
-    if not isinstance(inputs, Mapping) or set(inputs) != required:
+    if not isinstance(inputs, Mapping) or set(inputs) != _COMPILER_INPUTS:
         raise DirectorLoopError("render job input inventory is invalid")
 
     snapshots: dict[str, tuple[Path, Path, bytes]] = {}
     source_paths: set[Path] = set()
-    for name in sorted(required):
+    for name in sorted(_COMPILER_INPUTS):
         record = inputs[name]
         if not isinstance(record, Mapping) or set(record) != {"path", "sha256", "bytes"}:
             raise DirectorLoopError(f"render job {name} record is invalid")
@@ -631,29 +684,15 @@ def _snapshot_compiled_job_inputs(
         staged.write_bytes(data)
         snapshots[name] = (source, staged, data)
 
-    annotation = _object_from_bytes(
-        snapshots["annotation"][2], "render job annotation"
+    staged_data = _verify_compiler_artifact_paths(
+        workspace,
+        {name: staged for name, (_source, staged, _data) in snapshots.items()},
+        "render job",
+        trajectory_version=job.get("trajectory_compiler_version"),
+        restyle_version=job.get("restyle_compiler_version"),
     )
-    if (
-        job.get("trajectory_compiler_version") != PROMPT_COMPILER_VERSION
-        or job.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
-        or annotation.get("prompt_compiler_version") != PROMPT_COMPILER_VERSION
-        or annotation.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
-    ):
-        raise DirectorLoopError("render job annotation compiler version binding is invalid")
-    compiled = _compile_candidate(workspace, annotation)
-    trajectory_bytes = (compiled.trajectory_prompt + "\n").encode("utf-8")
-    expected = {
-        "annotation": compiled.canonical_annotation,
-        "actor_trajectory": canonical_bytes(compiled.actor_trajectory),
-        "camera_trajectory": compiled.camera_document,
-        "trajectory_prompt": trajectory_bytes,
-        "compiled_prompt": trajectory_bytes,
-        "restyle_prompt": (compiled.restyle_prompt + "\n").encode("utf-8"),
-    }
-    for name in sorted(required):
-        if snapshots[name][2] != expected[name]:
-            raise DirectorLoopError(f"compiled director artifact mismatch: {name}")
+    for name, (source, staged, _data) in list(snapshots.items()):
+        snapshots[name] = (source, staged, staged_data[name])
     return snapshots
 
 
@@ -677,12 +716,100 @@ def _snapshot_source_file(source: Path, target: Path, label: str) -> None:
         raise DirectorLoopError(f"{label} changed while staging")
 
 
-def _staged_record(target: Path, root: Path, staged: Path) -> dict[str, object]:
+def _probe_media_pair(
+    diagnostic: Path, clay: Path, timeline: Mapping[str, Any], label: str,
+) -> dict[str, dict[str, object]]:
+    paths = {"diagnostic": diagnostic, "clay": clay}
+    result: dict[str, dict[str, object]] = {}
+    for style, path in paths.items():
+        before = (_sha(path), path.stat().st_size)
+        metadata = _media(path, timeline)
+        after = (_sha(path), path.stat().st_size)
+        if after != before:
+            raise DirectorLoopError(f"{label} {style} changed during media probe")
+        result[style] = {
+            "sha256": after[0], "bytes": after[1], "media": metadata,
+        }
+    for style, path in paths.items():
+        if (_sha(path), path.stat().st_size) != (
+            result[style]["sha256"], result[style]["bytes"]
+        ):
+            raise DirectorLoopError(f"{label} {style} changed after media probe")
+    if (
+        result["diagnostic"]["media"]["decoded_pixel_sha256"]
+        == result["clay"]["media"]["decoded_pixel_sha256"]
+    ):
+        raise DirectorLoopError(f"{label} diagnostic and clay videos are pixel-identical")
+    return result
+
+
+def _media_record_from_probe(
+    target: Path, root: Path, probe: Mapping[str, object],
+) -> dict[str, object]:
     return {
         "path": target.relative_to(root).as_posix(),
-        "sha256": _sha(staged),
-        "bytes": staged.stat().st_size,
+        "sha256": probe["sha256"],
+        "bytes": probe["bytes"],
+        "media": probe["media"],
     }
+
+
+def _verify_human_iteration_semantics(
+    root: Path, document: Mapping[str, Any], input_paths: Mapping[str, Path],
+) -> None:
+    iteration_id = document.get("iteration_id")
+    parent_id = document.get("parent_iteration_id")
+    if (
+        not isinstance(iteration_id, str)
+        or not isinstance(parent_id, str)
+        or not _ITERATION.fullmatch(parent_id)
+        or int(parent_id[1:]) >= int(iteration_id[1:])
+    ):
+        raise DirectorLoopError(f"{iteration_id} parent iteration binding is invalid")
+    manifest = _read(root / "director_loop_manifest.json", "director loop manifest")
+    source = document.get("source")
+    profile_record = manifest.get("source", {}).get("restyle_profile")
+    if not isinstance(source, Mapping) or source.get("restyle_profile") != profile_record:
+        raise DirectorLoopError(f"{iteration_id} restyle_profile binding is invalid")
+    semantic_workspace = {
+        "root": root,
+        "document": manifest,
+        "state": {
+            "current_iteration": parent_id,
+            "next_iteration": int(iteration_id[1:]),
+        },
+    }
+    artifact_bytes = _verify_compiler_artifact_paths(
+        semantic_workspace, input_paths, iteration_id,
+        trajectory_version=document.get("trajectory_compiler_version"),
+        restyle_version=document.get("restyle_compiler_version"),
+    )
+    inputs = document["inputs"]
+    for name, data in artifact_bytes.items():
+        record = inputs[name]
+        if (
+            record.get("sha256") != hashlib.sha256(data).hexdigest()
+            or record.get("bytes") != len(data)
+        ):
+            raise DirectorLoopError(f"{iteration_id} {name} semantic record mismatch")
+
+    media_paths = {
+        style: _verify_record(root, document[style], f"{iteration_id} {style}")
+        for style in ("diagnostic", "clay")
+    }
+    probes = _probe_media_pair(
+        media_paths["diagnostic"], media_paths["clay"], manifest["timeline"],
+        iteration_id,
+    )
+    for style in ("diagnostic", "clay"):
+        record = document[style]
+        probe = probes[style]
+        if (
+            record.get("sha256") != probe["sha256"]
+            or record.get("bytes") != probe["bytes"]
+            or record.get("media") != probe["media"]
+        ):
+            raise DirectorLoopError(f"{iteration_id} {style} semantic media mismatch")
 
 
 def _backup_if_present(path: Path, backup: Path, label: str) -> Path | None:
@@ -695,13 +822,15 @@ def _backup_if_present(path: Path, backup: Path, label: str) -> Path | None:
 
 
 def _restore_publication(
-    backups: list[tuple[Path, Path | None]],
+    backups: list[tuple[Path, Path | bytes | None]],
 ) -> None:
     failures: list[str] = []
     for target, backup in reversed(backups):
         try:
             if backup is None:
                 target.unlink(missing_ok=True)
+            elif isinstance(backup, bytes):
+                _write_atomic(target, backup)
             else:
                 _atomic_copy(backup, target)
         except BaseException as exc:
@@ -796,7 +925,7 @@ def publish_iteration(
         job_path = Path(job_path).resolve(strict=True)
         staging = root / f".publish-{uuid4().hex}.staging"
         staging.mkdir()
-        backups: list[tuple[Path, Path | None]] = []
+        backups: list[tuple[Path, Path | bytes | None]] = []
         commit_started = False
         try:
             try:
@@ -856,10 +985,9 @@ def publish_iteration(
             )
             _snapshot_source_file(clay_source, staged_clay, "clay source")
             timeline = workspace["document"]["timeline"]
-            diagnostic_media = _media(staged_diagnostic, timeline)
-            clay_media = _media(staged_clay, timeline)
-            if diagnostic_media["decoded_pixel_sha256"] == clay_media["decoded_pixel_sha256"]:
-                raise DirectorLoopError("diagnostic and clay proxy videos are pixel-identical")
+            _probe_media_pair(
+                staged_diagnostic, staged_clay, timeline, "staged publication"
+            )
 
             directory = job_path.parent
             diagnostic = directory / "diagnostic.mp4"
@@ -872,8 +1000,8 @@ def publish_iteration(
                 raise DirectorLoopError("approval already exists before publication")
 
             backups.extend(
-                (target, staged)
-                for target, staged, _data in input_snapshots.values()
+                (target, data)
+                for target, _staged, data in input_snapshots.values()
             )
             media_backup = staging / "original" / "media"
             backups.extend([
@@ -888,9 +1016,23 @@ def publish_iteration(
                     _backup_if_present(clay, media_backup / "clay.mp4", "clay media"),
                 ),
                 (iteration_path, None),
-                (job_path, staged_job_original),
-                (state_path, staged_state_original),
+                (job_path, job_bytes),
+                (state_path, state_bytes),
             ])
+
+            sealed_input_bytes = _verify_compiler_artifact_paths(
+                staged_workspace,
+                {
+                    name: staged
+                    for name, (_target, staged, _data) in input_snapshots.items()
+                },
+                "staged publication",
+                trajectory_version=job.get("trajectory_compiler_version"),
+                restyle_version=job.get("restyle_compiler_version"),
+            )
+            sealed_media = _probe_media_pair(
+                staged_diagnostic, staged_clay, timeline, "staged publication"
+            )
 
             document = {
                 "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION,
@@ -903,18 +1045,16 @@ def publish_iteration(
                 "trajectory_compiler_version": PROMPT_COMPILER_VERSION,
                 "restyle_compiler_version": RESTYLE_COMPILER_VERSION,
                 "inputs": {
-                    name: _staged_record(target, root, staged)
-                    for name, (target, staged, _data) in input_snapshots.items()
+                    name: _snapshot_record(target, root, sealed_input_bytes[name])
+                    for name, (target, _staged, _data) in input_snapshots.items()
                 },
                 "source": {"restyle_profile": profile_record},
-                "diagnostic": {
-                    **_staged_record(diagnostic, root, staged_diagnostic),
-                    "media": diagnostic_media,
-                },
-                "clay": {
-                    **_staged_record(clay, root, staged_clay),
-                    "media": clay_media,
-                },
+                "diagnostic": _media_record_from_probe(
+                    diagnostic, root, sealed_media["diagnostic"]
+                ),
+                "clay": _media_record_from_probe(
+                    clay, root, sealed_media["clay"]
+                ),
             }
             publish_files = staging / "publish"
             publish_files.mkdir()
