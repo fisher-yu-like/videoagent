@@ -1,0 +1,129 @@
+{
+  "schema_version": "1.0",
+  "story_id": "station_reunion",
+  "duration_seconds": 5.0,
+  "appearance_instruction": "Present a grounded railway-platform reunion with natural human proportions, subdued travel clothing, and consistent station lighting.",
+  "semantic_keyframes": [
+    {
+      "id": "K0",
+      "t": 0.0,
+      "visible_state": "Two people are clearly separated on the platform, with actor_a at the left and actor_b waiting at the right.",
+      "actor_states": [
+        "actor_a stands at the starting position facing actor_b",
+        "actor_b waits at the destination position facing actor_a"
+      ],
+      "camera_state": "locked camera",
+      "must_not_show": [
+        "either actor already close to the other",
+        "physical contact"
+      ]
+    },
+    {
+      "id": "K1",
+      "t": 0.2,
+      "visible_state": "Actor_a has begun a deliberate approach while a substantial gap remains.",
+      "actor_states": [
+        "actor_a takes the first steps toward actor_b",
+        "actor_b remains waiting in place"
+      ],
+      "camera_state": "locked camera",
+      "must_not_show": [
+        "a sudden position jump",
+        "physical contact"
+      ]
+    },
+    {
+      "id": "K2",
+      "t": 0.5,
+      "visible_state": "Actor_a continues across the platform and the distance between the pair is visibly smaller than before.",
+      "actor_states": [
+        "actor_a maintains the approach",
+        "actor_b remains stable and attentive"
+      ],
+      "camera_state": "locked camera",
+      "must_not_show": [
+        "actor_a stopping halfway",
+        "physical contact"
+      ]
+    },
+    {
+      "id": "K3",
+      "t": 0.8,
+      "visible_state": "Actor_a is near actor_b but a small readable separation is still present.",
+      "actor_states": [
+        "actor_a slows while nearing actor_b",
+        "actor_b continues waiting without changing position"
+      ],
+      "camera_state": "locked camera",
+      "must_not_show": [
+        "contact before arrival",
+        "body overlap"
+      ]
+    },
+    {
+      "id": "K4",
+      "t": 1.0,
+      "visible_state": "Actor_a finishes beside actor_b at a natural reunion distance, with both people fully visible.",
+      "actor_states": [
+        "actor_a comes to a controlled stop near actor_b",
+        "actor_b remains in place and acknowledges the arrival"
+      ],
+      "camera_state": "locked camera",
+      "must_not_show": [
+        "body intersection",
+        "either actor leaving the frame"
+      ]
+    }
+  ],
+  "transitions": [
+    {
+      "from": "K0",
+      "to": "K1",
+      "cause": "actor_a recognizes actor_b and initiates the reunion approach",
+      "continuous_change": "actor_a changes from standing to forward movement",
+      "should_not_jump": "actor positions or camera framing"
+    },
+    {
+      "from": "K1",
+      "to": "K2",
+      "cause": "actor_a continues toward the waiting actor",
+      "continuous_change": "the distance between the actors steadily decreases",
+      "should_not_jump": "actor_a trajectory or actor_b position"
+    },
+    {
+      "from": "K2",
+      "to": "K3",
+      "cause": "the uninterrupted approach brings actor_a near actor_b",
+      "continuous_change": "actor_a advances and begins to slow",
+      "should_not_jump": "remaining separation or body orientation"
+    },
+    {
+      "from": "K3",
+      "to": "K4",
+      "cause": "actor_a reaches the intended reunion distance",
+      "continuous_change": "forward motion eases into a stable stop",
+      "should_not_jump": "final spacing or camera framing"
+    }
+  ],
+  "causal_constraints": [
+    "actor_a must begin moving before the inter-person distance can decrease",
+    "near-arrival must follow a continuous approach",
+    "the final stop must occur only after actor_a reaches reunion distance"
+  ],
+  "must_show": [
+    "clear initial separation",
+    "continuous approach by actor_a",
+    "progressive reduction of the gap",
+    "final stable reunion distance"
+  ],
+  "must_avoid": [
+    "premature contact before the final state",
+    "teleporting or discontinuous motion",
+    "camera movement",
+    "actor body intersection"
+  ],
+  "uncertain_assumptions": [
+    "actor_b remains stationary throughout the five-second event",
+    "reunion distance means close proximity without requiring an embrace"
+  ]
+}
