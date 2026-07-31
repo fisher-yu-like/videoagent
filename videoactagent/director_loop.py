@@ -304,6 +304,11 @@ def _iteration(root: Path, iteration_id: str) -> tuple[Path, dict[str, Any]]:
     for style in ("diagnostic", "clay"):
         _verify_record(root, document.get(style), f"{iteration_id} {style}")
     if document.get("human_authored") is True:
+        if (
+            document.get("trajectory_compiler_version") != PROMPT_COMPILER_VERSION
+            or document.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
+        ):
+            raise DirectorLoopError(f"{iteration_id} compiler version binding is invalid")
         inputs = document.get("inputs")
         required_inputs = {
             "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
@@ -616,6 +621,11 @@ def publish_iteration(
         raise DirectorLoopError("render job is outside its iteration")
     if job.get("parent_iteration_id") != state["current_iteration"]:
         raise DirectorLoopError("render job parent is stale")
+    if (
+        job.get("trajectory_compiler_version") != PROMPT_COMPILER_VERSION
+        or job.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
+    ):
+        raise DirectorLoopError("render job compiler version binding is invalid")
     job_inputs = job.get("inputs")
     expected_inputs = {
         "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
@@ -651,6 +661,8 @@ def publish_iteration(
         "schema_version": SCHEMA_VERSION, "iteration_id": iteration_id,
         "parent_iteration_id": job["parent_iteration_id"], "status": "succeeded",
         "created_at": job["created_at"], "completed_at": _now(), "human_authored": True,
+        "trajectory_compiler_version": PROMPT_COMPILER_VERSION,
+        "restyle_compiler_version": RESTYLE_COMPILER_VERSION,
         "inputs": {
             name: _record(directory / record["path"], root)
             for name, record in job["inputs"].items()
@@ -693,6 +705,8 @@ def approve_iteration(
         "schema_version": SCHEMA_VERSION, "approved": True,
         "iteration_id": iteration_id, "author_id": author_id.strip(),
         "approved_at": _now(), "iteration_manifest": _record(directory / "iteration.json", root),
+        "trajectory_compiler_version": iteration["trajectory_compiler_version"],
+        "restyle_compiler_version": iteration["restyle_compiler_version"],
         "annotation": iteration["inputs"]["annotation"],
         "actor_trajectory": iteration["inputs"]["actor_trajectory"],
         "camera_trajectory": iteration["inputs"]["camera_trajectory"],
@@ -723,6 +737,16 @@ def export_approved_iteration(manifest_path: Path | str) -> dict[str, Any]:
         raise DirectorLoopError("approval binding is invalid")
     directory, iteration = _iteration(root, iteration_id)
     _verify_record(root, approval.get("iteration_manifest"), "approved iteration manifest")
+    for name, expected_version in (
+        ("trajectory_compiler_version", PROMPT_COMPILER_VERSION),
+        ("restyle_compiler_version", RESTYLE_COMPILER_VERSION),
+    ):
+        if (
+            iteration.get(name) != expected_version
+            or approval.get(name) != expected_version
+            or approval.get(name) != iteration.get(name)
+        ):
+            raise DirectorLoopError(f"approved {name} compiler version binding is invalid")
     for name in (
         "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
         "trajectory_prompt", "restyle_prompt", "restyle_profile", "diagnostic", "clay",
@@ -738,6 +762,8 @@ def export_approved_iteration(manifest_path: Path | str) -> dict[str, Any]:
             raise DirectorLoopError(f"approved {name} hash binding differs from iteration")
     return {
         "iteration_id": iteration_id,
+        "trajectory_compiler_version": iteration["trajectory_compiler_version"],
+        "restyle_compiler_version": iteration["restyle_compiler_version"],
         "iteration_manifest": _record(directory / "iteration.json", root),
         "approval": _record(approval_path, root),
         "annotation": iteration["inputs"]["annotation"],

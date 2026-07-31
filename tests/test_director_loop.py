@@ -30,6 +30,14 @@ BLENDER = Path(r"D:\blender\blender.exe")
 
 
 class DirectorLoopTests(unittest.TestCase):
+    @staticmethod
+    def rewrite_json(path: Path, value: object) -> bytes:
+        data = (json.dumps(
+            value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+        ) + "\n").encode("utf-8")
+        path.write_bytes(data)
+        return data
+
     def make_workspace(self, root: str, restyle_profile: Path | None = None) -> Path:
         self.assertTrue(BUNDLE.is_file(), f"missing real D0 bundle: {BUNDLE}")
         self.assertTrue(BLENDER.is_file(), f"missing Blender: {BLENDER}")
@@ -211,6 +219,12 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertIn("restyle_prompt", exported)
             self.assertIn("restyle_profile", exported)
             self.assertEqual(
+                exported["trajectory_compiler_version"], PROMPT_COMPILER_VERSION
+            )
+            self.assertEqual(
+                exported["restyle_compiler_version"], RESTYLE_COMPILER_VERSION
+            )
+            self.assertEqual(
                 exported["approval"]["sha256"],
                 hashlib.sha256(approval.read_bytes()).hexdigest(),
             )
@@ -247,6 +261,57 @@ class DirectorLoopTests(unittest.TestCase):
                     with self.assertRaisesRegex(DirectorLoopError, "hash/size mismatch"):
                         export_approved_iteration(manifest)
                     path.write_bytes(original)
+
+    def test_publish_rejects_coordinated_job_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["trajectory_compiler_version"] = "adversarial-trajectory"
+            job["restyle_compiler_version"] = "adversarial-restyle"
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_approve_rejects_published_iteration_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            iteration["trajectory_compiler_version"] = "adversarial-trajectory"
+            iteration["restyle_compiler_version"] = "adversarial-restyle"
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                approve_iteration(manifest, "D1", "sy")
+
+    def test_export_rejects_coordinated_approval_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            publish_iteration(manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4")
+            approval_path = approve_iteration(manifest, "D1", "sy")
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            approval["trajectory_compiler_version"] = "adversarial-trajectory"
+            approval["restyle_compiler_version"] = "adversarial-restyle"
+            approval_bytes = self.rewrite_json(approval_path, approval)
+            state_path = manifest.parent / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["approval"]["sha256"] = hashlib.sha256(approval_bytes).hexdigest()
+            state["approval"]["bytes"] = len(approval_bytes)
+            self.rewrite_json(state_path, state)
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                export_approved_iteration(manifest)
 
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))
