@@ -191,6 +191,17 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn("addEventListener('input'", html)
         self.assertIn("还缺少：", html)
 
+    def test_panel_uses_trajectory_prompt_preview(self) -> None:
+        html = (ROOT / "static" / "director_panel.html").read_text(encoding="utf-8")
+        self.assertNotIn('id="prompt"', html)
+        self.assertIn('id="visual-style"', html)
+        self.assertIn('id="mood"', html)
+        self.assertIn('id="prompt-preview"', html)
+        self.assertIn('id="prompt-output"', html)
+        self.assertIn("预览自动 Prompt", html)
+        self.assertIn("/api/prompt-preview", html)
+        self.assertIn('id="prompt-output" readonly', html)
+
     def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
         from videoactagent.vace_coded_draft import (
             build_vace_director_job,
