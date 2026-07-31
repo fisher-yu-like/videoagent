@@ -21,6 +21,7 @@ from PIL import Image
 
 from videoactagent.semantic_plan import SemanticPlanError, SemanticStoryPlan
 from videoactagent.shotscript import ShotScript, ShotScriptError
+from videoactagent.trajectory import TrajectoryInstruction
 
 
 class CodedDraftError(ValueError):
@@ -50,7 +51,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fps", type=_positive_int, default=24)
     parser.add_argument("--resolution", type=_resolution, default=(960, 540))
     parser.add_argument("--render-timeout", type=_positive_int, default=300)
-    return parser.parse_args(argv)
+    parser.add_argument("--trajectory", type=Path)
+    parser.add_argument("--trajectory-authoring", type=Path)
+    args = parser.parse_args(argv)
+    if (args.trajectory is None) != (args.trajectory_authoring is None):
+        parser.error("--trajectory and --trajectory-authoring must be used together")
+    return args
 
 
 def _sha256(path: Path) -> str:
@@ -140,6 +146,7 @@ def _run_profile(
     log_path: Path,
     failure_dir: Path,
     timeout: int,
+    trajectory: Path | None = None,
 ) -> None:
     command = [
         sys.executable,
@@ -160,6 +167,8 @@ def _run_profile(
         "--timeout",
         str(timeout),
     ]
+    if trajectory is not None:
+        command.extend(["--trajectory", str(trajectory)])
     try:
         completed = subprocess.run(
             command,
@@ -521,11 +530,91 @@ def _validate_render_report(
         raise CodedDraftError(f"{style} render report profile does not match the request")
 
 
+def _validate_trajectory_sources(
+    trajectory_path: Path,
+    authoring_path: Path,
+    script: ShotScript,
+) -> tuple[TrajectoryInstruction, dict[str, Any]]:
+    try:
+        instruction = TrajectoryInstruction.from_path(trajectory_path)
+        authoring = json.loads(authoring_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+        raise CodedDraftError(f"cannot validate explicit trajectory: {exc}") from exc
+    if not isinstance(authoring, Mapping):
+        raise CodedDraftError("trajectory authoring evidence must be one object")
+    if (
+        authoring.get("trajectory_sha256") != _sha256(trajectory_path)
+        or authoring.get("projection_policy")
+        != "top_down_world_bounds_linear_y_up_z0"
+        or authoring.get("camera_policy") != "shotscript_locked"
+        or authoring.get("auto_filled_points") != 0
+        or not isinstance(authoring.get("author_id"), str)
+        or not str(authoring["author_id"]).strip()
+    ):
+        raise CodedDraftError("trajectory authoring evidence binding is invalid")
+    relative = authoring.get("trajectory_path")
+    if relative != trajectory_path.name or trajectory_path.parent != authoring_path.parent:
+        raise CodedDraftError("trajectory authoring path binding is invalid")
+    if len(script.shots) != 1:
+        raise CodedDraftError("explicit trajectory requires one whole-story shot")
+    instruction.validate_identity(script.scene_id, script.shots[0].shot_id)
+    if not math.isclose(instruction.duration_seconds, script.shots[0].duration, abs_tol=1e-9):
+        raise CodedDraftError("trajectory duration differs from ShotScript")
+    expected_actors = {actor.actor_id for actor in script.shots[0].actors}
+    actor_tracks = [track for track in instruction.tracks if track.target_type == "actor"]
+    if (
+        len(actor_tracks) != len(expected_actors)
+        or {track.target_id for track in actor_tracks} != expected_actors
+        or any(track.primitive != "polyline" or track.semantic != "move" for track in actor_tracks)
+    ):
+        raise CodedDraftError("trajectory must contain exactly one move track per actor")
+    return instruction, dict(authoring)
+
+
+def _validate_trajectory_render_manifest(
+    path: Path,
+    *,
+    style: str,
+    fps: int,
+    resolution: tuple[int, int],
+    trajectory_sha256: str,
+    actor_ids: set[str],
+) -> None:
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CodedDraftError(f"cannot parse {style} trajectory render manifest: {exc}") from exc
+    profile = report.get("effective_profile") if isinstance(report, Mapping) else None
+    applied = report.get("applied_tracks") if isinstance(report, Mapping) else None
+    applied_actor_ids = {
+        value.get("target_id")
+        for value in applied.values()
+        if isinstance(value, Mapping) and value.get("target_type") == "actor"
+    } if isinstance(applied, Mapping) else set()
+    if (
+        report.get("render_style") != style
+        or not isinstance(profile, Mapping)
+        or profile.get("fps") != fps
+        or profile.get("resolution") != list(resolution)
+        or report.get("trajectory_sha256") != trajectory_sha256
+        or applied_actor_ids != actor_ids
+    ):
+        raise CodedDraftError(f"{style} trajectory render manifest binding is invalid")
+
+
 def build_coded_draft(args: argparse.Namespace) -> Path:
     blender = _existing_file(args.blender, "Blender executable")
     shotscript = _existing_file(args.shotscript, "ShotScript")
     prompt = _existing_file(args.prompt, "prompt")
     semantic_path = _existing_file(args.semantic_plan, "semantic plan")
+    trajectory = (
+        _existing_file(args.trajectory, "trajectory")
+        if args.trajectory is not None else None
+    )
+    trajectory_authoring = (
+        _existing_file(args.trajectory_authoring, "trajectory authoring")
+        if args.trajectory_authoring is not None else None
+    )
     output = _output_path(args.output_dir)
     failure_dir = output.with_name(f"{output.name}.failed")
     if failure_dir.exists():
@@ -547,13 +636,30 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
                 semantic_path, sources_dir / "semantic_plan.json", "semantic plan"
             ),
         }
+        if trajectory is not None and trajectory_authoring is not None:
+            source_records["trajectory"] = _snapshot(
+                trajectory, sources_dir / "trajectory.json", "trajectory"
+            )
+            source_records["trajectory_authoring"] = _snapshot(
+                trajectory_authoring,
+                sources_dir / "trajectory_authoring.json",
+                "trajectory authoring",
+            )
         semantic_snapshot = sources_dir / "semantic_plan.json"
         snapshot_plan = SemanticStoryPlan.from_path(semantic_snapshot)
         if snapshot_plan.to_dict() != plan.to_dict():
             raise CodedDraftError("semantic plan snapshot changed meaning")
-        _script, expected_frames = _validate_shotscript(
+        script, expected_frames = _validate_shotscript(
             sources_dir / "shotscript.json", snapshot_plan, args.fps
         )
+        explicit_instruction = None
+        explicit_authoring = None
+        if trajectory is not None:
+            explicit_instruction, explicit_authoring = _validate_trajectory_sources(
+                sources_dir / "trajectory.json",
+                sources_dir / "trajectory_authoring.json",
+                script,
+            )
 
         for style in ("diagnostic", "clay"):
             _run_profile(
@@ -566,6 +672,7 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
                 log_path=staging / "logs" / f"{style}.log",
                 failure_dir=failure_dir,
                 timeout=args.render_timeout,
+                trajectory=(sources_dir / "trajectory.json") if trajectory is not None else None,
             )
 
         indices = [
@@ -576,13 +683,20 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         videos: dict[str, dict[str, object]] = {}
         decoded: dict[str, dict[int, Image.Image]] = {}
         for style in ("diagnostic", "clay"):
-            video = staging / "renders" / style / "station_proxy.mp4"
-            _validate_render_report(
-                staging / "renders" / style / "trajectory_report.json",
-                style=style,
-                fps=args.fps,
-                resolution=args.resolution,
-            )
+            filename = "trajectory_proxy.mp4" if trajectory is not None else "station_proxy.mp4"
+            video = staging / "renders" / style / filename
+            if trajectory is not None:
+                _validate_trajectory_render_manifest(
+                    staging / "renders" / style / "trajectory_proxy_manifest.json",
+                    style=style, fps=args.fps, resolution=args.resolution,
+                    trajectory_sha256=_sha256(sources_dir / "trajectory.json"),
+                    actor_ids={actor.actor_id for actor in script.shots[0].actors},
+                )
+            else:
+                _validate_render_report(
+                    staging / "renders" / style / "trajectory_report.json",
+                    style=style, fps=args.fps, resolution=args.resolution,
+                )
             media, selected = _decode_video(
                 video,
                 expected_frames=expected_frames,
@@ -641,6 +755,28 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
             "motion_semantics": {
                 "semantic_plan": source_records["semantic_plan"],
                 "keyframes": semantic_frames,
+                "explicit_trajectory_binding": (
+                    {
+                        "available": True,
+                        "trajectory": {
+                            "path": source_records["trajectory"]["snapshot_path"],
+                            "sha256": source_records["trajectory"]["snapshot_sha256"],
+                            "bytes": source_records["trajectory"]["bytes"],
+                        },
+                        "authoring": {
+                            "path": source_records["trajectory_authoring"]["snapshot_path"],
+                            "sha256": source_records["trajectory_authoring"]["snapshot_sha256"],
+                            "bytes": source_records["trajectory_authoring"]["bytes"],
+                        },
+                        "projection_policy": explicit_authoring["projection_policy"],
+                        "camera_policy": explicit_authoring["camera_policy"],
+                    }
+                    if explicit_instruction is not None and explicit_authoring is not None
+                    else {
+                        "available": False, "trajectory": None, "authoring": None,
+                        "projection_policy": None, "camera_policy": "shotscript_locked",
+                    }
+                ),
             },
             "diagnostic_video": {
                 **videos["diagnostic"],
@@ -656,11 +792,16 @@ def build_coded_draft(args: argparse.Namespace) -> Path:
         bundle_path = staging / "bundle.json"
         _atomic_json(bundle_path, bundle)
 
-        for key, source in (
+        bound_sources = [
             ("shotscript", shotscript),
             ("prompt", prompt),
             ("semantic_plan", semantic_path),
-        ):
+        ]
+        if trajectory is not None and trajectory_authoring is not None:
+            bound_sources.extend(
+                (("trajectory", trajectory), ("trajectory_authoring", trajectory_authoring))
+            )
+        for key, source in bound_sources:
             record = source_records[key]
             snapshot = staging / str(record["snapshot_path"])
             if _sha256(source) != record["original_sha256"] or _sha256(snapshot) != record["snapshot_sha256"]:

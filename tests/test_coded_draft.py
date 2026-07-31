@@ -17,6 +17,11 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image
 
+from videoactagent.trajectory import (
+    TrajectoryInstruction, TrajectoryPoint, TrajectoryTarget, TrajectoryTrack,
+    canonical_bytes,
+)
+
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
@@ -193,6 +198,75 @@ class CodedDraftTests(unittest.TestCase):
             "64x48",
             *extra,
         ]
+
+    def _trajectory_inputs(self) -> tuple[Path, Path]:
+        instruction = TrajectoryInstruction(
+            scene_id="tiny_story", shot_id="whole", duration_seconds=1.0,
+            sample_count=120,
+            tracks=tuple(
+                TrajectoryTrack(
+                    track_id=f"human_{actor}", target=TrajectoryTarget("actor", actor),
+                    primitive="polyline", semantic="move",
+                    points=tuple(TrajectoryPoint(t=t, x=.2 + i * .1, y=.3 + j * .1, visible=True)
+                                 for i, t in enumerate((0.0, .25, .5, 1.0))),
+                )
+                for j, actor in enumerate(("actor_a", "actor_b"))
+            ),
+        )
+        trajectory = self.root / "trajectory.json"
+        trajectory.write_bytes(canonical_bytes(instruction))
+        authoring = self.root / "trajectory_authoring.json"
+        authoring.write_text(json.dumps({
+            "schema_version": "1.0", "author_id": "real_human",
+            "trajectory_path": "trajectory.json", "trajectory_sha256": _sha256(trajectory),
+            "world_bounds": [-5.0, 5.0, -4.0, 4.0],
+            "projection_policy": "top_down_world_bounds_linear_y_up_z0",
+            "camera_policy": "shotscript_locked", "auto_filled_points": 0,
+        }), "utf-8")
+        return trajectory, authoring
+
+    @staticmethod
+    def _successful_trajectory_runner(command, **_kwargs):
+        style = command[command.index("--render-style") + 1]
+        output_dir = Path(command[command.index("--output-dir") + 1])
+        trajectory = Path(command[command.index("--trajectory") + 1])
+        _write_video(output_dir / "trajectory_proxy.mp4", frame_count=4, fps=4,
+                     resolution=(64, 48), base_value=35 if style == "diagnostic" else 155)
+        manifest = {
+            "render_style": style,
+            "effective_profile": {"fps": 4, "resolution": [64, 48]},
+            "trajectory_sha256": _sha256(trajectory),
+            "applied_tracks": {
+                "human_actor_a": {"target_type": "actor", "target_id": "actor_a"},
+                "human_actor_b": {"target_type": "actor", "target_id": "actor_b"},
+            },
+        }
+        (output_dir / "trajectory_proxy_manifest.json").write_text(json.dumps(manifest), "utf-8")
+        return types.SimpleNamespace(returncode=0, stdout="TRAJECTORY_PROXY_OK {}\n", stderr="")
+
+    def test_explicit_trajectory_is_required_as_a_pair_and_bound_into_both_profiles(self):
+        from videoactagent.coded_draft import main
+
+        trajectory, authoring = self._trajectory_inputs()
+        with self.assertRaises(SystemExit):
+            main(self._args("--trajectory", str(trajectory)))
+        with mock.patch("videoactagent.coded_draft.subprocess.run",
+                        side_effect=self._successful_trajectory_runner) as run:
+            result = main(self._args("--trajectory", str(trajectory),
+                                     "--trajectory-authoring", str(authoring)))
+        self.assertEqual(result, 0)
+        self.assertEqual(run.call_count, 2)
+        commands = [call.args[0] for call in run.call_args_list]
+        forwarded = {command[command.index("--trajectory") + 1] for command in commands}
+        self.assertEqual(len(forwarded), 1)
+        self.assertEqual(Path(next(iter(forwarded))).name, "trajectory.json")
+        bundle = json.loads((self.output / "bundle.json").read_text("utf-8"))
+        binding = bundle["motion_semantics"]["explicit_trajectory_binding"]
+        self.assertTrue(binding["available"])
+        self.assertEqual(binding["projection_policy"], "top_down_world_bounds_linear_y_up_z0")
+        self.assertEqual(binding["trajectory"]["sha256"], _sha256(self.output / "sources" / "trajectory.json"))
+        self.assertEqual(bundle["conditioning_video"]["path"],
+                         "renders/clay/trajectory_proxy.mp4")
 
     @staticmethod
     def _successful_runner(command, **_kwargs):

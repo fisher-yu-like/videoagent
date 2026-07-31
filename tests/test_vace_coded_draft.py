@@ -8,6 +8,11 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from videoactagent.trajectory import (
+    TrajectoryInstruction, TrajectoryPoint, TrajectoryTarget, TrajectoryTrack,
+    canonical_bytes,
+)
+
 import imageio_ffmpeg
 from PIL import Image, ImageChops, ImageStat
 
@@ -174,7 +179,62 @@ def _make_coded_draft(root: Path) -> tuple[Path, Path]:
     return bundle_path, manifest_path
 
 
+def _make_explicit_coded_draft(root: Path) -> tuple[Path, Path]:
+    bundle_path, manifest_path = _make_coded_draft(root)
+    trajectory = root / "sources" / "trajectory.json"
+    instruction = TrajectoryInstruction(
+        scene_id="station_reunion", shot_id="whole", duration_seconds=5.0,
+        sample_count=120,
+        tracks=(TrajectoryTrack(track_id="human_actor_a",
+            target=TrajectoryTarget("actor", "actor_a"), primitive="polyline",
+            semantic="move", points=(TrajectoryPoint(0, .1, .5, True),
+                                      TrajectoryPoint(1, .6, .5, True))),),
+    )
+    trajectory.write_bytes(canonical_bytes(instruction))
+    authoring = root / "sources" / "trajectory_authoring.json"
+    authoring.write_text(json.dumps({"schema_version": "1.0", "author_id": "human",
+        "trajectory_path": "trajectory.json", "trajectory_sha256": _sha256(trajectory),
+        "projection_policy": "top_down_world_bounds_linear_y_up_z0",
+        "camera_policy": "shotscript_locked", "auto_filled_points": 0}), "utf-8")
+    trajectory_record = _record(trajectory, root)
+    authoring_record = _record(authoring, root)
+    bundle = json.loads(bundle_path.read_text("utf-8"))
+    bundle["motion_semantics"]["explicit_trajectory_binding"] = {
+        "available": True, "trajectory": trajectory_record, "authoring": authoring_record,
+        "projection_policy": "top_down_world_bounds_linear_y_up_z0",
+        "camera_policy": "shotscript_locked",
+    }
+    bundle_path.write_text(json.dumps(bundle, indent=2), "utf-8")
+    bundle_record = _record(bundle_path, root)
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+    manifest["sources"]["trajectory"] = trajectory_record
+    manifest["sources"]["trajectory_authoring"] = authoring_record
+    manifest["outputs"]["bundle"] = bundle_record
+    manifest["artifact_inventory"] = [
+        record for record in manifest["artifact_inventory"]
+        if record["path"] != "bundle.json"
+    ] + [trajectory_record, authoring_record, bundle_record]
+    manifest_path.write_text(json.dumps(manifest, indent=2), "utf-8")
+    return bundle_path, manifest_path
+
+
 class VaceCodedDraftTests(unittest.TestCase):
+    def test_explicit_trajectory_binding_is_propagated_with_hashes_but_clay_remains_only_control(self):
+        from videoactagent.vace_coded_draft import build_vace_coded_draft_job, verify_vace_coded_draft_job
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle, manifest = _make_explicit_coded_draft(root / "coded")
+            job_path = build_vace_coded_draft_job(bundle, manifest, root / "job")
+            job = verify_vace_coded_draft_job(job_path)
+            binding = job["motion_semantics"]["explicit_trajectory_binding"]
+            self.assertTrue(binding["available"])
+            self.assertEqual(binding["path"], "source/trajectory.json")
+            self.assertEqual(binding["sha256"], _sha256(job_path.parent / binding["path"]))
+            self.assertEqual(binding["authoring_path"], "source/trajectory_authoring.json")
+            self.assertEqual(binding["policy"], "top_down_world_bounds_linear_y_up_z0")
+            self.assertIsNone(job["mapping"]["src_ref_images"])
+            self.assertEqual(job["mapping"]["src_video"], "control/src_video.mp4")
     def test_prepare_builds_verified_clay_only_job_without_reference_image(self):
         from videoactagent.vace_coded_draft import (
             build_vace_coded_draft_job,

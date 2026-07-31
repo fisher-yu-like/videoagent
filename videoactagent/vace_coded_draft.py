@@ -20,6 +20,8 @@ from uuid import uuid4
 
 import imageio_ffmpeg
 
+from videoactagent.trajectory import TrajectoryInstruction
+
 from videoactagent.vace_inputs import (
     MASK_POLICY,
     MASK_SEMANTICS,
@@ -48,6 +50,8 @@ _JOB_ARTIFACT_PATHS = (
     "source/prompt.txt",
     "source/semantic_plan.json",
 )
+_EXPLICIT_JOB_ARTIFACT_PATHS = tuple(sorted((*_JOB_ARTIFACT_PATHS,
+    "source/trajectory.json", "source/trajectory_authoring.json")))
 
 
 class VaceCodedDraftError(ValueError):
@@ -249,8 +253,12 @@ def _verify_inventory(root: Path, records: Any) -> dict[str, Mapping[str, Any]]:
 def _verify_job_inventory(root: Path, records: Any) -> list[dict[str, Any]]:
     if not isinstance(records, list):
         raise VaceCodedDraftError("VACE job inventory must be a list")
-    expected_paths = list(_JOB_ARTIFACT_PATHS)
     paths = [record.get("path") if isinstance(record, Mapping) else None for record in records]
+    expected_paths = (
+        list(_EXPLICIT_JOB_ARTIFACT_PATHS)
+        if paths == list(_EXPLICIT_JOB_ARTIFACT_PATHS)
+        else list(_JOB_ARTIFACT_PATHS)
+    )
     if paths != expected_paths or len({str(path).casefold() for path in paths}) != len(paths):
         raise VaceCodedDraftError("VACE job inventory paths are invalid or case-conflicting")
     verified: list[dict[str, Any]] = []
@@ -470,6 +478,42 @@ def _verified_coded_draft(
             "bundle story_prompt differs from the hashed prompt snapshot"
         )
     provenance = _derive_source_provenance(bundle, semantic, media["frame_count"])
+    explicit_value = motion.get("explicit_trajectory_binding")
+    explicit = None
+    if isinstance(explicit_value, Mapping) and explicit_value.get("available") is True:
+        if set(explicit_value) != {
+            "available", "trajectory", "authoring", "projection_policy", "camera_policy"
+        }:
+            raise VaceCodedDraftError("explicit trajectory binding fields are invalid")
+        trajectory_path = _verify_record(root, explicit_value.get("trajectory"), "explicit trajectory")
+        authoring_path = _verify_record(root, explicit_value.get("authoring"), "trajectory authoring")
+        if (
+            inventory.get(str(explicit_value["trajectory"].get("path"))) != explicit_value["trajectory"]
+            or inventory.get(str(explicit_value["authoring"].get("path"))) != explicit_value["authoring"]
+            or explicit_value.get("projection_policy") != "top_down_world_bounds_linear_y_up_z0"
+            or explicit_value.get("camera_policy") != "shotscript_locked"
+        ):
+            raise VaceCodedDraftError("explicit trajectory source/policy mismatch")
+        instruction = TrajectoryInstruction.from_path(trajectory_path)
+        authoring_doc = _read_object(authoring_path, "trajectory authoring")
+        if (
+            instruction.scene_id != story_id
+            or instruction.sample_count != 120
+            or not _same_number(instruction.duration_seconds, media["duration_seconds"])
+            or authoring_doc.get("trajectory_sha256") != _sha256(trajectory_path)
+            or authoring_doc.get("projection_policy") != explicit_value["projection_policy"]
+            or authoring_doc.get("camera_policy") != "shotscript_locked"
+            or authoring_doc.get("auto_filled_points") != 0
+        ):
+            raise VaceCodedDraftError("explicit trajectory authoring binding is invalid")
+        explicit = {
+            "trajectory_path": trajectory_path, "authoring_path": authoring_path,
+            "policy": explicit_value["projection_policy"],
+        }
+    elif explicit_value is not None and (
+        not isinstance(explicit_value, Mapping) or explicit_value.get("available") is not False
+    ):
+        raise VaceCodedDraftError("explicit trajectory availability is invalid")
     return {
         "root": root,
         "bundle_path": bundle_file,
@@ -481,6 +525,7 @@ def _verified_coded_draft(
         "semantic_path": semantic_path,
         "semantic_sha256": _sha256(semantic_path),
         "prompt_path": prompt_path,
+        "explicit_trajectory": explicit,
         **provenance,
     }
 
@@ -585,6 +630,17 @@ def build_vace_coded_draft_job(
             staging / "source" / "prompt.txt",
             "source/prompt.txt",
         )
+        explicit = verified["explicit_trajectory"]
+        trajectory_record = authoring_record = None
+        if explicit is not None:
+            trajectory_record = _copy_snapshot(
+                explicit["trajectory_path"], staging / "source" / "trajectory.json",
+                "source/trajectory.json",
+            )
+            authoring_record = _copy_snapshot(
+                explicit["authoring_path"], staging / "source" / "trajectory_authoring.json",
+                "source/trajectory_authoring.json",
+            )
         clay_target = staging / "source" / "clay.mp4"
         clay_base = _copy_snapshot(
             verified["clay_path"], clay_target, "source/clay.mp4"
@@ -618,18 +674,14 @@ def build_vace_coded_draft_job(
             "appearance_instruction": verified["appearance_instruction"],
         }
         prompt_text = f"{components['story_prompt']} {components['appearance_instruction']}"
+        inventory_inputs = [mask, control, clay_record, bundle_record, manifest_record,
+                            prompt_record, semantic_record]
+        if trajectory_record is not None and authoring_record is not None:
+            inventory_inputs.extend((trajectory_record, authoring_record))
         job_inventory = sorted(
             (
                 _artifact_projection(record)
-                for record in (
-                    mask,
-                    control,
-                    clay_record,
-                    bundle_record,
-                    manifest_record,
-                    prompt_record,
-                    semantic_record,
-                )
+                for record in inventory_inputs
             ),
             key=lambda record: record["path"],
         )
@@ -646,6 +698,10 @@ def build_vace_coded_draft_job(
                 "semantic_plan": semantic_record,
                 "conditioning_video": clay_record,
                 "source_bundle_backend_consumed": False,
+                **(
+                    {"trajectory": trajectory_record, "trajectory_authoring": authoring_record}
+                    if trajectory_record is not None and authoring_record is not None else {}
+                ),
             },
             "control": control,
             "inventory": job_inventory,
@@ -657,12 +713,19 @@ def build_vace_coded_draft_job(
             },
             "motion_semantics": {
                 "semantic_plan_sha256": semantic_record["sha256"],
-                "explicit_trajectory_binding": {
-                    "available": False,
-                    "path": None,
-                    "sha256": None,
-                    "policy": "not_required_for_initial_clay_only_pilot",
-                },
+                "explicit_trajectory_binding": (
+                    {
+                        "available": True, "path": trajectory_record["path"],
+                        "sha256": trajectory_record["sha256"],
+                        "authoring_path": authoring_record["path"],
+                        "authoring_sha256": authoring_record["sha256"],
+                        "policy": explicit["policy"],
+                    }
+                    if explicit is not None else {
+                        "available": False, "path": None, "sha256": None,
+                        "policy": "not_required_for_initial_clay_only_pilot",
+                    }
+                ),
                 "keyframes": [
                     {
                         "semantic_id": item["semantic_id"],
@@ -756,6 +819,11 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         "conditioning_video",
         "source_bundle_backend_consumed",
     }
+    has_explicit_source = isinstance(source, Mapping) and (
+        "trajectory" in source or "trajectory_authoring" in source
+    )
+    if has_explicit_source:
+        expected_source_fields.update({"trajectory", "trajectory_authoring"})
     if (
         not isinstance(source, Mapping)
         or set(source) != expected_source_fields
@@ -771,6 +839,14 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     ):
         snapshot_paths[name] = _verify_record(
             root, source.get(name), name, expected_path=expected
+        )
+    if has_explicit_source:
+        snapshot_paths["trajectory"] = _verify_record(
+            root, source.get("trajectory"), "trajectory", expected_path="source/trajectory.json"
+        )
+        snapshot_paths["trajectory_authoring"] = _verify_record(
+            root, source.get("trajectory_authoring"), "trajectory authoring",
+            expected_path="source/trajectory_authoring.json",
         )
     clay = source.get("conditioning_video")
     clay_path = _verify_record(
@@ -849,6 +925,19 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     source_provenance = _derive_source_provenance(
         source_bundle, source_semantic, media["frame_count"]
     )
+    source_explicit = source_bundle.get("motion_semantics", {}).get(
+        "explicit_trajectory_binding"
+    )
+    if has_explicit_source:
+        if (
+            not isinstance(source_explicit, Mapping)
+            or source_explicit.get("available") is not True
+            or source_explicit.get("trajectory", {}).get("sha256")
+            != source["trajectory"]["sha256"]
+            or source_explicit.get("authoring", {}).get("sha256")
+            != source["trajectory_authoring"]["sha256"]
+        ):
+            raise VaceCodedDraftError("snapshotted explicit trajectory binding is invalid")
 
     control = job.get("control")
     control_path = _verify_record(
@@ -905,15 +994,26 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
         raise VaceCodedDraftError("VACE clay-only mapping is invalid")
 
     motion = job.get("motion_semantics")
-    if (
-        not isinstance(motion, Mapping)
-        or motion.get("semantic_plan_sha256") != source["semantic_plan"]["sha256"]
-        or motion.get("explicit_trajectory_binding") != {
+    expected_explicit = (
+        {
+            "available": True,
+            "path": "source/trajectory.json",
+            "sha256": source["trajectory"]["sha256"],
+            "authoring_path": "source/trajectory_authoring.json",
+            "authoring_sha256": source["trajectory_authoring"]["sha256"],
+            "policy": source_explicit["projection_policy"],
+        }
+        if has_explicit_source else {
             "available": False,
             "path": None,
             "sha256": None,
             "policy": "not_required_for_initial_clay_only_pilot",
         }
+    )
+    if (
+        not isinstance(motion, Mapping)
+        or motion.get("semantic_plan_sha256") != source["semantic_plan"]["sha256"]
+        or motion.get("explicit_trajectory_binding") != expected_explicit
         or not isinstance(motion.get("keyframes"), list)
         or not motion["keyframes"]
     ):
@@ -983,18 +1083,17 @@ def verify_vace_coded_draft_job(job_path: Path | str) -> dict[str, Any]:
     }
     if mask != expected_mask:
         raise VaceCodedDraftError("VACE mask metadata mismatch")
+    expected_inventory_inputs = [
+        mask, control, clay, source["coded_draft_bundle"],
+        source["coded_draft_manifest"], source["prompt_snapshot"],
+        source["semantic_plan"],
+    ]
+    if has_explicit_source:
+        expected_inventory_inputs.extend((source["trajectory"], source["trajectory_authoring"]))
     expected_inventory = sorted(
         (
             _artifact_projection(record)
-            for record in (
-                mask,
-                control,
-                clay,
-                source["coded_draft_bundle"],
-                source["coded_draft_manifest"],
-                source["prompt_snapshot"],
-                source["semantic_plan"],
-            )
+            for record in expected_inventory_inputs
         ),
         key=lambda record: record["path"],
     )
