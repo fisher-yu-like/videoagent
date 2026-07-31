@@ -91,6 +91,28 @@ class BlenderRunnerRenderProfileTests(unittest.TestCase):
         self.assertEqual(command[command.index("--resolution") + 1], "1280x720")
         self.assertEqual(run.call_args.kwargs["timeout"], 7)
 
+    def test_runner_forwards_camera_trajectory_with_actor_trajectory(self):
+        completed = types.SimpleNamespace(
+            returncode=0, stdout="TRAJECTORY_PROXY_OK\n", stderr=""
+        )
+        with mock.patch.object(
+            blender_runner.subprocess, "run", return_value=completed
+        ) as run:
+            result = blender_runner.main(
+                self.runner_args(
+                    "--trajectory", "actors.json",
+                    "--camera-trajectory", "camera.json",
+                )
+            )
+
+        self.assertEqual(result, 0)
+        command = run.call_args[0][0]
+        self.assertEqual(command[command.index("--trajectory") + 1], str(Path("actors.json").resolve()))
+        self.assertEqual(
+            command[command.index("--camera-trajectory") + 1],
+            str(Path("camera.json").resolve()),
+        )
+
     def test_runner_timeout_returns_124_and_preserves_partial_output(self):
         error = subprocess.TimeoutExpired(
             ["blender.exe"], 7, output="partial stdout\n", stderr="partial stderr\n"
@@ -155,6 +177,11 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
             with self.subTest(flag=flag), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     self.proxy.parse_args(self.proxy_args(flag, value))
+
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.proxy.parse_args(
+                self.proxy_args("--camera-trajectory", "camera.json")
+            )
 
     def test_clay_material_colors_are_neutral_and_actor_contrast_is_stable(self):
         profile = self.proxy.RenderProfile("clay", 6, (160, 90))
@@ -229,9 +256,80 @@ class BlenderClayRenderProfileIntegrationTests(unittest.TestCase):
         trajectory_document = json.loads(TRAJECTORY_PATH.read_text(encoding="utf-8"))
         trajectory_document["duration_seconds"] = 1.0
         trajectory_document["sample_count"] = 7
+        trajectory_document["tracks"] = [
+            track for track in trajectory_document["tracks"]
+            if track["target"]["type"] == "actor"
+        ]
         trajectory = directory / "short_trajectory.json"
         trajectory.write_text(json.dumps(trajectory_document), encoding="utf-8")
         return shotscript, trajectory
+
+    def write_camera_input(self, directory: Path) -> Path:
+        states = []
+        times = [0.0, 0.2, 0.5, 0.8, 1.0]
+        positions = [
+            [0.0, -10.0, 6.0], [0.25, -9.8, 6.1], [0.5, -9.6, 6.2],
+            [0.75, -9.4, 6.1], [1.0, -9.2, 6.0],
+        ]
+        focals = [35.0, 40.0, 50.0, 42.0, 35.0]
+        for index, (time, position, focal) in enumerate(zip(times, positions, focals)):
+            states.append({
+                "keyframe_id": f"K{index}", "t": time,
+                "position": position, "look_at": [0.5, 0.0, 1.0],
+                "focal_length_mm": focal, "shot_size": "wide",
+                "interpolation": "linear", "roll_degrees": 0.0,
+            })
+        path = directory / "camera_trajectory.json"
+        path.write_text(json.dumps({
+            "schema_version": "1.0", "scene_id": "station_platform", "shot_id": "s01",
+            "duration_seconds": 1.0, "states": states,
+        }), encoding="utf-8")
+        return path
+
+    def test_real_authored_camera_trajectory_changes_transform_and_lens(self):
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root)
+            shotscript, trajectory = self.write_short_inputs(directory)
+            camera = self.write_camera_input(directory)
+            output = directory / "directed"
+            completed = subprocess.run(
+                [
+                    sys.executable, str(RUNNER_PATH), "--blender", str(BLENDER),
+                    "--shotscript", str(shotscript), "--trajectory", str(trajectory),
+                    "--camera-trajectory", str(camera), "--output-dir", str(output),
+                    "--fps", "6", "--resolution", "160x90",
+                ],
+                cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            manifest = json.loads(
+                (output / "trajectory_proxy_manifest.json").read_text(encoding="utf-8")
+            )
+            applied = manifest["applied_camera_trajectory"]
+            self.assertEqual([item["keyframe_id"] for item in applied], [f"K{i}" for i in range(5)])
+            self.assertEqual(applied[2]["frame"], 3)
+            self.assertEqual(applied[2]["focal_length_mm"], 50.0)
+
+            expression = (
+                "import bpy,json; s=bpy.context.scene; c=bpy.data.objects['DirectorCamera']; "
+                "rows=[]; "
+                "[(s.frame_set(f),rows.append({'frame':f,'position':[round(float(v),3) for v in c.matrix_world.translation],'lens':round(float(c.data.lens),3)})) for f in [1,2,3,5,6]]; "
+                "print('DIRECTOR_CAMERA_PROBE='+json.dumps(rows))"
+            )
+            probed = subprocess.run(
+                [str(BLENDER), "--background", str(output / "trajectory_proxy.blend"),
+                 "--python-expr", expression],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            )
+            self.assertEqual(probed.returncode, 0, probed.stdout + probed.stderr)
+            line = next(line for line in (probed.stdout + probed.stderr).splitlines()
+                        if line.startswith("DIRECTOR_CAMERA_PROBE="))
+            rows = json.loads(line.partition("=")[2])
+            self.assertEqual(rows[0]["position"], [0.0, -10.0, 6.0])
+            self.assertEqual(rows[2]["position"], [0.5, -9.6, 6.2])
+            self.assertEqual(rows[2]["lens"], 50.0)
+            self.assertEqual(rows[-1]["position"], [1.0, -9.2, 6.0])
 
     def test_real_clay_render_persists_and_decodes_the_effective_profile(self):
         with tempfile.TemporaryDirectory() as root:

@@ -23,6 +23,10 @@ from videoactagent.shotscript import ActorPlan, Shot, ShotScript, Vec3
 from videoactagent.blender_runner import positive_int, resolution_value
 from videoactagent.trajectory import TrajectoryInstruction
 from videoactagent.trajectory_proxy import camera_world_xy
+from videoactagent.director_annotation import (
+    CameraKeyframe,
+    camera_trajectory_from_path,
+)
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--shotscript", type=Path)
     parser.add_argument("--trajectory", type=Path)
+    parser.add_argument("--camera-trajectory", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--keyframes-only", action="store_true")
     parser.add_argument("--keyframe-frames")
@@ -66,7 +71,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--fps", type=positive_int, default=3)
     parser.add_argument("--resolution", type=resolution_value, default=(960, 540))
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.camera_trajectory is not None and args.trajectory is None:
+        parser.error("--camera-trajectory requires --trajectory")
+    return args
 
 
 def hex_color(value: str) -> tuple[float, float, float, float]:
@@ -630,6 +638,38 @@ def apply_trajectory(
     return shot, start_frame, end_frame, applied
 
 
+def apply_camera_trajectory(
+    states: tuple[CameraKeyframe, ...], camera, start_frame: int, end_frame: int
+) -> list[dict[str, object]]:
+    _remove_keyframes(camera, ("location", "rotation_euler"), start_frame, end_frame)
+    _remove_keyframes(camera.data, ("lens",), start_frame, end_frame)
+    previous_interpolation = bpy.context.preferences.edit.keyframe_new_interpolation_type
+    applied = []
+    try:
+        for state in states:
+            frame = _frame_for_time(start_frame, end_frame, state.t)
+            bpy.context.preferences.edit.keyframe_new_interpolation_type = state.interpolation.upper()
+            camera.location = Vector(state.position)
+            direction = Vector(state.look_at) - camera.location
+            camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+            if state.roll_degrees:
+                camera.rotation_euler.rotate_axis("Z", math.radians(state.roll_degrees))
+            camera.data.lens = state.focal_length_mm
+            camera.keyframe_insert(data_path="location", frame=frame)
+            camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            camera.data.keyframe_insert(data_path="lens", frame=frame)
+            applied.append({
+                "keyframe_id": state.keyframe_id, "t": state.t, "frame": frame,
+                "position": list(state.position), "look_at": list(state.look_at),
+                "focal_length_mm": state.focal_length_mm,
+                "shot_size": state.shot_size, "interpolation": state.interpolation,
+                "roll_degrees": state.roll_degrees,
+            })
+    finally:
+        bpy.context.preferences.edit.keyframe_new_interpolation_type = previous_interpolation
+    return applied
+
+
 def rounded_vector(value: Vector) -> list[float]:
     return [round(float(component), 6) for component in value]
 
@@ -801,6 +841,7 @@ def render_trajectory_outputs(
     trajectory_path: Path,
     output_dir: Path,
     profile: RenderProfile = DEFAULT_RENDER_PROFILE,
+    camera_trajectory_path: Path | None = None,
 ):
     output_dir = output_dir.resolve()
     output_dir.mkdir(parents=True, exist_ok=False)
@@ -808,6 +849,15 @@ def render_trajectory_outputs(
     shot, start_frame, end_frame, applied = apply_trajectory(
         profile, script, instruction, actor_roots, camera, ranges
     )
+    applied_camera = []
+    if camera_trajectory_path is not None:
+        camera_states = camera_trajectory_from_path(
+            camera_trajectory_path, scene_id=script.scene_id, shot_id=shot.shot_id,
+            duration_seconds=shot.duration,
+        )
+        applied_camera = apply_camera_trajectory(
+            camera_states, camera, start_frame, end_frame
+        )
 
     blend_path = output_dir / "trajectory_proxy.blend"
     video_path = output_dir / "trajectory_proxy.mp4"
@@ -846,6 +896,10 @@ def render_trajectory_outputs(
         "effective_profile": profile.as_dict(),
         "shotscript_sha256": sha256_file(shotscript_path),
         "trajectory_sha256": sha256_file(trajectory_path),
+        "camera_trajectory_sha256": (
+            sha256_file(camera_trajectory_path)
+            if camera_trajectory_path is not None else None
+        ),
         "controlled_shot": {
             "scene_id": instruction.scene_id,
             "shot_id": shot.shot_id,
@@ -880,6 +934,7 @@ def render_trajectory_outputs(
             "source": "blender_rendered_middle_frame",
         },
         "applied_tracks": applied,
+        "applied_camera_trajectory": applied_camera,
         "scene_objects": scene_objects,
     }
     manifest_path.write_text(
@@ -930,6 +985,7 @@ def main():
             args.trajectory,
             args.output_dir,
             profile,
+            args.camera_trajectory,
         )
     else:
         render_outputs(script, args.output_dir, profile)

@@ -6,6 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 import json
 import math
+from pathlib import Path
 import re
 from typing import Any
 
@@ -284,3 +285,69 @@ def compile_director_annotation(
         canonical_annotation=_canonical(normalized),
         camera_document=_canonical(camera_doc),
     )
+
+
+def camera_trajectory_from_path(
+    path: Path | str, *, scene_id: str | None = None, shot_id: str | None = None,
+    duration_seconds: float | None = None,
+) -> tuple[CameraKeyframe, ...]:
+    source = Path(path)
+    try:
+        value = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DirectorAnnotationError(f"cannot read camera trajectory: {exc}") from exc
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "scene_id", "shot_id", "duration_seconds", "states"
+    }:
+        raise DirectorAnnotationError("camera trajectory fields are invalid")
+    if value.get("schema_version") != SCHEMA_VERSION:
+        raise DirectorAnnotationError("camera trajectory schema_version is invalid")
+    document_scene = _identifier(value.get("scene_id"), "camera trajectory scene_id")
+    document_shot = _identifier(value.get("shot_id"), "camera trajectory shot_id")
+    document_duration = _number(
+        value.get("duration_seconds"), "camera trajectory duration_seconds"
+    )
+    if document_duration <= 0:
+        raise DirectorAnnotationError("camera trajectory duration_seconds must be positive")
+    if scene_id is not None and document_scene != scene_id:
+        raise DirectorAnnotationError("camera trajectory scene_id differs from render input")
+    if shot_id is not None and document_shot != shot_id:
+        raise DirectorAnnotationError("camera trajectory shot_id differs from render input")
+    if duration_seconds is not None and not math.isclose(
+        document_duration, duration_seconds, rel_tol=0.0, abs_tol=1e-9
+    ):
+        raise DirectorAnnotationError("camera trajectory duration differs from render input")
+    raw_states = value.get("states")
+    if not isinstance(raw_states, list) or len(raw_states) != 5:
+        raise DirectorAnnotationError("camera trajectory must contain exactly K0--K4")
+    states = []
+    for index, raw in enumerate(raw_states):
+        if not isinstance(raw, Mapping) or set(raw) != _CAMERA_FIELDS | {"keyframe_id", "t"}:
+            raise DirectorAnnotationError(f"camera K{index} fields are invalid")
+        key = raw.get("keyframe_id")
+        time = _unit(raw.get("t"), f"camera K{index}.t")
+        if key != f"K{index}":
+            raise DirectorAnnotationError("camera keyframe schedule is invalid")
+        position = _vector3(raw.get("position"), f"camera K{index}.position")
+        look_at = _vector3(raw.get("look_at"), f"camera K{index}.look_at")
+        if position == look_at:
+            raise DirectorAnnotationError(f"camera K{index}.look_at must differ from position")
+        focal = _number(raw.get("focal_length_mm"), f"camera K{index}.focal_length_mm")
+        if not 1.0 <= focal <= 300.0:
+            raise DirectorAnnotationError(f"camera K{index}.focal_length_mm is invalid")
+        shot_size = raw.get("shot_size")
+        interpolation = raw.get("interpolation")
+        if shot_size not in _SHOT_SIZES or interpolation not in _INTERPOLATIONS:
+            raise DirectorAnnotationError(f"camera K{index} style/interpolation is invalid")
+        roll = _number(raw.get("roll_degrees"), f"camera K{index}.roll_degrees")
+        if not -180.0 <= roll <= 180.0:
+            raise DirectorAnnotationError(f"camera K{index}.roll_degrees is invalid")
+        states.append(CameraKeyframe(
+            keyframe_id=str(key), t=time, position=position, look_at=look_at,
+            focal_length_mm=focal, shot_size=str(shot_size),
+            interpolation=str(interpolation), roll_degrees=roll,
+        ))
+    times = [state.t for state in states]
+    if times != sorted(times) or len(set(times)) != len(times) or times[0] != 0.0 or times[-1] != 1.0:
+        raise DirectorAnnotationError("camera keyframe schedule is invalid")
+    return tuple(states)

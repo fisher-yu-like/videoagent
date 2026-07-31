@@ -25,6 +25,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--blender", type=Path, required=True)
     parser.add_argument("--shotscript", type=Path, required=True)
     parser.add_argument("--trajectory", type=Path)
+    parser.add_argument("--camera-trajectory", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--render-style",
@@ -34,7 +35,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--fps", type=positive_int, default=3)
     parser.add_argument("--resolution", type=resolution_value, default=(960, 540))
     parser.add_argument("--timeout", type=positive_int, default=180)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.camera_trajectory is not None and args.trajectory is None:
+        parser.error("--camera-trajectory requires --trajectory")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if args.trajectory is not None:
         command.extend(["--trajectory", str(args.trajectory.resolve())])
+    if args.camera_trajectory is not None:
+        command.extend([
+            "--camera-trajectory", str(args.camera_trajectory.resolve())
+        ])
     try:
         completed = subprocess.run(
             command,

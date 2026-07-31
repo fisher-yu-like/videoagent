@@ -3,10 +3,13 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import math
+from pathlib import Path
+import tempfile
 import unittest
 
 from videoactagent.director_annotation import (
     DirectorAnnotationError,
+    camera_trajectory_from_path,
     compile_director_annotation,
 )
 
@@ -81,6 +84,16 @@ class DirectorAnnotationTests(unittest.TestCase):
         first = compile_director_annotation(payload(), contract())
         second = compile_director_annotation(json.loads(first.canonical_annotation), contract())
         self.assertEqual(second.canonical_annotation, first.canonical_annotation)
+
+    def test_camera_document_round_trips_from_disk(self) -> None:
+        compiled = compile_director_annotation(payload(), contract())
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "camera.json"
+            path.write_bytes(compiled.camera_document)
+            states = camera_trajectory_from_path(path)
+        self.assertEqual(len(states), 5)
+        self.assertEqual(states[0].position, (0.0, -10.0, 6.0))
+        self.assertEqual(states[-1].keyframe_id, "K4")
 
     def test_rejects_missing_camera_state(self) -> None:
         value = payload()
