@@ -82,9 +82,13 @@ class CompiledDirectorAnnotation:
     camera_trajectory: tuple[CameraKeyframe, ...]
     trajectory_prompt: str
     restyle_prompt: str
-    compiled_prompt: str
     canonical_annotation: bytes
     camera_document: bytes
+
+    @property
+    def compiled_prompt(self) -> str:
+        """Compatibility alias for trajectory-only VACE consumers."""
+        return self.trajectory_prompt
 
 
 def _exact(value: Mapping[str, object], fields: frozenset[str], label: str) -> None:
@@ -426,7 +430,6 @@ def compile_director_annotation(
         camera_trajectory=tuple(cameras),
         trajectory_prompt=trajectory_prompt,
         restyle_prompt=restyle_prompt,
-        compiled_prompt=trajectory_prompt,
         canonical_annotation=_canonical(normalized),
         camera_document=_canonical(camera_doc),
     )

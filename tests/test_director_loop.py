@@ -100,6 +100,33 @@ class DirectorLoopTests(unittest.TestCase):
         ])
         self.assertEqual(args.restyle_profile, profile)
 
+    def test_new_workspace_iteration_state_and_job_use_schema_1_1(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            documents = (
+                json.loads(manifest.read_text(encoding="utf-8")),
+                json.loads((manifest.parent / "state.json").read_text(encoding="utf-8")),
+                json.loads((manifest.parent / "iterations" / "D0" / "iteration.json").read_text(encoding="utf-8")),
+                json.loads(job_path.read_text(encoding="utf-8")),
+            )
+            self.assertEqual([document["schema_version"] for document in documents], [
+                "1.1", "1.1", "1.1", "1.1",
+            ])
+
+    def test_legacy_schema_1_0_requires_new_workspace_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+            document["schema_version"] = "1.0"
+            self.rewrite_json(manifest, document)
+
+            with self.assertRaisesRegex(
+                DirectorLoopError,
+                "migration required.*prepare a new workspace.*reuse the human annotation",
+            ):
+                verify_workspace(manifest)
+
     def director_payload(self, manifest: Path, boundary: str = "K0") -> dict:
         session = session_document(manifest)
         boundary_index = int(boundary[1:])
@@ -387,6 +414,59 @@ class DirectorLoopTests(unittest.TestCase):
 
             with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
                 export_approved_iteration(manifest)
+
+    def test_publish_rejects_rehashed_arbitrary_compiled_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            replacements = {
+                "trajectory_prompt": b"forged trajectory prompt\n",
+                "compiled_prompt": b"forged trajectory prompt\n",
+                "restyle_prompt": b"forged restyle prompt\n",
+            }
+            for name, data in replacements.items():
+                path = job_path.parent / job["inputs"][name]["path"]
+                path.write_bytes(data)
+                self.rebind_record(job["inputs"][name], data)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_failed_compiler_preflight_leaves_publish_state_transactionally_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            state_before = state_path.read_bytes()
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            compiled_path = job_path.parent / job["inputs"]["compiled_prompt"]["path"]
+            forged = b"rehashed but incompatible compatibility prompt\n"
+            compiled_path.write_bytes(forged)
+            self.rebind_record(job["inputs"]["compiled_prompt"], forged)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            iteration = job_path.parent
+            self.assertFalse((iteration / "iteration.json").exists())
+            self.assertFalse((iteration / "approval.json").exists())
+            self.assertFalse((iteration / "diagnostic.mp4").exists())
+            self.assertFalse((iteration / "clay.mp4").exists())
+            self.assertEqual(
+                json.loads(job_path.read_text(encoding="utf-8"))["status"], "queued"
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual((state["current_iteration"], state["next_iteration"]), ("D0", 1))
 
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import FrozenInstanceError
 import json
 import math
 from pathlib import Path
@@ -8,6 +9,7 @@ import tempfile
 import unittest
 
 from videoactagent.director_annotation import (
+    CompiledDirectorAnnotation,
     DirectorAnnotationError,
     camera_trajectory_from_path,
     compile_director_annotation,
@@ -106,6 +108,9 @@ class DirectorAnnotationTests(unittest.TestCase):
         self.assertEqual(result.camera_trajectory[2].focal_length_mm, 37.0)
         self.assertIn("K0 to K1, actor_a moves right", result.compiled_prompt)
         self.assertEqual(result.compiled_prompt, result.trajectory_prompt)
+        self.assertIsInstance(CompiledDirectorAnnotation.compiled_prompt, property)
+        with self.assertRaises(FrozenInstanceError):
+            result.compiled_prompt = "inconsistent"  # type: ignore[misc]
         self.assertIn("Subjects and wardrobe", result.restyle_prompt)
         self.assertIn("actor_a: an adult in an orange coat", result.restyle_prompt)
         self.assertIn(

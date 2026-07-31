@@ -34,7 +34,7 @@ from videoactagent.restyle_prompt import (
 )
 
 
-SCHEMA_VERSION = "1.0"
+DIRECTOR_LOOP_SCHEMA_VERSION = "1.1"
 _ITERATION = re.compile(r"^D(?:0|[1-9][0-9]*)$")
 _JOB_LOCK = Lock()
 
@@ -69,6 +69,17 @@ def _read(path: Path, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise DirectorLoopError(f"{label} must be one object")
     return value
+
+
+def _require_current_schema(value: Mapping[str, Any], label: str) -> None:
+    schema = value.get("schema_version")
+    if schema == "1.0":
+        raise DirectorLoopError(
+            f"{label} uses legacy schema 1.0; migration required: prepare a new "
+            "workspace and reuse the human annotation"
+        )
+    if schema != DIRECTOR_LOOP_SCHEMA_VERSION:
+        raise DirectorLoopError(f"{label} schema is invalid")
 
 
 def _write_atomic(path: Path, data: bytes) -> None:
@@ -282,14 +293,14 @@ def prepare_workspace(
             frame["semantic_description"] = descriptions.get(frame["id"], "")
 
         d0_document = {
-            "schema_version": SCHEMA_VERSION, "iteration_id": "D0", "parent_iteration_id": None,
+            "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "iteration_id": "D0", "parent_iteration_id": None,
             "status": "succeeded", "created_at": _now(), "human_authored": False,
             "diagnostic": {**diagnostic_record, "media": diagnostic_media},
             "clay": {**clay_record, "media": clay_media},
         }
         _write_atomic(d0 / "iteration.json", _json_bytes(d0_document))
         manifest_doc = {
-            "schema_version": SCHEMA_VERSION, "story_id": verified["story_id"],
+            "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "story_id": verified["story_id"],
             "shot_id": verified["shot_id"], "actors": verified["actors"],
             "world_bounds": verified["world_bounds"], "timeline": timeline,
             "keyframes": keyframes, "source": source_records,
@@ -299,7 +310,7 @@ def prepare_workspace(
         manifest = root / "director_loop_manifest.json"
         _write_atomic(manifest, _json_bytes(manifest_doc))
         _write_atomic(root / "state.json", _json_bytes({
-            "schema_version": SCHEMA_VERSION, "current_iteration": "D0",
+            "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "current_iteration": "D0",
             "approved_iteration": None, "approval": None, "next_iteration": 1,
         }))
         verify_workspace(manifest)
@@ -315,6 +326,7 @@ def _iteration(root: Path, iteration_id: str) -> tuple[Path, dict[str, Any]]:
         raise DirectorLoopError("iteration ID is invalid")
     directory = root / "iterations" / iteration_id
     document = _read(directory / "iteration.json", f"{iteration_id} iteration")
+    _require_current_schema(document, f"{iteration_id} iteration")
     if document.get("iteration_id") != iteration_id or document.get("status") != "succeeded":
         raise DirectorLoopError(f"iteration {iteration_id} is not succeeded")
     for style in ("diagnostic", "clay"):
@@ -361,7 +373,8 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
         "schema_version", "story_id", "shot_id", "actors", "world_bounds", "timeline",
         "keyframes", "source", "blender_path", "initial_iteration", "camera_reference",
     }
-    if set(doc) != required or doc.get("schema_version") != SCHEMA_VERSION:
+    _require_current_schema(doc, "director loop manifest")
+    if set(doc) != required:
         raise DirectorLoopError("director loop manifest schema is invalid")
     blender = Path(str(doc.get("blender_path"))).resolve(strict=True)
     if not blender.is_file():
@@ -397,9 +410,10 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
         _verify_record(root, frame.get("reference"), f"K{index} reference")
     state_path = root / "state.json"
     state = _read(state_path, "director loop state")
+    _require_current_schema(state, "director loop state")
     if set(state) != {
         "schema_version", "current_iteration", "approved_iteration", "approval", "next_iteration"
-    } or state.get("schema_version") != SCHEMA_VERSION:
+    }:
         raise DirectorLoopError("director loop state is invalid")
     current = state.get("current_iteration")
     if not isinstance(current, str):
@@ -557,6 +571,73 @@ def _compile_candidate(workspace: Mapping[str, Any], payload: Mapping[str, Any])
         raise DirectorLoopError(str(exc)) from exc
 
 
+def _verify_compiled_job_inputs(
+    workspace: Mapping[str, Any], job_path: Path, job: Mapping[str, Any],
+) -> dict[str, tuple[Path, bytes]]:
+    inputs = job.get("inputs")
+    required = {
+        "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
+        "trajectory_prompt", "restyle_prompt",
+    }
+    if not isinstance(inputs, Mapping) or set(inputs) != required:
+        raise DirectorLoopError("render job input inventory is invalid")
+
+    paths: dict[str, Path] = {}
+    for name in required:
+        if name == "annotation":
+            paths[name] = _verify_annotation_compiler_versions(
+                job_path.parent, inputs[name], "render job annotation",
+                trajectory_version=job.get("trajectory_compiler_version"),
+                restyle_version=job.get("restyle_compiler_version"),
+            )
+        else:
+            paths[name] = _verify_record(
+                job_path.parent, inputs[name], f"render job {name}"
+            )
+    try:
+        snapshots = {name: (path, path.read_bytes()) for name, path in paths.items()}
+    except OSError as exc:
+        raise DirectorLoopError(f"cannot snapshot render job inputs: {exc}") from exc
+
+    annotation = _read(paths["annotation"], "render job annotation")
+    compiled = _compile_candidate(workspace, annotation)
+    trajectory_bytes = (compiled.trajectory_prompt + "\n").encode("utf-8")
+    expected = {
+        "annotation": compiled.canonical_annotation,
+        "actor_trajectory": canonical_bytes(compiled.actor_trajectory),
+        "camera_trajectory": compiled.camera_document,
+        "trajectory_prompt": trajectory_bytes,
+        "compiled_prompt": trajectory_bytes,
+        "restyle_prompt": (compiled.restyle_prompt + "\n").encode("utf-8"),
+    }
+    for name in required:
+        if snapshots[name][1] != expected[name]:
+            raise DirectorLoopError(f"compiled director artifact mismatch: {name}")
+    return snapshots
+
+
+def _snapshot_record(path: Path, root: Path, data: bytes) -> dict[str, object]:
+    return {
+        "path": path.relative_to(root).as_posix(),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "bytes": len(data),
+    }
+
+
+def _recheck_input_snapshots(snapshots: Mapping[str, tuple[Path, bytes]]) -> None:
+    try:
+        changed = [
+            name for name, (path, data) in snapshots.items()
+            if path.read_bytes() != data
+        ]
+    except OSError as exc:
+        raise DirectorLoopError(f"cannot recheck render job inputs: {exc}") from exc
+    if changed:
+        raise DirectorLoopError(
+            f"render job inputs changed after compiler preflight: {sorted(changed)}"
+        )
+
+
 def preview_prompt(manifest_path: Path | str, payload: Mapping[str, Any]) -> dict[str, str]:
     workspace = verify_workspace(manifest_path)
     compiled = _compile_candidate(workspace, payload)
@@ -587,8 +668,8 @@ def prepare_iteration(manifest_path: Path | str, payload: Mapping[str, Any]) -> 
         trajectory_bytes = (compiled.trajectory_prompt + "\n").encode("utf-8")
         (input_dir / "trajectory_prompt.txt").write_bytes(trajectory_bytes)
         (input_dir / "compiled_prompt.txt").write_bytes(trajectory_bytes)
-        (input_dir / "restyle_prompt.txt").write_text(
-            compiled.restyle_prompt + "\n", encoding="utf-8"
+        (input_dir / "restyle_prompt.txt").write_bytes(
+            (compiled.restyle_prompt + "\n").encode("utf-8")
         )
         inputs = {
             name: _record(input_dir / filename, staging)
@@ -602,7 +683,7 @@ def prepare_iteration(manifest_path: Path | str, payload: Mapping[str, Any]) -> 
             )
         }
         job = {
-            "schema_version": SCHEMA_VERSION, "job_id": f"render-{expected_id}",
+            "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "job_id": f"render-{expected_id}",
             "iteration_id": expected_id, "parent_iteration_id": state["current_iteration"],
             "status": "queued", "created_at": _now(), "updated_at": _now(),
             "trajectory_compiler_version": PROMPT_COMPILER_VERSION,
@@ -623,6 +704,7 @@ def prepare_iteration(manifest_path: Path | str, payload: Mapping[str, Any]) -> 
 def _update_job(job_path: Path, **changes: object) -> dict[str, Any]:
     with _JOB_LOCK:
         job = _read(job_path, "render job")
+        _require_current_schema(job, "render job")
         job.update(changes)
         job["updated_at"] = _now()
         _write_atomic(job_path, _json_bytes(job))
@@ -638,6 +720,7 @@ def publish_iteration(
     state = workspace["state"]
     job_path = Path(job_path).resolve(strict=True)
     job = _read(job_path, "render job")
+    _require_current_schema(job, "render job")
     iteration_id = job.get("iteration_id")
     if not isinstance(iteration_id, str) or job_path.parent != root / "iterations" / iteration_id:
         raise DirectorLoopError("render job is outside its iteration")
@@ -648,22 +731,7 @@ def publish_iteration(
         or job.get("restyle_compiler_version") != RESTYLE_COMPILER_VERSION
     ):
         raise DirectorLoopError("render job compiler version binding is invalid")
-    job_inputs = job.get("inputs")
-    expected_inputs = {
-        "annotation", "actor_trajectory", "camera_trajectory", "compiled_prompt",
-        "trajectory_prompt", "restyle_prompt",
-    }
-    if not isinstance(job_inputs, Mapping) or set(job_inputs) != expected_inputs:
-        raise DirectorLoopError("render job input inventory is invalid")
-    for name in expected_inputs:
-        if name == "annotation":
-            _verify_annotation_compiler_versions(
-                job_path.parent, job_inputs[name], "render job annotation",
-                trajectory_version=job["trajectory_compiler_version"],
-                restyle_version=job["restyle_compiler_version"],
-            )
-        else:
-            _verify_record(job_path.parent, job_inputs[name], f"render job {name}")
+    input_snapshots = _verify_compiled_job_inputs(workspace, job_path, job)
     job_source = job.get("source")
     profile_record = workspace["document"]["source"]["restyle_profile"]
     if (
@@ -677,28 +745,35 @@ def publish_iteration(
     directory = job_path.parent
     diagnostic = directory / "diagnostic.mp4"
     clay = directory / "clay.mp4"
-    if diagnostic_source != diagnostic:
-        shutil.copyfile(diagnostic_source, diagnostic)
-    if clay_source != clay:
-        shutil.copyfile(clay_source, clay)
     timeline = workspace["document"]["timeline"]
-    diagnostic_media = _media(diagnostic, timeline)
-    clay_media = _media(clay, timeline)
+    diagnostic_media = _media(diagnostic_source, timeline)
+    clay_media = _media(clay_source, timeline)
     if diagnostic_media["decoded_pixel_sha256"] == clay_media["decoded_pixel_sha256"]:
         raise DirectorLoopError("diagnostic and clay proxy videos are pixel-identical")
+    _recheck_input_snapshots(input_snapshots)
+
+    diagnostic_record = (
+        _record(diagnostic, root) if diagnostic_source == diagnostic
+        else _copy(diagnostic_source, diagnostic, root)
+    )
+    clay_record = (
+        _record(clay, root) if clay_source == clay
+        else _copy(clay_source, clay, root)
+    )
+    _recheck_input_snapshots(input_snapshots)
     document = {
-        "schema_version": SCHEMA_VERSION, "iteration_id": iteration_id,
+        "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "iteration_id": iteration_id,
         "parent_iteration_id": job["parent_iteration_id"], "status": "succeeded",
         "created_at": job["created_at"], "completed_at": _now(), "human_authored": True,
         "trajectory_compiler_version": PROMPT_COMPILER_VERSION,
         "restyle_compiler_version": RESTYLE_COMPILER_VERSION,
         "inputs": {
-            name: _record(directory / record["path"], root)
-            for name, record in job["inputs"].items()
+            name: _snapshot_record(path, root, data)
+            for name, (path, data) in input_snapshots.items()
         },
         "source": {"restyle_profile": profile_record},
-        "diagnostic": {**_record(diagnostic, root), "media": diagnostic_media},
-        "clay": {**_record(clay, root), "media": clay_media},
+        "diagnostic": {**diagnostic_record, "media": diagnostic_media},
+        "clay": {**clay_record, "media": clay_media},
     }
     iteration_path = directory / "iteration.json"
     _write_atomic(iteration_path, _json_bytes(document))
@@ -731,7 +806,7 @@ def approve_iteration(
     if approval_path.exists():
         raise DirectorLoopError("approval already exists")
     approval = {
-        "schema_version": SCHEMA_VERSION, "approved": True,
+        "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "approved": True,
         "iteration_id": iteration_id, "author_id": author_id.strip(),
         "approved_at": _now(), "iteration_manifest": _record(directory / "iteration.json", root),
         "trajectory_compiler_version": iteration["trajectory_compiler_version"],
@@ -762,6 +837,7 @@ def export_approved_iteration(manifest_path: Path | str) -> dict[str, Any]:
         raise DirectorLoopError("workspace is not approved")
     approval_path = _verify_record(root, state.get("approval"), "approval")
     approval = _read(approval_path, "approval")
+    _require_current_schema(approval, "approval")
     if approval.get("approved") is not True or approval.get("iteration_id") != iteration_id:
         raise DirectorLoopError("approval binding is invalid")
     directory, iteration = _iteration(root, iteration_id)
@@ -814,7 +890,7 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
     _directory, current = _iteration(root, state["current_iteration"])
     inheritance = derive_inherited_keyframes(workspace)
     result = {
-        "schema_version": SCHEMA_VERSION, "story_id": doc["story_id"],
+        "schema_version": DIRECTOR_LOOP_SCHEMA_VERSION, "story_id": doc["story_id"],
         "shot_id": doc["shot_id"], "actors": doc["actors"],
         "world_bounds": doc["world_bounds"], "timeline": doc["timeline"],
         "keyframes": doc["keyframes"], "camera_reference": doc["camera_reference"],
@@ -839,7 +915,9 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         result["current_annotation"] = _read(annotation_path, "current annotation")
     job_path = root / "iterations" / result["next_iteration_id"] / "job.json"
     if job_path.is_file():
-        result["pending_job"] = _read(job_path, "pending render job")
+        pending_job = _read(job_path, "pending render job")
+        _require_current_schema(pending_job, "pending render job")
+        result["pending_job"] = pending_job
     return result
 
 
@@ -871,6 +949,7 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
         workspace = verify_workspace(manifest_path)
         root, doc = workspace["root"], workspace["document"]
         job = _read(job_path, "render job")
+        _require_current_schema(job, "render job")
         directory = job_path.parent
         inputs = directory / "input"
         shotscript = _verify_record(root, doc["source"]["shotscript"], "ShotScript")
