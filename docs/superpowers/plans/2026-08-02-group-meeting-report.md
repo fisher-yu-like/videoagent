@@ -61,7 +61,7 @@ State that VideoActAgent is a human-in-the-loop, executable director layer for c
 Use this exact timing budget, totaling 20 minutes:
 
 ```text
-1.0 + 1.5 + 1.5 + 1.5 + 1.5 + 2.0 + 1.5 + 1.5 + 1.5 + 1.5 + 1.5 + 1.0 + 1.0 + 1.0 = 20.0 minutes
+1.0 + 1.5 + 1.5 + 1.5 + 1.5 + 2.0 + 1.5 + 1.5 + 1.5 + 1.5 + 1.5 + 1.0 + 1.0 + 1.5 = 20.0 minutes
 ```
 
 Each section contains `建议时间`, `页面短文案`, and `口头讲稿`. Sections follow the 14-part structure in the approved design.
