@@ -21,6 +21,7 @@ from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from videoactagent.deepseek_planner import request_multicam_plan
+from videoactagent.director_annotation import CameraKeyframe
 from videoactagent.multicam_plan import MulticamPlanError, load_multicam_plan
 from videoactagent.multicam_eval import evaluate_multicam_iteration
 from videoactagent.multicam_rig import compile_camera_rig
@@ -346,7 +347,57 @@ def _actor_trajectory(document: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def prepare_render(manifest_path: Path | str, plan_id: str) -> Path:
+def _validated_camera_bundle(
+    value: object, *, scene_id: str, shot_id: str, duration: float,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "schema_version", "scene_id", "shot_id", "duration_seconds", "cameras"
+    }:
+        raise DirectorMulticamError("edited camera bundle fields are invalid")
+    if (
+        value.get("schema_version") != "1.0" or value.get("scene_id") != scene_id
+        or value.get("shot_id") != shot_id or float(value.get("duration_seconds", -1)) != duration
+        or not isinstance(value.get("cameras"), Mapping)
+        or set(value["cameras"]) != {"camera_a", "camera_b", "camera_c"}
+    ):
+        raise DirectorMulticamError("edited camera bundle identity is invalid")
+    cameras: dict[str, Any] = {}
+    for camera_id, camera in value["cameras"].items():
+        states = camera.get("states") if isinstance(camera, Mapping) else None
+        if not isinstance(states, list) or len(states) != 5:
+            raise DirectorMulticamError(f"{camera_id} must contain K0--K4")
+        clean = []
+        for index, state in enumerate(states):
+            try:
+                keyframe = CameraKeyframe(
+                    keyframe_id=str(state["keyframe_id"]), t=float(state["t"]),
+                    position=tuple(float(item) for item in state["position"]),
+                    look_at=tuple(float(item) for item in state["look_at"]),
+                    focal_length_mm=float(state["focal_length_mm"]),
+                    shot_size=str(state["shot_size"]),
+                    interpolation=str(state["interpolation"]),
+                    roll_degrees=float(state["roll_degrees"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DirectorMulticamError(f"{camera_id} K{index} is invalid") from exc
+            if keyframe.keyframe_id != f"K{index}" or abs(keyframe.t - _TIMES[index]) > 1e-9:
+                raise DirectorMulticamError(f"{camera_id} keyframe order/time is invalid")
+            values = (*keyframe.position, *keyframe.look_at, keyframe.focal_length_mm, keyframe.roll_degrees)
+            if not all(isinstance(item, (int, float)) and float("-inf") < item < float("inf") for item in values):
+                raise DirectorMulticamError(f"{camera_id} contains non-finite camera values")
+            if keyframe.focal_length_mm <= 0:
+                raise DirectorMulticamError(f"{camera_id} focal length must be positive")
+            clean.append(keyframe.to_dict())
+        cameras[camera_id] = {"states": clean}
+    return {
+        "schema_version": "1.0", "scene_id": scene_id, "shot_id": shot_id,
+        "duration_seconds": duration, "cameras": cameras,
+    }
+
+
+def prepare_render(
+    manifest_path: Path | str, plan_id: str, *, camera_bundle_override: object = None,
+) -> Path:
     workspace = verify_workspace(manifest_path)
     root, document, state = workspace["root"], workspace["document"], workspace["state"]
     if state.get("approved_plan") != plan_id:
@@ -373,7 +424,7 @@ def prepare_render(manifest_path: Path | str, plan_id: str) -> Path:
     actor_path = inputs / "actor_trajectory.json"
     camera_path = inputs / "camera_bundle.json"
     _write(actor_path, _actor_trajectory(document))
-    _write(camera_path, {
+    compiled_bundle = {
         "schema_version": "1.0",
         "scene_id": document["story_id"],
         "shot_id": document["shot_id"],
@@ -382,7 +433,14 @@ def prepare_render(manifest_path: Path | str, plan_id: str) -> Path:
             camera_id: {"states": [state.to_dict() for state in states]}
             for camera_id, states in cameras.items()
         },
-    })
+    }
+    camera_bundle = (
+        compiled_bundle if camera_bundle_override is None else _validated_camera_bundle(
+            camera_bundle_override, scene_id=document["story_id"], shot_id=document["shot_id"],
+            duration=float(document["timeline"]["duration_seconds"]),
+        )
+    )
+    _write(camera_path, camera_bundle)
     job = directory / "job.json"
     _write(job, {
         "schema_version": SCHEMA_VERSION,
@@ -533,9 +591,27 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         "reference_url": "/reference/reference.mp4",
     }
     if state["current_plan"]:
-        result["plan"] = _read(
+        plan_value = _read(
             workspace["root"] / "plans" / state["current_plan"] / "plan.json", "current plan"
         )
+        result["plan"] = plan_value
+        plan = load_multicam_plan(
+            plan_value, scene_id=document["story_id"], actors=document["actors"],
+            locked_through_keyframe=plan_value.get("locked_through_keyframe"),
+        )
+        states = compile_camera_rig(
+            plan=plan, world_bounds=tuple(document["world_bounds"]),
+            actor_keyframes=document["actor_keyframes"],
+        )
+        result["camera_bundle"] = {
+            "schema_version": "1.0", "scene_id": document["story_id"],
+            "shot_id": document["shot_id"],
+            "duration_seconds": document["timeline"]["duration_seconds"],
+            "cameras": {
+                camera_id: {"states": [state.to_dict() for state in camera_states]}
+                for camera_id, camera_states in states.items()
+            },
+        }
     if state["current_iteration"]:
         iteration = state["current_iteration"]
         job = _read(workspace["root"] / "iterations" / iteration / "job.json", "render job")
@@ -637,8 +713,11 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json({"approved": True, "approval_sha256": _sha(approval)})
                 return
             match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/render", path)
-            if match and not payload:
-                job = prepare_render(self.manifest, match.group(1))
+            if match and set(payload) <= {"camera_bundle"}:
+                job = prepare_render(
+                    self.manifest, match.group(1),
+                    camera_bundle_override=payload.get("camera_bundle"),
+                )
                 Thread(target=run_render_job, args=(self.manifest, job), daemon=True).start()
                 value = _read(job, "render job")
                 self._json({"job_id": value["job_id"], "status": "queued"}, HTTPStatus.ACCEPTED)

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Agent 多视角导演</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#e8edf5;background:#111722}body{margin:0;padding:18px;max-width:1500px;margin:auto}
+    h1,h2{margin:.4em 0}.card{background:#1a2230;border:1px solid #344055;border-radius:12px;padding:14px;margin:12px 0}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}video{width:100%;background:#05070a;border-radius:8px}
+    button,select,input{font:inherit;padding:8px 11px;margin:4px;border-radius:7px;border:1px solid #52627c;background:#26344a;color:#fff}
+    button.primary{background:#2463c5}.lane{height:28px;margin:5px 0;border-radius:5px;padding:5px;box-sizing:border-box;background:#2b3b55}
+    canvas{width:100%;height:420px;background:#0d1420;border:1px solid #43516a;border-radius:8px;cursor:crosshair}
+    pre{white-space:pre-wrap;max-height:330px;overflow:auto;color:#cbd7ea}.help{color:#aebbd0;font-size:.94rem}.ok{color:#70d89b}.bad{color:#ff9090}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}canvas{height:300px}}
+  </style>
+</head>
+<body>
+  <h1>Agent 多视角导演（独立标注器）</h1>
+  <p class="help">原人工标注器保持不变。本页先让 DeepSeek 分配三台摄像机职责，再由确定性编译器生成完整 K0–K4 轨迹；你可改摄像机位置，人工批准后才会调用 Blender。不会自动调用 Seedance、Kling 或 VACE。</p>
+
+  <section class="card">
+    <h2>完整故事参考</h2>
+    <video id="reference" controls></video>
+  </section>
+
+  <section class="card">
+    <h2>三台摄像机同步播放</h2>
+    <div class="grid">
+      <div><b>Camera A · Master</b><video id="proxy-camera-a" controls></video></div>
+      <div><b>Camera B · Follow</b><video id="proxy-camera-b" controls></video></div>
+      <div><b>Camera C · Reverse</b><video id="proxy-camera-c" controls></video></div>
+    </div>
+    <button id="sync-play" class="primary">同步播放 / 暂停</button>
+  </section>
+
+  <section class="card">
+    <h2>Agent 职责规划</h2>
+    <label>修改从 <select id="edit-start"><option>K0</option><option>K1</option><option selected>K2</option><option>K3</option><option>K4</option></select> 开始（更早关键帧冻结）</label>
+    <label>审批人 <input id="author" value="human-director"></label>
+    <button id="create-plan" class="primary">生成 / 重规划职责（仅一次 API 调用）</button>
+    <button id="approve-plan">批准职责规划</button>
+    <button id="render-proxy">用当前三机位渲染 Blender Proxy</button>
+    <button id="approve-proxy">批准本次三机位 Proxy</button>
+    <div id="coverage-timeline"></div>
+    <pre id="agent-plan">尚未生成 Agent 规划。</pre>
+  </section>
+
+  <section class="card">
+    <h2>摄像机轨迹编辑</h2>
+    <div id="camera-tabs"></div>
+    <label>关键帧 <select id="keyframe"><option>K0</option><option>K1</option><option selected>K2</option><option>K3</option><option>K4</option></select></label>
+    <label>焦距 mm <input id="focal" type="number" min="1" step="1"></label>
+    <label>高度 Z <input id="height" type="number" step="0.1"></label>
+    <label>Roll 旋转角 <input id="roll" type="number" step="0.5"></label>
+    <canvas id="trajectory-plane" width="1000" height="420"></canvas>
+    <p class="help">彩色圆点是人物，带字母的方块是当前摄像机 K0–K4 初始位置。先选摄像机和关键帧，再在图上点击即可移动；K0–K1 若位于“修改起点”之前会锁定。Look-at 默认继续跟随 Agent 指定的人物，不因移动位置而丢失。</p>
+  </section>
+
+  <section class="card"><b>状态：</b><span id="status">正在读取工作区……</span></section>
+
+<script>
+const $=id=>document.getElementById(id);let session=null,bundle=null,currentCamera='camera_a';
+const videos=[$('proxy-camera-a'),$('proxy-camera-b'),$('proxy-camera-c')];
+async function postJSON(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||r.statusText);return v}
+function author(){return $('author').value.trim()||'human-director'}
+function boundary(){const n=Number($('edit-start').value.slice(1));return n===0?null:'K'+(n-1)}
+async function createAgentPlan(){return postJSON('/api/plans',{locked_through_keyframe:boundary()})}
+async function approvePlan(id){return postJSON('/api/plans/'+id+'/approve',{author_id:author()})}
+async function renderPlan(id){return postJSON('/api/plans/'+id+'/render',{camera_bundle:bundle})}
+async function approveProxy(id){return postJSON('/api/iterations/'+id+'/approve',{author_id:author()})}
+function setStatus(text,bad=false){$('status').textContent=text;$('status').className=bad?'bad':'ok'}
+
+function renderPlanText(){
+  if(!session.plan){$('agent-plan').textContent='尚未生成 Agent 规划。';$('coverage-timeline').innerHTML='';return}
+  $('agent-plan').textContent=JSON.stringify(session.plan,null,2);
+  $('coverage-timeline').innerHTML=session.plan.cameras.map(c=>`<div class="lane"><b>${c.camera_id}</b> · ${c.role} · 目标 ${c.target} · 覆盖 ${c.responsibility_segments.map(x=>x.join('–')).join(', ')}</div>`).join('');
+}
+function state(){return bundle?.cameras[currentCamera].states[Number($('keyframe').value.slice(1))]}
+function syncFields(){const s=state();if(!s)return;$('focal').value=s.focal_length_mm;$('height').value=s.position[2];$('roll').value=s.roll_degrees}
+function saveFields(){const s=state();if(!s)return;s.focal_length_mm=Number($('focal').value);s.position[2]=Number($('height').value);s.roll_degrees=Number($('roll').value);draw()}
+function worldToCanvas(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[(x-minX)/(maxX-minX)*1000,(maxY-y)/(maxY-minY)*420]}
+function canvasToWorld(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[minX+x/1000*(maxX-minX),maxY-y/420*(maxY-minY)]}
+function draw(){
+  const c=$('trajectory-plane'),ctx=c.getContext('2d');ctx.clearRect(0,0,c.width,c.height);ctx.strokeStyle='#2c3b51';for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*100,0);ctx.lineTo(i*100,420);ctx.stroke()}
+  if(!session)return;const colors=['#ffca62','#69d6ff','#e48cff','#71df91'];
+  session.actor_keyframes.forEach((frame,k)=>Object.entries(frame.actors).forEach(([name,p],i)=>{const [minX,maxX,minY,maxY]=session.world_bounds;const x=minX+p.x*(maxX-minX),y=maxY-p.y*(maxY-minY),q=worldToCanvas(x,y);ctx.fillStyle=colors[i];ctx.beginPath();ctx.arc(q[0],q[1],6,0,7);ctx.fill();ctx.fillText(name+' K'+k,q[0]+8,q[1])}));
+  if(bundle){bundle.cameras[currentCamera].states.forEach((s,k)=>{const q=worldToCanvas(s.position[0],s.position[1]);ctx.fillStyle=k===Number($('keyframe').value.slice(1))?'#ff5c78':'#fff';ctx.fillRect(q[0]-7,q[1]-7,14,14);ctx.fillText(currentCamera.slice(-1).toUpperCase()+' K'+k,q[0]+10,q[1])})}
+}
+function tabs(){$('camera-tabs').innerHTML=['camera_a','camera_b','camera_c'].map(id=>`<button data-camera="${id}">${id}${id===currentCamera?' ✓':''}</button>`).join('');$('camera-tabs').querySelectorAll('button').forEach(b=>b.onclick=()=>{currentCamera=b.dataset.camera;tabs();syncFields();draw()})}
+async function refresh(){
+  session=await fetch('/api/session').then(r=>r.json());bundle=session.camera_bundle||bundle;$('reference').src=session.reference_url;
+  if(session.iteration){Object.entries(session.iteration.videos).forEach(([id,url])=>$("proxy-"+id.replaceAll('_','-')).src=url)}else videos.forEach(v=>v.src=session.reference_url);
+  renderPlanText();tabs();syncFields();draw();setStatus(`场景 ${session.story_id}；规划 ${session.current_plan||'无'}；Proxy ${session.current_iteration||'无'}`)
+}
+$('trajectory-plane').onclick=e=>{if(!bundle)return;const k=Number($('keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('此关键帧位于冻结前缀，不能修改。',true);return}const r=e.currentTarget.getBoundingClientRect(),p=canvasToWorld((e.clientX-r.left)/r.width*1000,(e.clientY-r.top)/r.height*420);bundle.cameras[currentCamera].states[k].position[0]=p[0];bundle.cameras[currentCamera].states[k].position[1]=p[1];draw();setStatus(`${currentCamera} K${k} 已移动，尚未渲染。`)};
+$('keyframe').onchange=()=>{syncFields();draw()};['focal','height','roll'].forEach(id=>$(id).onchange=saveFields);
+$('create-plan').onclick=async()=>{try{setStatus('正在调用 DeepSeek（不会自动重试）……');await createAgentPlan();await refresh()}catch(e){setStatus(e.message,true)}};
+$('approve-plan').onclick=async()=>{try{await approvePlan(session.current_plan);await refresh()}catch(e){setStatus(e.message,true)}};
+$('render-proxy').onclick=async()=>{try{const j=await renderPlan(session.approved_plan);setStatus('Blender 正在真实渲染 '+j.job_id);poll(j.job_id)}catch(e){setStatus(e.message,true)}};
+async function poll(id){const j=await fetch('/api/jobs/'+id).then(r=>r.json());if(['queued','rendering'].includes(j.status)){setTimeout(()=>poll(id),1000)}else{await refresh();setStatus('渲染状态：'+j.status,j.status!=='succeeded')}}
+$('approve-proxy').onclick=async()=>{try{await approveProxy(session.current_iteration);await refresh()}catch(e){setStatus(e.message,true)}};
+$('sync-play').onclick=()=>{if(videos[0].paused){const t=videos[0].currentTime;videos.forEach(v=>{v.currentTime=t;v.play()})}else videos.forEach(v=>v.pause())};
+videos[0].ontimeupdate=()=>videos.slice(1).forEach(v=>{if(Math.abs(v.currentTime-videos[0].currentTime)>.08)v.currentTime=videos[0].currentTime});
+refresh().catch(e=>setStatus(e.message,true));
+</script>
+</body></html>
