@@ -1,0 +1,1 @@
+A single continuous five-second city crosswalk scene. Actor A crosses diagonally through the center while actor B walks in the opposite direction; preserve their crossing order, screen direction, and full-body visibility without cuts.

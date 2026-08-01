@@ -223,6 +223,54 @@ def prepare_workspace(
         raise
 
 
+def prepare_suite(
+    config_path: Path | str, blender_path: Path | str, output_dir: Path | str,
+) -> Path:
+    """Prepare six real reference Proxy workspaces without any LLM/API call."""
+    config = Path(config_path).resolve(strict=True)
+    blender = Path(blender_path).resolve(strict=True)
+    value = _read(config, "multicam suite")
+    cases = value.get("cases")
+    if value.get("schema_version") != "multicam-suite-1.0" or not isinstance(cases, list):
+        raise DirectorMulticamError("multicam suite config is invalid")
+    scene_ids = [case.get("scene_id") for case in cases if isinstance(case, Mapping)]
+    if len(cases) != 6 or len(scene_ids) != 6 or len(set(scene_ids)) != 6:
+        raise DirectorMulticamError("multicam suite requires six unique scenes")
+    output = Path(output_dir).resolve(strict=False)
+    if output.exists():
+        raise DirectorMulticamError(f"output already exists: {output}")
+    staging = output.parent / f".{output.name}.{uuid4().hex}.staging"
+    try:
+        staging.mkdir(parents=True)
+        records = []
+        for case in cases:
+            if not isinstance(case, Mapping) or set(case) != {"scene_id", "prompt", "shotscript"}:
+                raise DirectorMulticamError("suite case fields are invalid")
+            prompt = (config.parent / str(case["prompt"])).resolve(strict=True)
+            shotscript = (config.parent / str(case["shotscript"])).resolve(strict=True)
+            script = ShotScript.from_path(shotscript)
+            if script.scene_id != case["scene_id"]:
+                raise DirectorMulticamError("suite scene ID does not match its ShotScript")
+            manifest = prepare_workspace(
+                prompt, shotscript, blender, staging / script.scene_id,
+            )
+            records.append({
+                "scene_id": script.scene_id,
+                "manifest": manifest.relative_to(staging).as_posix(),
+                "manifest_sha256": _sha(manifest),
+            })
+        suite_manifest = staging / "suite_manifest.json"
+        _write(suite_manifest, {
+            "schema_version": "multicam-suite-run-1.0",
+            "prepared_at": _now(), "api_call_count": 0, "cases": records,
+        })
+        os.replace(staging, output)
+        return output / suite_manifest.name
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
     manifest = Path(manifest_path).resolve(strict=True)
     root = manifest.parent
@@ -792,6 +840,10 @@ def _parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve")
     serve.add_argument("--manifest", type=Path, required=True)
     serve.add_argument("--port", type=int, default=8770)
+    suite = sub.add_parser("prepare-suite")
+    suite.add_argument("--config", type=Path, required=True)
+    suite.add_argument("--blender", type=Path, required=True)
+    suite.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -803,6 +855,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.prompt, args.shotscript, args.blender, args.output_dir
             )
             print(f"DIRECTOR_MULTICAM_PREPARED {manifest}")
+        elif args.command == "prepare-suite":
+            manifest = prepare_suite(args.config, args.blender, args.output_dir)
+            print(f"DIRECTOR_MULTICAM_SUITE_PREPARED {manifest}")
         else:
             serve_workspace(args.manifest, args.port)
     except (DirectorMulticamError, OSError, ValueError) as exc:

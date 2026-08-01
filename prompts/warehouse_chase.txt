@@ -1,0 +1,1 @@
+A continuous five-second warehouse chase through the central aisle. Actor A moves quickly from left to right while actor B follows from behind; maintain pursuit order and safe camera coverage without crossing shelving.

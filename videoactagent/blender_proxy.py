@@ -305,11 +305,49 @@ def create_studio_room_environment(profile: RenderProfile):
     create_action_axis(profile)
 
 
+def create_cafe_environment(profile: RenderProfile):
+    floor = create_material(profile, "cafe_floor_mat", (0.30, 0.20, 0.12, 1.0), roughness=0.86)
+    counter = create_material(profile, "cafe_counter_mat", (0.13, 0.07, 0.035, 1.0), roughness=0.72)
+    furniture = create_material(profile, "cafe_furniture_mat", (0.42, 0.24, 0.10, 1.0), roughness=0.78)
+    wall = create_material(profile, "cafe_wall_mat", (0.55, 0.44, 0.31, 1.0), roughness=0.9)
+    warm = create_emissive_material(profile, "cafe_warm_mat", (1.0, 0.55, 0.18, 1.0))
+    add_cube("cafe_floor", (0, 0, -0.14), (6.0, 4.2, 0.14), floor)
+    add_cube("cafe_back_wall", (0, 4.05, 2.7), (6.0, 0.12, 2.8), wall)
+    add_cube("cafe_counter", (0, 3.0, 0.65), (3.8, 0.5, 0.65), counter)
+    for index, x in enumerate((-4.0, 4.0)):
+        add_cylinder(f"cafe_table_{index}", (x, 1.8, 0.55), 0.65, 0.12, furniture)
+        for side in (-0.9, 0.9):
+            add_cube(f"cafe_chair_{index}_{side}", (x + side, 1.8, 0.42), (0.28, 0.28, 0.42), furniture)
+    for index, x in enumerate((-2.5, 0.0, 2.5)):
+        add_uv_sphere(f"cafe_lamp_{index}", (x, 3.2, 2.8), 0.18, warm)
+    create_action_axis(profile)
+
+
+def create_warehouse_environment(profile: RenderProfile):
+    floor = create_material(profile, "warehouse_floor_mat", (0.16, 0.17, 0.18, 1.0), roughness=0.92)
+    shelf = create_material(profile, "warehouse_shelf_mat", (0.20, 0.25, 0.29, 1.0), metallic=0.55, roughness=0.42)
+    crate = create_material(profile, "warehouse_crate_mat", (0.36, 0.20, 0.08, 1.0), roughness=0.88)
+    light = create_emissive_material(profile, "warehouse_light_mat", (0.75, 0.88, 1.0, 1.0))
+    add_cube("warehouse_floor", (0, 0, -0.14), (6.0, 4.2, 0.14), floor)
+    for row, y in enumerate((-2.8, 2.8)):
+        for x in (-5.2, -3.8, 3.8, 5.2):
+            add_cube(f"warehouse_post_{row}_{x}", (x, y, 1.6), (0.10, 0.10, 1.6), shelf)
+        for z in (0.45, 1.45, 2.45):
+            add_cube(f"warehouse_shelf_{row}_{z}", (0, y, z), (5.3, 0.45, 0.07), shelf)
+        for index, x in enumerate((-4.5, -2.8, 2.7, 4.4)):
+            add_cube(f"warehouse_crate_{row}_{index}", (x, y, 0.28), (0.38, 0.35, 0.28), crate)
+    for index, x in enumerate((-3.0, 0.0, 3.0)):
+        add_cube(f"warehouse_light_{index}", (x, 0, 3.5), (0.8, 0.08, 0.04), light)
+    create_action_axis(profile)
+
+
 ENVIRONMENT_BUILDERS = {
     "station": create_station_environment,
     "city_crosswalk": create_city_crosswalk_environment,
     "forest_path": create_forest_path_environment,
     "studio_room": create_studio_room_environment,
+    "cafe": create_cafe_environment,
+    "warehouse": create_warehouse_environment,
 }
 
 
