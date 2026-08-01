@@ -116,6 +116,26 @@ class DirectorMulticamTests(unittest.TestCase):
             job = prepare_render(manifest, "P1")
             self.assertTrue(job.is_file())
 
+    def test_locked_suffix_plan_reaches_blender_worker_boundary(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.approve_initial_staging(manifest)
+            create_plan(
+                manifest,
+                locked_through_keyframe="K1",
+                planner=fake_planner,
+            )
+            approve_plan(manifest, "P1", author_id="human-reviewer")
+            job = prepare_render(manifest, "P1")
+            with patch("videoactagent.director_multicam.subprocess.run") as launch:
+                launch.return_value.returncode = 1
+                launch.return_value.stdout = ""
+                launch.return_value.stderr = "controlled test stop"
+                run_render_job(manifest, job)
+            self.assertEqual(launch.call_count, 1)
+            job_value = json.loads(job.read_text(encoding="utf-8"))
+            self.assertIn("real Blender multicamera render failed", job_value["error"])
+
     def test_staging_suffix_is_immutable_and_invalidates_active_camera_plan(self):
         with tempfile.TemporaryDirectory() as root:
             manifest = self.prepare(root)

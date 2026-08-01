@@ -793,6 +793,7 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
         plan = load_multicam_plan(
             _read(plan_path, "approved plan"),
             scene_id=document["story_id"], actors=_trajectory_targets(trajectory),
+            locked_through_keyframe=plan_approval.get("locked_through_keyframe"),
         )
         inputs = job.parent / "input"
         _verify_record(root, job_value["inputs"]["camera_bundle"], "camera bundle")
