@@ -79,44 +79,116 @@ def _codec_name(path: Path) -> str:
     return match.group(1)
 
 
-def _expected_proxy(
+def _probe_media(path: Path) -> dict[str, object]:
+    frame_count, seconds = imageio_ffmpeg.count_frames_and_secs(str(path))
+    if type(frame_count) is not int or frame_count <= 0:
+        raise ValueError("approved proxy has no decodable frames")
+    reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")
+    try:
+        metadata = next(reader)
+        size = metadata.get("size") if isinstance(metadata, Mapping) else None
+        fps = metadata.get("fps") if isinstance(metadata, Mapping) else None
+        if (
+            not isinstance(size, (tuple, list)) or len(size) != 2
+            or any(type(value) is not int or value <= 0 for value in size)
+            or isinstance(fps, bool) or not isinstance(fps, (int, float))
+            or not math.isfinite(float(fps)) or float(fps) <= 0
+        ):
+            raise ValueError("approved proxy media metadata is invalid")
+        expected_bytes = int(size[0]) * int(size[1]) * 3
+        last = -1
+        for index, raw in enumerate(reader):
+            last = index
+            if len(raw) != expected_bytes:
+                raise ValueError("approved proxy decoded frame byte count is invalid")
+            if index == frame_count - 1:
+                break
+        if last != frame_count - 1:
+            raise ValueError("approved proxy ended before its declared final frame")
+        return {
+            "duration_seconds": float(seconds),
+            "fps": float(fps),
+            "frame_count": frame_count,
+            "dimensions": [int(size[0]), int(size[1])],
+            "codec": _codec_name(path),
+            "decode_pass": True,
+        }
+    finally:
+        _close_reader(reader)
+
+
+def _approved_proxy_snapshot(
     approved_proxy: Mapping[str, object] | Path | None,
+    approved_proxy_root: Path | None,
     expected_duration_seconds: float | None,
-) -> tuple[float, dict[str, object] | None]:
-    duration = expected_duration_seconds
-    provenance: dict[str, object] | None = None
+) -> tuple[float, dict[str, object]]:
+    declared_duration: object = None
+    declared_path: str | None = None
     if isinstance(approved_proxy, Path):
         proxy = approved_proxy.resolve(strict=True)
         if not proxy.is_file():
             raise ValueError("approved proxy is not a file")
-        _count, seconds = imageio_ffmpeg.count_frames_and_secs(str(proxy))
-        provenance = {
-            "path": str(proxy),
-            "sha256": _sha256_file(proxy),
-            "bytes": proxy.stat().st_size,
-            "duration_seconds": float(seconds),
-        }
-        if duration is None:
-            duration = float(seconds)
     elif isinstance(approved_proxy, Mapping):
-        raw_duration = approved_proxy.get("duration_seconds")
-        if raw_duration is None and isinstance(approved_proxy.get("media"), Mapping):
-            raw_duration = approved_proxy["media"].get("duration_seconds")  # type: ignore[index]
-        if raw_duration is not None:
-            if isinstance(raw_duration, bool) or not isinstance(raw_duration, (int, float)):
-                raise ValueError("approved proxy duration must be numeric")
-            if duration is not None and float(duration) != float(raw_duration):
-                raise ValueError("expected duration disagrees with approved proxy")
-            duration = float(raw_duration)
-        provenance = dict(approved_proxy)
+        if approved_proxy_root is None:
+            raise ValueError("approved proxy root is required for a media record")
+        root = Path(approved_proxy_root).resolve(strict=True)
+        if not root.is_dir():
+            raise ValueError("approved proxy root must be a directory")
+        raw_path = approved_proxy.get("path")
+        if not isinstance(raw_path, str) or not raw_path:
+            raise ValueError("approved proxy record path is invalid")
+        relative = Path(raw_path)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("approved proxy record path is unsafe")
+        proxy = (root / relative).resolve(strict=False)
+        try:
+            proxy.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("approved proxy record path is unsafe") from exc
+        if not proxy.is_file():
+            raise ValueError("approved proxy record path is not a file")
+        declared_path = raw_path
+        claimed_sha = approved_proxy.get("sha256")
+        claimed_bytes = approved_proxy.get("bytes")
+        if (
+            not isinstance(claimed_sha, str) or _SHA256.fullmatch(claimed_sha) is None
+            or type(claimed_bytes) is not int or claimed_bytes <= 0
+        ):
+            raise ValueError("approved proxy record hash/size is invalid")
+        actual_sha = _sha256_file(proxy)
+        if actual_sha != claimed_sha or proxy.stat().st_size != claimed_bytes:
+            raise ValueError("approved proxy record hash/size mismatch")
+        declared_duration = approved_proxy.get("duration_seconds")
+        if declared_duration is None and isinstance(approved_proxy.get("media"), Mapping):
+            declared_duration = approved_proxy["media"].get("duration_seconds")  # type: ignore[index]
     elif approved_proxy is not None:
         raise ValueError("approved_proxy must be a media record or local path")
-    if isinstance(duration, bool) or not isinstance(duration, (int, float)):
-        raise ValueError("expected duration is required")
-    duration = float(duration)
-    if not math.isfinite(duration) or duration <= 0:
-        raise ValueError("expected duration must be positive and finite")
-    return duration, provenance
+    else:
+        raise ValueError("an actual approved proxy path or record is required")
+    actual_sha = _sha256_file(proxy)
+    actual_bytes = proxy.stat().st_size
+    media = _probe_media(proxy)
+    duration = float(media["duration_seconds"])
+    tolerance = 1.0 / float(media["fps"])
+    if declared_duration is not None:
+        if isinstance(declared_duration, bool) or not isinstance(declared_duration, (int, float)):
+            raise ValueError("approved proxy declared duration is invalid")
+        if abs(float(declared_duration) - duration) > tolerance:
+            raise ValueError("approved proxy declared duration differs from decoded media")
+    if expected_duration_seconds is not None:
+        if (
+            isinstance(expected_duration_seconds, bool)
+            or not isinstance(expected_duration_seconds, (int, float))
+            or abs(float(expected_duration_seconds) - duration) > tolerance
+        ):
+            raise ValueError("expected duration differs from decoded approved proxy")
+    return duration, {
+        "record_path": declared_path,
+        "resolved_path": str(proxy),
+        "sha256": actual_sha,
+        "bytes": actual_bytes,
+        **media,
+    }
 
 
 def _decode_k_frames(source: Path, destination: Path) -> dict[str, Any]:
@@ -190,6 +262,7 @@ def validate_reference_result(
     output_dir: Path,
     *,
     approved_proxy: Mapping[str, object] | Path | None = None,
+    approved_proxy_root: Path | None = None,
     expected_duration_seconds: float | None = None,
     expected_result_sha256: str | None = None,
 ) -> dict[str, object]:
@@ -201,8 +274,8 @@ def validate_reference_result(
         raise FileExistsError(f"reference result output already exists: {output}")
     if not source.is_file() or source.suffix.lower() != ".mp4":
         raise ValueError("result must be an MP4 file")
-    expected_duration, proxy_provenance = _expected_proxy(
-        approved_proxy, expected_duration_seconds
+    expected_duration, proxy_provenance = _approved_proxy_snapshot(
+        approved_proxy, approved_proxy_root, expected_duration_seconds
     )
     if expected_result_sha256 is not None and (
         not isinstance(expected_result_sha256, str)
@@ -230,12 +303,20 @@ def validate_reference_result(
             if expected_result_sha256 is not None and source_sha != expected_result_sha256:
                 raise ValueError("result SHA-256 mismatch")
             decoded = _decode_k_frames(source, staging / "k_frames")
+            proxy_path = Path(str(proxy_provenance["resolved_path"]))
+            if (
+                not proxy_path.is_file()
+                or proxy_path.stat().st_size != proxy_provenance["bytes"]
+                or _sha256_file(proxy_path) != proxy_provenance["sha256"]
+            ):
+                raise ValueError("approved proxy changed during result validation")
             width, height = decoded["dimensions"]
             fps = decoded["fps"]
             duration = decoded["duration_seconds"]
             if width < 1280 or height < 720 or width * 9 != height * 16:
                 raise ValueError("result dimensions must be positive 720-class 16:9")
-            tolerance = 1.0 / float(fps)
+            proxy_fps = float(proxy_provenance["fps"])
+            tolerance = max(1.0 / float(fps), 1.0 / proxy_fps)
             if abs(float(duration) - expected_duration) > tolerance:
                 raise ValueError(
                     "result duration is materially different from the approved proxy"

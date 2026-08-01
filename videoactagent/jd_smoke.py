@@ -288,6 +288,75 @@ def _claim_reference_attempt(run_root: Path, candidate_sha: str) -> None:
         raise RuntimeError("reference candidate was already attempted in this run root") from exc
 
 
+def _safe_source_path(source_root: Path, declared: object, label: str) -> Path:
+    if not isinstance(declared, str) or not declared:
+        raise ValueError(f"reference source snapshot {label} path is invalid")
+    relative = Path(declared)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"reference source snapshot {label} path is unsafe")
+    target = (source_root / relative).resolve(strict=False)
+    try:
+        target.relative_to(source_root)
+    except ValueError as exc:
+        raise ValueError(f"reference source snapshot {label} path is unsafe") from exc
+    return target
+
+
+def _snapshot_reference_sources(
+    candidate: dict, source_root_value: Path
+) -> dict[str, tuple[Path, bytes, str]]:
+    source_root = source_root_value.resolve(strict=True)
+    if not source_root.is_dir():
+        raise ValueError("reference source root must be a directory")
+    records = candidate["source_records"]
+    snapshots: dict[str, tuple[Path, bytes, str]] = {}
+    for name in sorted(REFERENCE_RECORD_NAMES):
+        record = records[name]
+        path = _safe_source_path(source_root, record["path"], name)
+        if not path.is_file():
+            raise ValueError(f"reference source snapshot {name} is missing")
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if len(data) != record["bytes"] or digest != record["sha256"]:
+            raise ValueError(f"reference source snapshot {name} hash/size mismatch")
+        snapshots[name] = (path, data, digest)
+    prompt = snapshots["restyle_prompt"][1]
+    try:
+        prompt_text = prompt.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise ValueError("reference source snapshot restyle_prompt is not UTF-8") from exc
+    if prompt_text != candidate["payload"]["content"][0]["text"]:
+        raise ValueError("reference source snapshot materialized prompt mismatch")
+    gateway = candidate["capability_evidence"]["gateway"]
+    if gateway is not None:
+        capture = gateway["capture"]
+        path = _safe_source_path(source_root, capture["path"], "capability_capture")
+        if not path.is_file():
+            raise ValueError("reference source snapshot capability capture is missing")
+        data = path.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != capture["sha256"]:
+            raise ValueError("reference source snapshot capability capture hash mismatch")
+        # Re-run Task 5's exact captured request/accepted response validator;
+        # the editable candidate digest alone cannot establish capability.
+        from videoactagent.seedance_reference import _validate_capture_document
+
+        _validate_capture_document(data, candidate["capability"]["model"])
+        snapshots["capability_capture"] = (path, data, digest)
+    return snapshots
+
+
+def _ensure_reference_sources_unchanged(
+    snapshots: dict[str, tuple[Path, bytes, str]]
+) -> None:
+    for name, (path, expected_bytes, expected_sha) in snapshots.items():
+        if not path.is_file():
+            raise ValueError(f"reference source snapshot {name} disappeared")
+        current = path.read_bytes()
+        if current != expected_bytes or hashlib.sha256(current).hexdigest() != expected_sha:
+            raise ValueError(f"reference source snapshot {name} changed")
+
+
 def require_key() -> str:
     api_key = os.environ.get("JD_KLING_KEY", "").strip()
     if not api_key:
@@ -507,6 +576,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     submit_reference = subparsers.add_parser("submit-seedance-reference")
     submit_reference.add_argument("--candidate", type=Path, required=True)
+    submit_reference.add_argument("--source-root", type=Path, required=True)
     submit_reference.add_argument("--run-root", type=Path, required=True)
 
     query = subparsers.add_parser("query")
@@ -524,10 +594,9 @@ def main(argv: list[str] | None = None) -> None:
             args.candidate, "Seedance reference candidate"
         )
         candidate = _strict_object(candidate_bytes, "Seedance reference candidate")
-        validated = validate_reference_candidate(
-            candidate, base_dir=args.candidate.resolve().parent
-        )
+        validated = validate_reference_candidate(candidate, base_dir=args.source_root)
         candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+        source_snapshots = _snapshot_reference_sources(candidate, args.source_root)
         # Credentials and all filesystem effects follow complete validation and
         # an immediate source snapshot recheck.
         _ensure_snapshot_unchanged(
@@ -537,6 +606,13 @@ def main(argv: list[str] | None = None) -> None:
             "Seedance reference candidate",
         )
         api_key = require_key()
+        _ensure_snapshot_unchanged(
+            args.candidate,
+            candidate_identity,
+            candidate_bytes,
+            "Seedance reference candidate",
+        )
+        _ensure_reference_sources_unchanged(source_snapshots)
         _claim_reference_attempt(args.run_root.resolve(), candidate_sha)
         run = RunDirectory.create(args.run_root, "seedance-reference")
         state = validated["state"]
@@ -555,6 +631,9 @@ def main(argv: list[str] | None = None) -> None:
             "approval_sha256": validated["approval_sha256"],
             "capability_sha256": validated["capability_sha256"],
             "source_hashes": validated["source_hashes"],
+            "source_snapshot_sha256": {
+                name: snapshot[2] for name, snapshot in sorted(source_snapshots.items())
+            },
         }
         _write_immutable_json(run.path / "metadata.json", metadata)
         base_url = os.environ.get("JD_KLING_BASE", "https://modelservice.jdcloud.com")
@@ -576,6 +655,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         if hashlib.sha256(args.candidate.read_bytes()).hexdigest() != candidate_sha:
             raise ValueError("Seedance reference candidate changed before transport")
+        _ensure_reference_sources_unchanged(source_snapshots)
         print(f"RUN_DIR={run.path.resolve()}", flush=True)
         submit_once(
             validated["payload"], api_key, base_url, _ImmutableSubmissionRun(run)
