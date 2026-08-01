@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import sys
+from uuid import uuid4
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -273,19 +274,72 @@ class _ImmutableSubmissionRun:
         raise RuntimeError(f"unexpected submission artifact: {name}")
 
 
-def _claim_reference_attempt(run_root: Path, candidate_sha: str) -> None:
-    claim = run_root / ".seedance_reference_claims" / f"{candidate_sha}.json"
+def _claim_reference_attempt(
+    run_root: Path, semantic_sha: str, raw_candidate_sha: str
+) -> None:
+    claim = run_root / ".seedance_reference_claims" / f"{semantic_sha}.json"
     try:
         _write_immutable_json(
             claim,
             {
-                "candidate_sha256": candidate_sha,
-                "attempted_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "generation_submit_count": 1,
+                "candidate_semantic_sha256": semantic_sha,
+                "candidate_file_sha256": raw_candidate_sha,
+                "claimed_at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "claim_status": "reserved",
+                "generation_submit_limit": 1,
             },
         )
     except FileExistsError as exc:
         raise RuntimeError("reference candidate was already attempted in this run root") from exc
+
+
+def _replace_json(path: Path, value: dict) -> None:
+    data = json.dumps(value, ensure_ascii=False, indent=2).encode("utf-8")
+    temporary = path.parent / f".{path.name}.{uuid4().hex}.tmp"
+    try:
+        with temporary.open("xb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _reference_metadata_status(
+    path: Path,
+    metadata: dict,
+    status: str,
+    generation_submit_count: int,
+    **extra: object,
+) -> None:
+    metadata["status"] = status
+    metadata["generation_submit_count"] = generation_submit_count
+    metadata.update(extra)
+    lifecycle = metadata.setdefault("lifecycle", [])
+    assert isinstance(lifecycle, list)
+    lifecycle.append(
+        {
+            "status": status,
+            "generation_submit_count": generation_submit_count,
+            "at_utc": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        }
+    )
+    if path.exists():
+        _replace_json(path, metadata)
+    else:
+        _write_immutable_json(path, metadata)
+
+
+def _reference_failure(run: RunDirectory, exc: Exception, phase: str) -> None:
+    failure = {
+        "type": type(exc).__name__,
+        "message": str(exc),
+        "phase": phase,
+    }
+    path = run.path / "failure.json"
+    if not path.exists():
+        _write_immutable_json(path, failure)
 
 
 def _safe_source_path(source_root: Path, declared: object, label: str) -> Path:
@@ -596,6 +650,7 @@ def main(argv: list[str] | None = None) -> None:
         candidate = _strict_object(candidate_bytes, "Seedance reference candidate")
         validated = validate_reference_candidate(candidate, base_dir=args.source_root)
         candidate_sha = hashlib.sha256(candidate_bytes).hexdigest()
+        candidate_semantic_sha = _canonical_json_sha256(candidate)
         source_snapshots = _snapshot_reference_sources(candidate, args.source_root)
         # Credentials and all filesystem effects follow complete validation and
         # an immediate source snapshot recheck.
@@ -613,18 +668,19 @@ def main(argv: list[str] | None = None) -> None:
             "Seedance reference candidate",
         )
         _ensure_reference_sources_unchanged(source_snapshots)
-        _claim_reference_attempt(args.run_root.resolve(), candidate_sha)
+        _claim_reference_attempt(
+            args.run_root.resolve(), candidate_semantic_sha, candidate_sha
+        )
         run = RunDirectory.create(args.run_root, "seedance-reference")
         state = validated["state"]
         metadata = {
             "backend": "seedance",
             "input_mode": "reference_video",
-            "status": "combined_probe" if state == "ready_for_single_combined_probe" else "submitted",
             "model": validated["model"],
             "generation_submit_limit": 1,
-            "generation_submit_count": 1,
             "automatic_retry_limit": 0,
             "candidate_sha256": candidate_sha,
+            "candidate_semantic_sha256": candidate_semantic_sha,
             "payload_sha256": validated["payload_sha256"],
             "proxy_sha256": validated["proxy_sha256"],
             "restyle_prompt_sha256": validated["restyle_prompt_sha256"],
@@ -635,7 +691,10 @@ def main(argv: list[str] | None = None) -> None:
                 name: snapshot[2] for name, snapshot in sorted(source_snapshots.items())
             },
         }
-        _write_immutable_json(run.path / "metadata.json", metadata)
+        metadata_path = run.path / "metadata.json"
+        _reference_metadata_status(
+            metadata_path, metadata, "attempt_claimed", 0
+        )
         base_url = os.environ.get("JD_KLING_BASE", "https://modelservice.jdcloud.com")
         _write_immutable_json(
             run.path / "request.json",
@@ -647,18 +706,68 @@ def main(argv: list[str] | None = None) -> None:
         )
         # Rehash at the last possible boundary. A failure still leaves the
         # immutable claim and therefore consumes the sole permitted attempt.
-        _ensure_snapshot_unchanged(
-            args.candidate,
-            candidate_identity,
-            candidate_bytes,
-            "Seedance reference candidate",
+        try:
+            _ensure_snapshot_unchanged(
+                args.candidate,
+                candidate_identity,
+                candidate_bytes,
+                "Seedance reference candidate",
+            )
+            if hashlib.sha256(args.candidate.read_bytes()).hexdigest() != candidate_sha:
+                raise ValueError("Seedance reference candidate changed before transport")
+            _ensure_reference_sources_unchanged(source_snapshots)
+        except Exception as exc:
+            _reference_metadata_status(
+                metadata_path,
+                metadata,
+                "pretransport_aborted",
+                0,
+                failure={"type": type(exc).__name__, "message": str(exc)},
+            )
+            _reference_failure(run, exc, "pretransport")
+            raise
+        _reference_metadata_status(
+            metadata_path, metadata, "transport_attempted", 1
         )
-        if hashlib.sha256(args.candidate.read_bytes()).hexdigest() != candidate_sha:
-            raise ValueError("Seedance reference candidate changed before transport")
-        _ensure_reference_sources_unchanged(source_snapshots)
         print(f"RUN_DIR={run.path.resolve()}", flush=True)
-        submit_once(
-            validated["payload"], api_key, base_url, _ImmutableSubmissionRun(run)
+        try:
+            task_id = submit_once(
+                validated["payload"], api_key, base_url, _ImmutableSubmissionRun(run)
+            )
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise ValueError("submission transport returned an invalid task_id")
+            state_path = run.path / "state.json"
+            if state_path.exists():
+                submission_state = json.loads(state_path.read_text(encoding="utf-8"))
+                if submission_state.get("task_id") != task_id:
+                    raise RuntimeError("submission state task_id mismatch")
+            else:
+                _write_immutable_json(
+                    state_path,
+                    {
+                        "base_url": base_url.rstrip("/"),
+                        "task_id": task_id,
+                        "status": "submitted",
+                        "video_urls": [],
+                    },
+                )
+        except Exception as exc:
+            _reference_metadata_status(
+                metadata_path,
+                metadata,
+                "transport_failed",
+                1,
+                failure={"type": type(exc).__name__, "message": str(exc)},
+            )
+            _reference_failure(run, exc, "transport")
+            raise
+        final_status = (
+            "combined_probe_submitted"
+            if state == "ready_for_single_combined_probe"
+            else "submitted"
+        )
+        _reference_metadata_status(
+            metadata_path, metadata, final_status, 1, task_id=task_id
         )
         return
     if args.command in ("submit-kling", "submit-seedance"):
