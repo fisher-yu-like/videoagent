@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Literal, Mapping
 from urllib.parse import urlparse
+import weakref
 
 from videoactagent.backends.jd import (
     SUPPORTED_SEEDANCE_MODELS,
@@ -45,6 +46,10 @@ PLACEHOLDER_SUFFIXES = (
     ".local",
 )
 _TRUST_TOKEN = object()
+_TRUSTED_EVIDENCE: dict[int, tuple[weakref.ReferenceType, tuple[object, ...]]] = {}
+ACCEPTED_GATEWAY_STATUSES = frozenset(
+    {"submitted", "queued", "processing", "succeeded"}
+)
 
 
 class _UntrustedEvidence(ValueError):
@@ -78,6 +83,7 @@ class SeedanceEvidenceRecord:
 @dataclass(frozen=True)
 class SeedanceCapabilityEvidence:
     schema_version: Literal["seedance-reference-capability/1"]
+    model: str
     model_capability: Literal["model_supported", "unsupported"]
     gateway_capability: Literal["gateway_unverified", "gateway_verified"]
     model_evidence: SeedanceEvidenceRecord
@@ -85,10 +91,14 @@ class SeedanceCapabilityEvidence:
     _capture_verified: bool = field(default=False, init=False, repr=False, compare=False)
     _validation_token: object = field(default=None, init=False, repr=False, compare=False)
     _captured_task_id: str | None = field(default=None, init=False, repr=False, compare=False)
+    _capture_root: Path | None = field(default=None, init=False, repr=False, compare=False)
+    _capture_bytes: bytes | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ValueError("Seedance capability evidence schema_version is invalid")
+        if self.model not in SUPPORTED_SEEDANCE_MODELS:
+            raise ValueError("top-level model is not an allowlisted exact model identifier")
         if self.model_capability not in ("model_supported", "unsupported"):
             raise ValueError("model_capability state is invalid")
         if self.gateway_capability not in ("gateway_unverified", "gateway_verified"):
@@ -99,6 +109,10 @@ class SeedanceCapabilityEvidence:
             self.gateway_evidence, SeedanceEvidenceRecord
         ):
             raise ValueError("gateway_evidence must be a SeedanceEvidenceRecord")
+        if self.model_evidence.model != self.model:
+            raise ValueError("top-level and model evidence exact models differ")
+        if self.model_evidence.source_url is None:
+            raise ValueError("model capability requires source URL provenance")
         if self.gateway_evidence is not None and self.gateway_evidence.model != self.model:
             raise ValueError("model and gateway evidence exact models differ")
         if self.gateway_capability == "gateway_verified" and (
@@ -106,11 +120,8 @@ class SeedanceCapabilityEvidence:
             or self.gateway_evidence.response_record is None
         ):
             raise ValueError("gateway_verified requires a captured local gateway response record")
-
-    @property
-    def model(self) -> str:
-        return self.model_evidence.model
-
+        if self.gateway_capability == "gateway_unverified" and self.gateway_evidence is not None:
+            raise ValueError("gateway_unverified must not claim gateway evidence")
 
 def _nonempty(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip() or value != value.strip():
@@ -260,7 +271,130 @@ def _read_json_strict(path: Path) -> object:
         raise ValueError(f"cannot read capability evidence: {exc}") from exc
 
 
-def _verify_response_capture(record: CapturedGatewayResponse, base_dir: Path | None) -> str:
+def _parse_json_object(data: bytes, label: str) -> dict[str, object]:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError(f"duplicate JSON field in {label}: {key}")
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(data.decode("utf-8"), object_pairs_hook=pairs)
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{label} must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be a JSON object")
+    return value
+
+
+def _validate_captured_request(value: object, model: str) -> None:
+    if not isinstance(value, Mapping) or set(value) != {"model", "content", "parameters"}:
+        raise ValueError("captured gateway request fields are invalid")
+    if value.get("model") != model or model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("captured gateway request exact model is invalid")
+    content = value.get("content")
+    if not isinstance(content, list) or len(content) != 2:
+        raise ValueError("captured gateway request must contain one text and one video")
+    text_item, video_item = content
+    if (
+        not isinstance(text_item, Mapping)
+        or set(text_item) != {"type", "text"}
+        or text_item.get("type") != "text"
+    ):
+        raise ValueError("captured gateway request text item is invalid")
+    captured_text = text_item.get("text")
+    if not isinstance(captured_text, str) or not captured_text.strip():
+        raise ValueError("captured gateway request text must be a nonempty string")
+    if (
+        not isinstance(video_item, Mapping)
+        or set(video_item) != {"type", "video_url", "role"}
+        or video_item.get("type") != "video_url"
+        or video_item.get("role") != "reference_video"
+    ):
+        raise ValueError("captured gateway request reference_video item is invalid")
+    nested = video_item.get("video_url")
+    if not isinstance(nested, Mapping) or set(nested) != {"url"}:
+        raise ValueError("captured gateway request nested video_url field is invalid")
+    validate_remote_video_asset(nested.get("url"))
+    parameters = value.get("parameters")
+    expected = {
+        "ratio": "16:9",
+        "resolution": "720p",
+        "duration": 5,
+        "watermark": False,
+    }
+    if not isinstance(parameters, Mapping) or dict(parameters) != expected:
+        raise ValueError("captured gateway request parameters contract is invalid")
+    if type(parameters.get("duration")) is not int or type(parameters.get("watermark")) is not bool:
+        raise ValueError("captured gateway request parameter types are invalid")
+
+
+def _meaningful_error(value: object) -> bool:
+    return value not in (None, False, 0, "", [], {})
+
+
+def _reject_nested_gateway_errors(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            lowered = str(key).lower()
+            if lowered in {"http_code", "http_status", "status_code"}:
+                try:
+                    http_code = int(item)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("captured gateway response HTTP code is invalid") from exc
+                if not 200 <= http_code < 300:
+                    raise ValueError("captured gateway response has an error HTTP code")
+            elif lowered == "code" or lowered.endswith("_code"):
+                if item not in (0, "0", None):
+                    raise ValueError("captured gateway response has a nonzero application code")
+            elif "error" in lowered and _meaningful_error(item):
+                raise ValueError("captured gateway response contains a nested error")
+            if lowered in {"status", "task_status"} and isinstance(item, str):
+                if item.lower() in {"failed", "failure", "canceled", "cancelled", "error"}:
+                    raise ValueError("captured gateway response has a failed status")
+            _reject_nested_gateway_errors(item)
+    elif isinstance(value, list):
+        for item in value:
+            _reject_nested_gateway_errors(item)
+
+
+def _validate_captured_response(value: object) -> str:
+    if not isinstance(value, Mapping) or not value:
+        raise ValueError("captured gateway response must be a nonempty object")
+    _reject_nested_gateway_errors(value)
+    result = value.get("result")
+    result_mapping = result if isinstance(result, Mapping) else {}
+    task_id = value.get("task_id") or result_mapping.get("task_id")
+    status = (
+        value.get("task_status")
+        or value.get("status")
+        or result_mapping.get("task_status")
+        or result_mapping.get("status")
+    )
+    if not isinstance(task_id, str) or not task_id.strip() or task_id != task_id.strip():
+        raise ValueError("captured gateway response must contain a task_id")
+    if not isinstance(status, str) or status.lower() not in ACCEPTED_GATEWAY_STATUSES:
+        raise ValueError("captured gateway response status is not accepted")
+    return task_id
+
+
+def _validate_capture_document(data: bytes, model: str) -> str:
+    document = _parse_json_object(data, "captured gateway document")
+    if set(document) != {"request", "response"}:
+        raise ValueError("captured gateway document must contain exact request and response")
+    _validate_captured_request(document["request"], model)
+    return _validate_captured_response(document["response"])
+
+
+def _materialize_gateway_capture(
+    record: CapturedGatewayResponse,
+    base_dir: Path | None,
+    model: str,
+    *,
+    expected_bytes: bytes | None = None,
+) -> tuple[Path, bytes, str]:
     if base_dir is None:
         raise ValueError(
             "gateway_verified requires a captured local gateway response and base_dir"
@@ -282,19 +416,48 @@ def _verify_response_capture(record: CapturedGatewayResponse, base_dir: Path | N
         raise ValueError(f"cannot read captured gateway response: {exc}") from exc
     if hashlib.sha256(data).hexdigest() != record.sha256:
         raise ValueError("captured gateway response hash mismatch")
-    try:
-        response = json.loads(data.decode("utf-8"))
-    except (UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("captured gateway response must be a JSON object") from exc
-    if not isinstance(response, dict) or not response:
-        raise ValueError("captured gateway response must be a nonempty JSON object")
-    task_id = response.get("task_id")
-    result = response.get("result")
-    if not task_id and isinstance(result, Mapping):
-        task_id = result.get("task_id")
-    if response.get("error") or not isinstance(task_id, str) or not task_id.strip():
-        raise ValueError("captured gateway response must show a successful task response")
-    return task_id
+    if expected_bytes is not None and data != expected_bytes:
+        raise ValueError("captured gateway document changed after evidence loading")
+    return root, data, _validate_capture_document(data, model)
+
+
+def _record_fingerprint(record: SeedanceEvidenceRecord | None) -> tuple[object, ...] | None:
+    if record is None:
+        return None
+    capture = record.response_record
+    return (
+        record.observed_at,
+        record.model,
+        record.content_type,
+        record.url_field,
+        record.role,
+        record.source_url,
+        None if capture is None else (capture.path, capture.sha256),
+    )
+
+
+def _capability_fingerprint(capability: SeedanceCapabilityEvidence) -> tuple[object, ...]:
+    return (
+        capability.schema_version,
+        capability.model,
+        capability.model_capability,
+        capability.gateway_capability,
+        _record_fingerprint(capability.model_evidence),
+        _record_fingerprint(capability.gateway_evidence),
+        capability._capture_verified,
+        capability._captured_task_id,
+        capability._capture_root,
+        capability._capture_bytes,
+    )
+
+
+def _register_capability(capability: SeedanceCapabilityEvidence) -> None:
+    identifier = id(capability)
+    reference = weakref.ref(
+        capability,
+        lambda _reference, key=identifier: _TRUSTED_EVIDENCE.pop(key, None),
+    )
+    _TRUSTED_EVIDENCE[identifier] = (reference, _capability_fingerprint(capability))
 
 
 def load_seedance_capability_evidence(
@@ -312,6 +475,7 @@ def load_seedance_capability_evidence(
         value = source
     required = {
         "schema_version",
+        "model",
         "model_capability",
         "gateway_capability",
         "model_evidence",
@@ -321,6 +485,9 @@ def load_seedance_capability_evidence(
         raise ValueError("Seedance capability evidence fields are invalid")
     if value.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("Seedance capability evidence schema_version is invalid")
+    model = value.get("model")
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("top-level model is not an allowlisted exact model identifier")
     model_capability = value.get("model_capability")
     if model_capability not in ("model_supported", "unsupported"):
         raise ValueError("model_capability state is invalid")
@@ -332,7 +499,9 @@ def load_seedance_capability_evidence(
     gateway_evidence = (
         None if gateway_value is None else _evidence_record(gateway_value, "gateway evidence")
     )
-    if gateway_evidence is not None and gateway_evidence.model != model_evidence.model:
+    if model_evidence.model != model:
+        raise ValueError("top-level and model evidence exact models differ")
+    if gateway_evidence is not None and gateway_evidence.model != model:
         raise ValueError("model and gateway evidence exact models differ")
     if gateway_capability == "gateway_verified":
         if gateway_evidence is None or gateway_evidence.response_record is None:
@@ -342,12 +511,15 @@ def load_seedance_capability_evidence(
     elif gateway_evidence is not None and gateway_evidence.response_record is not None:
         raise ValueError("captured gateway response must not be marked gateway_unverified")
     captured_task_id = None
+    capture_root = None
+    capture_bytes = None
     if gateway_capability == "gateway_verified":
-        captured_task_id = _verify_response_capture(
-            gateway_evidence.response_record, base_dir
+        capture_root, capture_bytes, captured_task_id = _materialize_gateway_capture(
+            gateway_evidence.response_record, base_dir, model
         )
     loaded = SeedanceCapabilityEvidence(
         schema_version=SCHEMA_VERSION,
+        model=model,
         model_capability=model_capability,
         gateway_capability=gateway_capability,
         model_evidence=model_evidence,
@@ -356,6 +528,9 @@ def load_seedance_capability_evidence(
     object.__setattr__(loaded, "_capture_verified", gateway_capability == "gateway_verified")
     object.__setattr__(loaded, "_validation_token", _TRUST_TOKEN)
     object.__setattr__(loaded, "_captured_task_id", captured_task_id)
+    object.__setattr__(loaded, "_capture_root", capture_root)
+    object.__setattr__(loaded, "_capture_bytes", capture_bytes)
+    _register_capability(loaded)
     return loaded
 
 
@@ -365,18 +540,54 @@ def validate_capability_evidence(
     """Canonical trust boundary for immutable capability evidence objects."""
     if not isinstance(capability, SeedanceCapabilityEvidence):
         raise ValueError("capability evidence object has an invalid type")
-    if capability._validation_token is not _TRUST_TOKEN:
-        raise _UntrustedEvidence("capability evidence was not loaded by the strict loader")
+    if capability.schema_version != SCHEMA_VERSION:
+        raise ValueError("Seedance capability evidence schema_version is invalid")
+    if capability.model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("top-level model is not an allowlisted exact model identifier")
+    if capability.model_capability not in ("model_supported", "unsupported"):
+        raise ValueError("model_capability state is invalid")
+    if capability.gateway_capability not in ("gateway_unverified", "gateway_verified"):
+        raise ValueError("gateway_capability state is invalid")
+    if not isinstance(capability.model_evidence, SeedanceEvidenceRecord):
+        raise ValueError("model_evidence must be a SeedanceEvidenceRecord")
     _validate_evidence_record_fields(capability.model_evidence, "model evidence")
+    if capability.model_evidence.model != capability.model:
+        raise ValueError("top-level and model evidence exact models differ")
+    if capability.model_evidence.source_url is None:
+        raise ValueError("model capability requires source URL provenance")
     if capability.gateway_evidence is not None:
+        if not isinstance(capability.gateway_evidence, SeedanceEvidenceRecord):
+            raise ValueError("gateway_evidence must be a SeedanceEvidenceRecord")
         _validate_evidence_record_fields(capability.gateway_evidence, "gateway evidence")
+        if capability.gateway_evidence.model != capability.model:
+            raise ValueError("model and gateway evidence exact models differ")
+    if capability.gateway_capability == "gateway_unverified" and capability.gateway_evidence is not None:
+        raise ValueError("gateway_unverified must not claim gateway evidence")
+    registered = _TRUSTED_EVIDENCE.get(id(capability))
+    if (
+        registered is None
+        or registered[0]() is not capability
+        or registered[1] != _capability_fingerprint(capability)
+    ):
+        raise _UntrustedEvidence("capability evidence was not loaded by the strict loader")
     if capability.gateway_capability == "gateway_verified" and (
         not capability._capture_verified
         or not capability._captured_task_id
         or capability.gateway_evidence is None
         or capability.gateway_evidence.response_record is None
+        or capability._capture_root is None
+        or capability._capture_bytes is None
     ):
         raise _UntrustedEvidence("gateway_verified evidence lacks trusted capture provenance")
+    if capability.gateway_capability == "gateway_verified":
+        _root, _data, task_id = _materialize_gateway_capture(
+            capability.gateway_evidence.response_record,
+            capability._capture_root,
+            capability.model,
+            expected_bytes=capability._capture_bytes,
+        )
+        if task_id != capability._captured_task_id:
+            raise ValueError("captured gateway task_id changed after evidence loading")
     return capability
 
 
@@ -478,13 +689,16 @@ def prepare_reference_candidate(
         ("clay", frozenset({"media", "provenance"})),
         ("restyle_prompt", frozenset({"text", "provenance"})),
         ("restyle_profile", frozenset({"provenance"})),
+        ("compiled_prompt", frozenset({"provenance"})),
+        ("trajectory_prompt", frozenset({"provenance"})),
+        ("annotation", frozenset({"provenance"})),
+        ("iteration_manifest", frozenset({"provenance"})),
     )
     records: dict[str, dict[str, object]] = {}
     for name, extras in record_specs:
         raw = approved_export.get(name)
         if raw is None:
-            if name != "approval" or approval_present:
-                blockers.append(f"missing approved {name} record")
+            blockers.append(f"missing approved {name} record")
             continue
         checked = _record_shape(raw, name, allowed_extra=extras)
         if checked is None:
@@ -493,22 +707,13 @@ def prepare_reference_candidate(
         records[name] = checked
         source_hashes[name] = str(checked["sha256"])
 
-    # Bind compiler artifacts exported by Task 4 when they are available.  They
-    # are optional for compatibility with earlier exports, but never ignored if
-    # supplied.
-    for name in (
-        "iteration_manifest",
-        "annotation",
-        "compiled_prompt",
-        "trajectory_prompt",
+    compiled = records.get("compiled_prompt")
+    trajectory = records.get("trajectory_prompt")
+    if compiled is not None and trajectory is not None and (
+        compiled["sha256"] != trajectory["sha256"]
+        or compiled["bytes"] != trajectory["bytes"]
     ):
-        if name not in approved_export:
-            continue
-        checked = _record_shape(approved_export[name], name)
-        if checked is None:
-            blockers.append(f"missing approved {name} hash/size/path")
-        else:
-            source_hashes[name] = str(checked["sha256"])
+        raise ValueError("compiled_prompt and trajectory_prompt hash/size differ")
 
     compiler_versions: dict[str, str] = {}
     for name in ("trajectory_compiler_version", "restyle_compiler_version"):
@@ -561,11 +766,7 @@ def prepare_reference_candidate(
 
     loaded_capability: SeedanceCapabilityEvidence | None
     if isinstance(capability, SeedanceCapabilityEvidence):
-        try:
-            loaded_capability = validate_capability_evidence(capability)
-        except _UntrustedEvidence as exc:
-            blockers.append(str(exc))
-            loaded_capability = None
+        loaded_capability = validate_capability_evidence(capability)
     elif isinstance(capability, Mapping):
         loaded_capability = load_seedance_capability_evidence(capability)
     else:
@@ -626,6 +827,14 @@ def prepare_reference_candidate(
         "compiler_versions": compiler_versions,
         "compiler_hashes": compiler_hashes,
         "source_hashes": source_hashes,
+        "source_records": {
+            name: {
+                "path": str(record["path"]),
+                "sha256": str(record["sha256"]),
+                "bytes": int(record["bytes"]),
+            }
+            for name, record in sorted(records.items())
+        },
         "proxy": {
             "url": valid_url,
             "path": str(records["clay"]["path"]),

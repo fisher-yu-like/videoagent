@@ -106,6 +106,7 @@ class BackendPrepareTests(unittest.TestCase):
         }
         document = {
             "schema_version": "seedance-reference-capability/1",
+            "model": "Doubao-Seedance-2.5",
             "model_capability": "model_supported",
             "gateway_capability": "gateway_unverified",
             "model_evidence": {
@@ -127,7 +128,20 @@ class BackendPrepareTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             root_path = Path(root)
             capture = root_path / "capture.json"
-            capture.write_bytes(b'{"task_id":"captured"}')
+            capture.write_text(json.dumps({
+                "request": {
+                    "model": "Doubao-Seedance-2.5",
+                    "content": [
+                        {"type": "text", "text": "probe"},
+                        {"type": "video_url", "video_url": {
+                            "url": "https://media.volccdn.com/probe.mp4"
+                        }, "role": "reference_video"},
+                    ],
+                    "parameters": {"ratio": "16:9", "resolution": "720p",
+                                   "duration": 5, "watermark": False},
+                },
+                "response": {"task_id": "captured", "status": "submitted", "code": 0},
+            }), encoding="utf-8")
             document["gateway_capability"] = "gateway_verified"
             document["gateway_evidence"] = {
                 **common,
@@ -166,6 +180,7 @@ class BackendPrepareTests(unittest.TestCase):
         }
         capability = load_seedance_capability_evidence({
             "schema_version": "seedance-reference-capability/1",
+            "model": "Doubao-Seedance-2.5",
             "model_capability": "model_supported",
             "gateway_capability": "gateway_unverified",
             "model_evidence": common,
@@ -185,6 +200,7 @@ class BackendPrepareTests(unittest.TestCase):
 
         capability = load_seedance_capability_evidence({
             "schema_version": "seedance-reference-capability/1",
+            "model": "Doubao-Seedance-2.5",
             "model_capability": "model_supported",
             "gateway_capability": "gateway_unverified",
             "model_evidence": {
@@ -261,6 +277,7 @@ class BackendPrepareTests(unittest.TestCase):
             evidence = root_path / "capability.json"
             evidence.write_text(json.dumps({
                 "schema_version": "seedance-reference-capability/1",
+                "model": "Doubao-Seedance-2.5",
                 "model_capability": "model_supported",
                 "gateway_capability": "gateway_unverified",
                 "model_evidence": {

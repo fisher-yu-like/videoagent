@@ -35,6 +35,7 @@ def evidence_document(*, verified: bool, response_sha256: str | None = None, mod
     }
     result = {
         "schema_version": "seedance-reference-capability/1",
+        "model": model,
         "model_capability": "model_supported",
         "gateway_capability": "gateway_verified" if verified else "gateway_unverified",
         "model_evidence": {
@@ -52,6 +53,33 @@ def evidence_document(*, verified: bool, response_sha256: str | None = None, mod
             },
         }
     return result
+
+
+def gateway_capture(*, model: str = MODEL, request: dict | None = None,
+                    response: dict | None = None) -> bytes:
+    request = request or {
+        "model": model,
+        "content": [
+            {"type": "text", "text": "gateway contract probe\n"},
+            {
+                "type": "video_url",
+                "video_url": {"url": "https://media.volccdn.com/probes/reference.mp4"},
+                "role": "reference_video",
+            },
+        ],
+        "parameters": {
+            "ratio": "16:9", "resolution": "720p", "duration": 5,
+            "watermark": False,
+        },
+    }
+    response = response or {
+        "task_id": "captured-real-response", "status": "submitted",
+        "code": 0, "error_code": "0",
+    }
+    return json.dumps(
+        {"request": request, "response": response},
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def approved_export() -> dict:
@@ -79,6 +107,9 @@ def approved_export() -> dict:
             provenance={"source": "task4-approved-export"},
         ),
         "compiled_prompt": record("iterations/D1/input/compiled_prompt.txt", SHA_A, 44),
+        "trajectory_prompt": record("iterations/D1/input/trajectory_prompt.txt", SHA_A, 44),
+        "annotation": record("iterations/D1/input/annotation.json", SHA_B, 1001),
+        "iteration_manifest": record("iterations/D1/iteration.json", SHA_C, 1200),
     }
 
 
@@ -106,14 +137,16 @@ class SeedanceCapabilityEvidenceTests(unittest.TestCase):
             root_path = Path(root)
             response_path = root_path / "captures" / "jd-gateway.json"
             response_path.parent.mkdir()
-            response_path.write_bytes(b'{"task_id":"captured-real-response"}')
+            response_path.write_bytes(gateway_capture())
             digest = hashlib.sha256(response_path.read_bytes()).hexdigest()
             value = evidence_document(verified=True, response_sha256=digest)
 
             loaded = load_seedance_capability_evidence(value, base_dir=root_path)
             self.assertEqual(loaded.gateway_capability, "gateway_verified")
 
-            response_path.write_bytes(b'{"task_id":"tampered"}')
+            response_path.write_bytes(gateway_capture(response={
+                "task_id": "tampered", "status": "submitted", "code": 0,
+            }))
             with self.assertRaisesRegex(ValueError, "hash"):
                 load_seedance_capability_evidence(value, base_dir=root_path)
 
@@ -129,14 +162,78 @@ class SeedanceCapabilityEvidenceTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "unsupported.json"
-            path.write_bytes(b'{"error":"unsupported content type"}')
+            path.write_bytes(json.dumps({
+                "request": json.loads(gateway_capture())["request"],
+                "response": {"task_id": "x", "status": "failed", "error": {"message": "unsupported"}},
+            }).encode())
             value = evidence_document(
                 verified=True,
                 response_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
             )
             value["gateway_evidence"]["response_record"]["path"] = path.name
-            with self.assertRaisesRegex(ValueError, "successful"):
+            with self.assertRaisesRegex(ValueError, "failed|successful"):
                 load_seedance_capability_evidence(value, base_dir=Path(root))
+
+    def test_gateway_capture_requires_exact_request_and_accepted_response(self) -> None:
+        from videoactagent.seedance_reference import load_seedance_capability_evidence
+
+        good_request = json.loads(gateway_capture())["request"]
+        bad_documents = {
+            "task-id-only": {"task_id": "x", "status": "submitted"},
+            "nested-error": {
+                "request": good_request,
+                "response": {"task_id": "x", "status": "submitted", "result": {"error": "denied"}},
+            },
+            "failed": {
+                "request": good_request,
+                "response": {"task_id": "x", "status": "failed"},
+            },
+            "unknown-status": {
+                "request": good_request,
+                "response": {"task_id": "x", "status": "mystery", "code": 0},
+            },
+            "code500": {
+                "request": good_request,
+                "response": {"task_id": "x", "status": "submitted", "code": 500},
+            },
+            "response-code500": {
+                "request": good_request,
+                "response": {"task_id": "x", "status": "submitted", "response_code": 500},
+            },
+        }
+        wrong_model = deepcopy(good_request)
+        wrong_model["model"] = "Not-A-Seedance-Model"
+        wrong_role = deepcopy(good_request)
+        wrong_role["content"][1]["role"] = "input_video"
+        wrong_field = deepcopy(good_request)
+        wrong_field["content"][1] = {
+            "type": "video_url", "url": "https://media.volccdn.com/probes/reference.mp4",
+            "role": "reference_video",
+        }
+        wrong_watermark = deepcopy(good_request)
+        wrong_watermark["parameters"]["watermark"] = 0
+        for label, request in (
+            ("wrong-model", wrong_model), ("wrong-role", wrong_role),
+            ("wrong-field", wrong_field), ("wrong-watermark", wrong_watermark),
+        ):
+            bad_documents[label] = {
+                "request": request,
+                "response": {"task_id": "x", "status": "submitted", "code": 0},
+            }
+
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            for label, document in bad_documents.items():
+                with self.subTest(label=label):
+                    path = root_path / f"{label}.json"
+                    path.write_text(json.dumps(document), encoding="utf-8")
+                    evidence = evidence_document(
+                        verified=True,
+                        response_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                    )
+                    evidence["gateway_evidence"]["response_record"]["path"] = path.name
+                    with self.assertRaises(ValueError):
+                        load_seedance_capability_evidence(evidence, base_dir=root_path)
 
     def test_evidence_rejects_unknown_fields_bad_contract_and_unsafe_capture(self) -> None:
         from videoactagent.seedance_reference import load_seedance_capability_evidence
@@ -245,7 +342,7 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
         root = Path(self.tempdir.name)
         path = root / "captures" / "jd-gateway.json"
         path.parent.mkdir()
-        path.write_bytes(b'{"task_id":"real-captured-task"}')
+        path.write_bytes(gateway_capture())
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         return load_seedance_capability_evidence(
             evidence_document(verified=True, response_sha256=digest), base_dir=root
@@ -416,6 +513,7 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             SeedanceCapabilityEvidence(
                 schema_version="seedance-reference-capability/1",
+                model=MODEL,
                 model_capability="model_supported",
                 gateway_capability="gateway_verified",
                 model_evidence=forged_model_evidence,
@@ -424,18 +522,121 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
 
         forged_unverified = SeedanceCapabilityEvidence(
             schema_version="seedance-reference-capability/1",
+            model=MODEL,
             model_capability="model_supported",
             gateway_capability="gateway_unverified",
             model_evidence=forged_model_evidence,
             gateway_evidence=None,
         )
+        import videoactagent.seedance_reference as seedance_reference
         object.__setattr__(forged_unverified, "_capture_verified", True)
-        candidate = prepare_reference_candidate(
-            approved_export=approved_export(),
-            proxy_url="https://media.volccdn.com/approved/clay.mp4",
-            capability=forged_unverified,
+        object.__setattr__(
+            forged_unverified, "_validation_token", seedance_reference._TRUST_TOKEN
         )
-        self.assertEqual(candidate["state"], "blocked")
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=forged_unverified,
+            )
+
+    def test_loaded_evidence_is_revalidated_and_capture_must_still_exist(self) -> None:
+        from videoactagent.seedance_reference import prepare_reference_candidate
+
+        capability = self._capability(verified=False)
+        object.__setattr__(capability, "gateway_capability", "bogus")
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=capability,
+            )
+
+        capability = self._capability(verified=False)
+        object.__setattr__(capability, "model_capability", "bogus")
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=capability,
+            )
+
+        verified = self._capability(verified=True)
+        capture = Path(self.tempdir.name) / verified.gateway_evidence.response_record.path
+        capture.unlink()
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=verified,
+            )
+
+        verified = self._capability(verified=True)
+        capture = Path(self.tempdir.name) / verified.gateway_evidence.response_record.path
+        capture.write_bytes(gateway_capture(response={
+            "task_id": "changed", "status": "submitted", "code": 0,
+        }))
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=verified,
+            )
+
+    def test_top_level_and_nested_models_must_match_on_every_use(self) -> None:
+        from videoactagent.seedance_reference import prepare_reference_candidate
+
+        capability = self._capability(verified=False)
+        object.__setattr__(capability, "model", "Doubao-Seedance-2.0")
+        with self.assertRaises(ValueError):
+            prepare_reference_candidate(
+                approved_export=approved_export(),
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=capability,
+            )
+
+    def test_every_required_approved_record_is_blocking_when_absent(self) -> None:
+        from videoactagent.seedance_reference import prepare_reference_candidate
+
+        capability = self._capability(verified=False)
+        required = (
+            "approval", "clay", "restyle_prompt", "restyle_profile",
+            "compiled_prompt", "trajectory_prompt", "annotation", "iteration_manifest",
+        )
+        for name in required:
+            with self.subTest(name=name):
+                source = approved_export()
+                source.pop(name)
+                candidate = prepare_reference_candidate(
+                    approved_export=source,
+                    proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                    capability=capability,
+                )
+                self.assertEqual(candidate["state"], "blocked")
+                self.assertTrue(any(name in blocker for blocker in candidate["blockers"]))
+        for name in ("trajectory_compiler_version", "restyle_compiler_version"):
+            with self.subTest(name=name):
+                source = approved_export()
+                source.pop(name)
+                candidate = prepare_reference_candidate(
+                    approved_export=source,
+                    proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                    capability=capability,
+                )
+                self.assertEqual(candidate["state"], "blocked")
+                self.assertIn(f"missing {name}", candidate["blockers"])
+
+    def test_compiled_and_trajectory_prompt_records_must_match(self) -> None:
+        from videoactagent.seedance_reference import prepare_reference_candidate
+
+        source = approved_export()
+        source["trajectory_prompt"]["sha256"] = "d" * 64
+        with self.assertRaisesRegex(ValueError, "compiled_prompt.*trajectory_prompt"):
+            prepare_reference_candidate(
+                approved_export=source,
+                proxy_url="https://media.volccdn.com/approved/clay.mp4",
+                capability=self._capability(verified=False),
+            )
 
 
     def test_candidate_binds_proxy_record_and_url(self) -> None:
@@ -452,6 +653,14 @@ class SeedanceReferenceCandidateTests(unittest.TestCase):
         self.assertEqual(candidate["proxy"]["sha256"], approved_export()["clay"]["sha256"])
         self.assertEqual(candidate["proxy"]["bytes"], approved_export()["clay"]["bytes"])
         self.assertEqual(candidate["proxy"]["path"], approved_export()["clay"]["path"])
+        self.assertEqual(
+            candidate["source_records"]["approval"],
+            {key: approved_export()["approval"][key] for key in ("path", "sha256", "bytes")},
+        )
+        self.assertEqual(
+            candidate["source_records"]["annotation"]["sha256"],
+            approved_export()["annotation"]["sha256"],
+        )
 
     def test_materialize_prompt_reads_safe_verified_utf8_without_mutating_export(self) -> None:
         from videoactagent.seedance_reference import materialize_approved_prompt
