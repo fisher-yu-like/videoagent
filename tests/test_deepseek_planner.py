@@ -71,6 +71,7 @@ class DeepSeekPlannerTests(unittest.TestCase):
         self.assertNotIn("credential=hidden", serialized)
         self.assertEqual(calls[0][0].get_header("Authorization"), "Bearer secret-value")
         request_payload = json.loads(calls[0][0].data.decode("utf-8"))
+        self.assertEqual(request_payload["thinking"], {"type": "disabled"})
         user_context = json.loads(request_payload["messages"][1]["content"])
         self.assertEqual(
             [camera["camera_id"] for camera in user_context["required_json_schema_example"]["cameras"]],
@@ -130,6 +131,44 @@ class DeepSeekPlannerTests(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(evidence["retry_count"], 0)
                 self.assertEqual(evidence["status"], "failed")
+
+    def test_length_response_reports_truncation_without_retry(self):
+        calls = []
+        response = json.dumps({
+            "id": "call-truncated",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "finish_reason": "length",
+                "message": {"content": '{"schema_version":"1.0"'},
+            }],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append((request, timeout))
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "P1"
+            with self.assertRaisesRegex(
+                DeepSeekPlannerError,
+                "truncated at max_tokens=4096",
+            ):
+                request_multicam_plan(
+                    scene_context=SCENE_CONTEXT,
+                    output_dir=output,
+                    environ={
+                        "DEEPSEEK_API_KEY": "secret",
+                        "DEEPSEEK_BASE_URL": "https://example.test/v1",
+                    },
+                    transport=transport,
+                )
+            evidence = json.loads(
+                (output / "evidence.json").read_text(encoding="utf-8")
+            )
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(evidence["api_call_count"], 1)
+        self.assertEqual(evidence["retry_count"], 0)
+        self.assertEqual(evidence["status"], "failed")
 
 
 if __name__ == "__main__":

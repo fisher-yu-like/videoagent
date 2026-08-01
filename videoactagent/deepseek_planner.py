@@ -146,6 +146,7 @@ def request_multicam_plan(
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
+            "thinking": {"type": "disabled"},
             "temperature": 0.2,
             "max_tokens": 4096,
             "stream": False,
@@ -175,7 +176,12 @@ def request_multicam_plan(
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
             raise DeepSeekPlannerError("DeepSeek response choices are invalid")
         choice = choices[0]
-        if choice.get("finish_reason") != "stop":
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "length":
+            raise DeepSeekPlannerError(
+                "DeepSeek response was truncated at max_tokens=4096"
+            )
+        if finish_reason != "stop":
             raise DeepSeekPlannerError("DeepSeek response did not finish normally")
         message = choice.get("message")
         content = message.get("content") if isinstance(message, Mapping) else None
