@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import FrozenInstanceError
 import json
 import math
 from pathlib import Path
@@ -8,10 +9,12 @@ import tempfile
 import unittest
 
 from videoactagent.director_annotation import (
+    CompiledDirectorAnnotation,
     DirectorAnnotationError,
     camera_trajectory_from_path,
     compile_director_annotation,
 )
+from videoactagent.restyle_prompt import RESTYLE_COMPILER_VERSION
 
 
 def contract() -> dict:
@@ -30,6 +33,17 @@ def contract() -> dict:
         ],
         "story_prompt": "A continuous station reunion shot.",
         "appearance_instruction": "Natural proportions and consistent station lighting.",
+        "restyle_profile": {
+            "schema_version": "1.0",
+            "scene_id": "station_reunion",
+            "subjects": [
+                {"actor_id": "actor_a", "description": "an adult in an orange coat"},
+                {"actor_id": "actor_b", "description": "an adult in a blue coat"},
+            ],
+            "environment": "a grounded railway platform",
+            "lighting": "consistent natural station lighting",
+            "quality": "photoreal live action with natural anatomy and realistic cloth",
+        },
     }
     inherited = payload_keyframes(value["keyframes"])
     value["inheritance_sha256"] = "a" * 64
@@ -92,11 +106,21 @@ class DirectorAnnotationTests(unittest.TestCase):
             ["K0", "K1", "K2", "K3", "K4"],
         )
         self.assertEqual(result.camera_trajectory[2].focal_length_mm, 37.0)
-        self.assertIn("actor_a follows the authored path", result.compiled_prompt)
-        self.assertIn("actor_a and actor_b move closer", result.compiled_prompt)
+        self.assertIn("K0 to K1, actor_a moves right", result.compiled_prompt)
+        self.assertEqual(result.compiled_prompt, result.trajectory_prompt)
+        self.assertIsInstance(CompiledDirectorAnnotation.compiled_prompt, property)
+        with self.assertRaises(FrozenInstanceError):
+            result.compiled_prompt = "inconsistent"  # type: ignore[misc]
+        self.assertIn("Subjects and wardrobe", result.restyle_prompt)
+        self.assertIn("actor_a: an adult in an orange coat", result.restyle_prompt)
+        self.assertIn(
+            "K0 to K1, actor_a and actor_b move closer",
+            result.compiled_prompt,
+        )
         canonical = json.loads(result.canonical_annotation)
         self.assertEqual(canonical["author_id"], "sy")
-        self.assertEqual(canonical["prompt_compiler_version"], "trajectory-facts-v1")
+        self.assertEqual(canonical["prompt_compiler_version"], "trajectory-facts-v2")
+        self.assertEqual(canonical["restyle_compiler_version"], RESTYLE_COMPILER_VERSION)
         self.assertNotIn("visible_state", canonical["keyframes"][0])
         self.assertEqual(json.loads(result.camera_document)["states"][4]["keyframe_id"], "K4")
 

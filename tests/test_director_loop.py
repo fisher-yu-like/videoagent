@@ -4,8 +4,12 @@ import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
+import shutil
 import tempfile
 import unittest
+from unittest import mock
+
+import videoactagent.director_loop as director_loop_module
 
 from videoactagent.director_loop import (
     DirectorLoopError,
@@ -18,7 +22,10 @@ from videoactagent.director_loop import (
     preview_prompt,
     session_document,
     verify_workspace,
+    _parser,
 )
+from videoactagent.restyle_prompt import RESTYLE_COMPILER_VERSION
+from videoactagent.trajectory_prompt import PROMPT_COMPILER_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,10 +34,102 @@ BLENDER = Path(r"D:\blender\blender.exe")
 
 
 class DirectorLoopTests(unittest.TestCase):
-    def make_workspace(self, root: str) -> Path:
+    @staticmethod
+    def rewrite_json(path: Path, value: object) -> bytes:
+        data = (json.dumps(
+            value, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+        ) + "\n").encode("utf-8")
+        path.write_bytes(data)
+        return data
+
+    @staticmethod
+    def rebind_record(record: dict, data: bytes) -> None:
+        record["sha256"] = hashlib.sha256(data).hexdigest()
+        record["bytes"] = len(data)
+
+    def tamper_annotation_versions(self, path: Path) -> bytes:
+        annotation = json.loads(path.read_text(encoding="utf-8"))
+        annotation["prompt_compiler_version"] = "adversarial-trajectory"
+        annotation["restyle_compiler_version"] = "adversarial-restyle"
+        return self.rewrite_json(path, annotation)
+
+    def make_workspace(self, root: str, restyle_profile: Path | None = None) -> Path:
         self.assertTrue(BUNDLE.is_file(), f"missing real D0 bundle: {BUNDLE}")
         self.assertTrue(BLENDER.is_file(), f"missing Blender: {BLENDER}")
-        return prepare_workspace(BUNDLE, BLENDER, Path(root) / "director")
+        return prepare_workspace(
+            BUNDLE, BLENDER, Path(root) / "director",
+            restyle_profile_path=restyle_profile,
+        )
+
+    def test_prepare_snapshots_exact_supplied_restyle_profile_with_provenance(self) -> None:
+        source_bytes = (ROOT / "configs" / "restyle" / "station_reunion.json").read_bytes()
+        with tempfile.TemporaryDirectory() as root:
+            profile = Path(root) / "profile.json"
+            profile.write_bytes(source_bytes)
+            manifest = self.make_workspace(root, profile)
+            profile.write_text("source drift after prepare", encoding="utf-8")
+            workspace = verify_workspace(manifest)
+            record = workspace["document"]["source"]["restyle_profile"]
+            snapshot = manifest.parent / record["path"]
+
+            self.assertEqual(record["provenance"], "provided")
+            self.assertEqual(snapshot.read_bytes(), source_bytes)
+            self.assertEqual(record["bytes"], len(source_bytes))
+            self.assertEqual(record["sha256"], hashlib.sha256(source_bytes).hexdigest())
+
+    def test_prepare_derives_canonical_generic_profile_without_story_motion(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            workspace = verify_workspace(manifest)
+            record = workspace["document"]["source"]["restyle_profile"]
+            snapshot = manifest.parent / record["path"]
+            profile = json.loads(snapshot.read_text(encoding="utf-8"))
+
+            self.assertEqual(record["provenance"], "derived_generic")
+            self.assertEqual(
+                [subject["actor_id"] for subject in profile["subjects"]],
+                workspace["document"]["actors"],
+            )
+            self.assertIn("station", profile["environment"])
+            self.assertNotIn("walks from the far left", snapshot.read_text(encoding="utf-8"))
+            self.assertEqual(snapshot.read_bytes(), json.dumps(
+                profile, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+            ).encode("utf-8") + b"\n")
+
+    def test_prepare_cli_accepts_restyle_profile(self) -> None:
+        profile = ROOT / "configs" / "restyle" / "station_reunion.json"
+        args = _parser().parse_args([
+            "prepare", "--bundle", str(BUNDLE), "--blender", str(BLENDER),
+            "--output-dir", "workspace", "--restyle-profile", str(profile),
+        ])
+        self.assertEqual(args.restyle_profile, profile)
+
+    def test_new_workspace_iteration_state_and_job_use_schema_1_1(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            documents = (
+                json.loads(manifest.read_text(encoding="utf-8")),
+                json.loads((manifest.parent / "state.json").read_text(encoding="utf-8")),
+                json.loads((manifest.parent / "iterations" / "D0" / "iteration.json").read_text(encoding="utf-8")),
+                json.loads(job_path.read_text(encoding="utf-8")),
+            )
+            self.assertEqual([document["schema_version"] for document in documents], [
+                "1.1", "1.1", "1.1", "1.1",
+            ])
+
+    def test_legacy_schema_1_0_requires_new_workspace_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            document = json.loads(manifest.read_text(encoding="utf-8"))
+            document["schema_version"] = "1.0"
+            self.rewrite_json(manifest, document)
+
+            with self.assertRaisesRegex(
+                DirectorLoopError,
+                "migration required.*prepare a new workspace.*reuse the human annotation",
+            ):
+                verify_workspace(manifest)
 
     def director_payload(self, manifest: Path, boundary: str = "K0") -> dict:
         session = session_document(manifest)
@@ -90,6 +189,18 @@ class DirectorLoopTests(unittest.TestCase):
             self.assertTrue((iteration / "input" / "actor_trajectory.json").is_file())
             self.assertTrue((iteration / "input" / "camera_trajectory.json").is_file())
             self.assertTrue((iteration / "input" / "compiled_prompt.txt").is_file())
+            self.assertTrue((iteration / "input" / "trajectory_prompt.txt").is_file())
+            self.assertTrue((iteration / "input" / "restyle_prompt.txt").is_file())
+            self.assertEqual(
+                (iteration / "input" / "compiled_prompt.txt").read_bytes(),
+                (iteration / "input" / "trajectory_prompt.txt").read_bytes(),
+            )
+            self.assertEqual(
+                job["source"]["restyle_profile"],
+                json.loads(manifest.read_text(encoding="utf-8"))["source"]["restyle_profile"],
+            )
+            self.assertEqual(job["trajectory_compiler_version"], PROMPT_COMPILER_VERSION)
+            self.assertEqual(job["restyle_compiler_version"], RESTYLE_COMPILER_VERSION)
             self.assertFalse((iteration / "approval.json").exists())
             self.assertFalse(any(path.name.startswith("vace") for path in iteration.rglob("*")))
 
@@ -109,10 +220,17 @@ class DirectorLoopTests(unittest.TestCase):
             }
             self.assertEqual(after, before)
             self.assertEqual((manifest.parent / "state.json").read_bytes(), state_before)
-            self.assertEqual(preview["prompt_compiler_version"], "trajectory-facts-v1")
+            self.assertEqual(set(preview), {
+                "trajectory_compiler_version", "restyle_compiler_version",
+                "trajectory_prompt", "restyle_prompt",
+            })
+            self.assertEqual(preview["trajectory_compiler_version"], PROMPT_COMPILER_VERSION)
+            self.assertEqual(preview["restyle_compiler_version"], RESTYLE_COMPILER_VERSION)
             job = prepare_iteration(manifest, payload_value)
-            compiled = (job.parent / "input" / "compiled_prompt.txt").read_text(encoding="utf-8").strip()
-            self.assertEqual(compiled, preview["prompt"])
+            trajectory = (job.parent / "input" / "trajectory_prompt.txt").read_text(encoding="utf-8").strip()
+            restyle = (job.parent / "input" / "restyle_prompt.txt").read_text(encoding="utf-8").strip()
+            self.assertEqual(trajectory, preview["trajectory_prompt"])
+            self.assertEqual(restyle, preview["restyle_prompt"])
 
     def test_approval_rejects_unrendered_iteration(self) -> None:
         with tempfile.TemporaryDirectory() as root:
@@ -137,6 +255,18 @@ class DirectorLoopTests(unittest.TestCase):
 
             self.assertEqual(exported["iteration_id"], "D1")
             self.assertEqual(
+                exported["compiled_prompt"]["sha256"],
+                exported["trajectory_prompt"]["sha256"],
+            )
+            self.assertIn("restyle_prompt", exported)
+            self.assertIn("restyle_profile", exported)
+            self.assertEqual(
+                exported["trajectory_compiler_version"], PROMPT_COMPILER_VERSION
+            )
+            self.assertEqual(
+                exported["restyle_compiler_version"], RESTYLE_COMPILER_VERSION
+            )
+            self.assertEqual(
                 exported["approval"]["sha256"],
                 hashlib.sha256(approval.read_bytes()).hexdigest(),
             )
@@ -151,6 +281,605 @@ class DirectorLoopTests(unittest.TestCase):
             diagnostic.write_bytes(diagnostic.read_bytes() + b"tamper")
             with self.assertRaisesRegex(DirectorLoopError, "hash"):
                 export_approved_iteration(manifest)
+
+    def test_prompt_and_profile_tampering_each_blocks_approved_export(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(
+                root, ROOT / "configs" / "restyle" / "station_reunion.json"
+            )
+            job = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            publish_iteration(manifest, job, d0 / "diagnostic.mp4", d0 / "clay.mp4")
+            approve_iteration(manifest, "D1", "sy")
+            exported = export_approved_iteration(manifest)
+
+            for name in (
+                "trajectory_prompt", "restyle_prompt", "compiled_prompt", "restyle_profile"
+            ):
+                with self.subTest(name=name):
+                    path = manifest.parent / exported[name]["path"]
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"tamper")
+                    with self.assertRaisesRegex(DirectorLoopError, "hash/size mismatch"):
+                        export_approved_iteration(manifest)
+                    path.write_bytes(original)
+
+    def test_publish_rejects_coordinated_job_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["trajectory_compiler_version"] = "adversarial-trajectory"
+            job["restyle_compiler_version"] = "adversarial-restyle"
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_approve_rejects_published_iteration_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            iteration["trajectory_compiler_version"] = "adversarial-trajectory"
+            iteration["restyle_compiler_version"] = "adversarial-restyle"
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                approve_iteration(manifest, "D1", "sy")
+
+    def test_export_rejects_coordinated_approval_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            publish_iteration(manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4")
+            approval_path = approve_iteration(manifest, "D1", "sy")
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            approval["trajectory_compiler_version"] = "adversarial-trajectory"
+            approval["restyle_compiler_version"] = "adversarial-restyle"
+            approval_bytes = self.rewrite_json(approval_path, approval)
+            state_path = manifest.parent / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            state["approval"]["sha256"] = hashlib.sha256(approval_bytes).hexdigest()
+            state["approval"]["bytes"] = len(approval_bytes)
+            self.rewrite_json(state_path, state)
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiler version"):
+                export_approved_iteration(manifest)
+
+    def test_publish_rejects_rehashed_annotation_compiler_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            annotation_path = job_path.parent / job["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(job["inputs"]["annotation"], annotation_bytes)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_iteration_verification_and_approve_reject_rehashed_annotation_versions(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            annotation_path = manifest.parent / iteration["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(iteration["inputs"]["annotation"], annotation_bytes)
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                verify_workspace(manifest)
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                approve_iteration(manifest, "D1", "sy")
+
+    def test_export_rejects_fully_rehashed_annotation_version_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            approval_path = approve_iteration(manifest, "D1", "sy")
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            annotation_path = manifest.parent / iteration["inputs"]["annotation"]["path"]
+            annotation_bytes = self.tamper_annotation_versions(annotation_path)
+            self.rebind_record(iteration["inputs"]["annotation"], annotation_bytes)
+            iteration_bytes = self.rewrite_json(iteration_path, iteration)
+
+            approval = json.loads(approval_path.read_text(encoding="utf-8"))
+            self.rebind_record(approval["annotation"], annotation_bytes)
+            self.rebind_record(approval["iteration_manifest"], iteration_bytes)
+            approval_bytes = self.rewrite_json(approval_path, approval)
+
+            state_path = manifest.parent / "state.json"
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.rebind_record(state["approval"], approval_bytes)
+            self.rewrite_json(state_path, state)
+
+            with self.assertRaisesRegex(DirectorLoopError, "annotation compiler version"):
+                export_approved_iteration(manifest)
+
+    def test_publish_rejects_rehashed_arbitrary_compiled_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            replacements = {
+                "trajectory_prompt": b"forged trajectory prompt\n",
+                "compiled_prompt": b"forged trajectory prompt\n",
+                "restyle_prompt": b"forged restyle prompt\n",
+            }
+            for name, data in replacements.items():
+                path = job_path.parent / job["inputs"][name]["path"]
+                path.write_bytes(data)
+                self.rebind_record(job["inputs"][name], data)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+    def test_failed_compiler_preflight_leaves_publish_state_transactionally_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            state_before = state_path.read_bytes()
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            compiled_path = job_path.parent / job["inputs"]["compiled_prompt"]["path"]
+            forged = b"rehashed but incompatible compatibility prompt\n"
+            compiled_path.write_bytes(forged)
+            self.rebind_record(job["inputs"]["compiled_prompt"], forged)
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            iteration = job_path.parent
+            self.assertFalse((iteration / "iteration.json").exists())
+            self.assertFalse((iteration / "approval.json").exists())
+            self.assertFalse((iteration / "diagnostic.mp4").exists())
+            self.assertFalse((iteration / "clay.mp4").exists())
+            self.assertEqual(
+                json.loads(job_path.read_text(encoding="utf-8"))["status"], "queued"
+            )
+            self.assertEqual(state_path.read_bytes(), state_before)
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual((state["current_iteration"], state["next_iteration"]), ("D0", 1))
+
+    def test_publish_probes_and_commits_the_same_staged_media_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            diagnostic_source = Path(root) / "external-diagnostic.mp4"
+            clay_source = Path(root) / "external-clay.mp4"
+            shutil.copyfile(d0 / "diagnostic.mp4", diagnostic_source)
+            shutil.copyfile(d0 / "clay.mp4", clay_source)
+            diagnostic_before = diagnostic_source.read_bytes()
+            real_media = director_loop_module._media
+            probes = 0
+
+            def mutate_source_after_first_probe(path: Path, timeline: dict) -> dict:
+                nonlocal probes
+                result = real_media(path, timeline)
+                probes += 1
+                if probes == 1:
+                    diagnostic_source.write_bytes(clay_source.read_bytes())
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media",
+                side_effect=mutate_source_after_first_probe,
+            ):
+                iteration_path = publish_iteration(
+                    manifest, job_path, diagnostic_source, clay_source
+                )
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            published_diagnostic = manifest.parent / iteration["diagnostic"]["path"]
+            published_clay = manifest.parent / iteration["clay"]["path"]
+            self.assertEqual(published_diagnostic.read_bytes(), diagnostic_before)
+            self.assertNotEqual(
+                iteration["diagnostic"]["media"]["decoded_pixel_sha256"],
+                iteration["clay"]["media"]["decoded_pixel_sha256"],
+            )
+            self.assertNotEqual(published_diagnostic.read_bytes(), published_clay.read_bytes())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_accepts_validating_status_from_render_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["status"] = "validating"
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+
+            self.assertTrue(iteration_path.is_file())
+            self.assertEqual(
+                json.loads(job_path.read_text(encoding="utf-8"))["status"], "succeeded"
+            )
+
+    def test_publish_rejects_aliased_compiler_input_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            job["inputs"]["compiled_prompt"] = deepcopy(
+                job["inputs"]["trajectory_prompt"]
+            )
+            self.rewrite_json(job_path, job)
+            d0 = manifest.parent / "iterations" / "D0"
+
+            with self.assertRaisesRegex(DirectorLoopError, "input paths must be distinct"):
+                publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_commits_verified_staged_input_after_queued_input_race(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            prompt_path = job_path.parent / job["inputs"]["restyle_prompt"]["path"]
+            verified_prompt = prompt_path.read_bytes()
+            d0 = manifest.parent / "iterations" / "D0"
+            real_media = director_loop_module._media
+            probes = 0
+
+            def mutate_prompt_after_media_preflight(path: Path, timeline: dict) -> dict:
+                nonlocal probes
+                result = real_media(path, timeline)
+                probes += 1
+                if probes == 2:
+                    prompt_path.write_bytes(b"raced queued restyle prompt\n")
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media",
+                side_effect=mutate_prompt_after_media_preflight,
+            ):
+                iteration_path = publish_iteration(
+                    manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                )
+
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            published_prompt = manifest.parent / iteration["inputs"]["restyle_prompt"]["path"]
+            self.assertEqual(published_prompt.read_bytes(), verified_prompt)
+            self.assertEqual(
+                iteration["inputs"]["restyle_prompt"]["sha256"],
+                hashlib.sha256(verified_prompt).hexdigest(),
+            )
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_rejects_staged_prompt_mutation_during_media_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            job_before = job_path.read_bytes()
+            state_before = state_path.read_bytes()
+            job = json.loads(job_before)
+            input_bytes = {
+                name: (job_path.parent / record["path"]).read_bytes()
+                for name, record in job["inputs"].items()
+            }
+            d0 = manifest.parent / "iterations" / "D0"
+            real_media = director_loop_module._media
+            mutated = False
+
+            def mutate_staged_prompt(path: Path, timeline: dict) -> dict:
+                nonlocal mutated
+                result = real_media(path, timeline)
+                if not mutated:
+                    staging = path.parent.parent
+                    prompt = next((staging / "inputs" / "restyle_prompt").iterdir())
+                    prompt.write_bytes(b"forged staged restyle prompt\n")
+                    mutated = True
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media", side_effect=mutate_staged_prompt
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            self.assertEqual(job_path.read_bytes(), job_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            for name, record in job["inputs"].items():
+                self.assertEqual(
+                    (job_path.parent / record["path"]).read_bytes(), input_bytes[name]
+                )
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertFalse((job_path.parent / "diagnostic.mp4").exists())
+            self.assertFalse((job_path.parent / "clay.mp4").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_publish_rejects_staged_diagnostic_mutation_after_initial_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            job_before = job_path.read_bytes()
+            state_before = state_path.read_bytes()
+            job = json.loads(job_before)
+            input_bytes = {
+                name: (job_path.parent / record["path"]).read_bytes()
+                for name, record in job["inputs"].items()
+            }
+            d0 = manifest.parent / "iterations" / "D0"
+            real_media = director_loop_module._media
+            mutated = False
+
+            def mutate_staged_diagnostic(path: Path, timeline: dict) -> dict:
+                nonlocal mutated
+                result = real_media(path, timeline)
+                if not mutated:
+                    path.write_bytes((path.parent / "clay.mp4").read_bytes())
+                    mutated = True
+                return result
+
+            with mock.patch(
+                "videoactagent.director_loop._media", side_effect=mutate_staged_diagnostic
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "pixel-identical|changed"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            self.assertEqual(job_path.read_bytes(), job_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            for name, record in job["inputs"].items():
+                self.assertEqual(
+                    (job_path.parent / record["path"]).read_bytes(), input_bytes[name]
+                )
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertFalse((job_path.parent / "diagnostic.mp4").exists())
+            self.assertFalse((job_path.parent / "clay.mp4").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_workspace_reconstructs_rehashed_human_compiler_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            prompt_path = manifest.parent / iteration["inputs"]["restyle_prompt"]["path"]
+            forged = b"fully rehashed final restyle forgery\n"
+            prompt_path.write_bytes(forged)
+            self.rebind_record(iteration["inputs"]["restyle_prompt"], forged)
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "compiled director artifact"):
+                verify_workspace(manifest)
+
+    def test_workspace_redecodes_rehashed_human_media_and_requires_inequality(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            d0 = manifest.parent / "iterations" / "D0"
+            iteration_path = publish_iteration(
+                manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+            )
+            iteration = json.loads(iteration_path.read_text(encoding="utf-8"))
+            diagnostic_path = manifest.parent / iteration["diagnostic"]["path"]
+            clay_path = manifest.parent / iteration["clay"]["path"]
+            clay_bytes = clay_path.read_bytes()
+            diagnostic_path.write_bytes(clay_bytes)
+            self.rebind_record(iteration["diagnostic"], clay_bytes)
+            iteration["diagnostic"]["media"] = deepcopy(iteration["clay"]["media"])
+            self.rewrite_json(iteration_path, iteration)
+
+            with self.assertRaisesRegex(DirectorLoopError, "pixel-identical"):
+                verify_workspace(manifest)
+
+    def test_post_precommit_staged_mutation_rolls_back_original_queued_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            job_before = job_path.read_bytes()
+            state_before = state_path.read_bytes()
+            job = json.loads(job_before)
+            input_paths = {
+                name: job_path.parent / record["path"]
+                for name, record in job["inputs"].items()
+            }
+            input_bytes = {name: path.read_bytes() for name, path in input_paths.items()}
+            d0 = manifest.parent / "iterations" / "D0"
+            real_atomic_copy = director_loop_module._atomic_copy
+            mutated = False
+
+            def mutate_after_precommit(source: Path, target: Path) -> None:
+                nonlocal mutated
+                if (
+                    not mutated
+                    and ".publish-" in source.as_posix()
+                    and "/inputs/restyle_prompt/" in source.as_posix()
+                ):
+                    source.write_bytes(b"post-precommit staged forgery\n")
+                    mutated = True
+                real_atomic_copy(source, target)
+
+            with mock.patch(
+                "videoactagent.director_loop._atomic_copy",
+                side_effect=mutate_after_precommit,
+            ):
+                with self.assertRaisesRegex(
+                    DirectorLoopError, "restyle_prompt.*(hash/size|compiled director)"
+                ):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            self.assertEqual(job_path.read_bytes(), job_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            for name, path in input_paths.items():
+                self.assertEqual(path.read_bytes(), input_bytes[name], name)
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertFalse((job_path.parent / "diagnostic.mp4").exists())
+            self.assertFalse((job_path.parent / "clay.mp4").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_final_verification_failure_restores_every_prepublication_byte(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            job = json.loads(job_path.read_text(encoding="utf-8"))
+            input_paths = {
+                name: job_path.parent / record["path"]
+                for name, record in job["inputs"].items()
+            }
+            before = {
+                "job": job_path.read_bytes(),
+                "state": state_path.read_bytes(),
+                **{name: path.read_bytes() for name, path in input_paths.items()},
+            }
+            d0 = manifest.parent / "iterations" / "D0"
+            real_verify = director_loop_module.verify_workspace
+            verifications = 0
+
+            def fail_final_verification(path: Path | str) -> dict:
+                nonlocal verifications
+                verifications += 1
+                if verifications == 2:
+                    raise DirectorLoopError("injected final verification failure")
+                return real_verify(path)
+
+            with mock.patch(
+                "videoactagent.director_loop.verify_workspace",
+                side_effect=fail_final_verification,
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "injected final verification"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            iteration = job_path.parent
+            self.assertEqual(job_path.read_bytes(), before["job"])
+            self.assertEqual(state_path.read_bytes(), before["state"])
+            for name, path in input_paths.items():
+                self.assertEqual(path.read_bytes(), before[name], name)
+            self.assertFalse((iteration / "iteration.json").exists())
+            self.assertFalse((iteration / "diagnostic.mp4").exists())
+            self.assertFalse((iteration / "clay.mp4").exists())
+            self.assertFalse((iteration / "approval.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
+
+    def test_mutated_staged_media_backups_cannot_corrupt_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.make_workspace(root)
+            job_path = prepare_iteration(manifest, self.director_payload(manifest))
+            state_path = manifest.parent / "state.json"
+            diagnostic_path = job_path.parent / "diagnostic.mp4"
+            clay_path = job_path.parent / "clay.mp4"
+            diagnostic_before = b"pre-existing diagnostic bytes\n"
+            clay_before = b"pre-existing clay bytes\n"
+            diagnostic_path.write_bytes(diagnostic_before)
+            clay_path.write_bytes(clay_before)
+            job_before = job_path.read_bytes()
+            state_before = state_path.read_bytes()
+            job = json.loads(job_before)
+            input_paths = {
+                name: job_path.parent / record["path"]
+                for name, record in job["inputs"].items()
+            }
+            input_bytes = {name: path.read_bytes() for name, path in input_paths.items()}
+            d0 = manifest.parent / "iterations" / "D0"
+            real_atomic_copy = director_loop_module._atomic_copy
+            real_verify = director_loop_module.verify_workspace
+            mutated = False
+            verifications = 0
+
+            def mutate_media_backups(source: Path, target: Path) -> None:
+                nonlocal mutated
+                if not mutated and ".publish-" in source.as_posix():
+                    staging = next(
+                        parent for parent in source.parents
+                        if parent.name.startswith(".publish-")
+                    )
+                    media_backup = staging / "original" / "media"
+                    media_target = media_backup if media_backup.exists() else staging / "media"
+                    (media_target / "diagnostic.mp4").write_bytes(
+                        b"forged diagnostic staging bytes\n"
+                    )
+                    (media_target / "clay.mp4").write_bytes(
+                        b"forged clay staging bytes\n"
+                    )
+                    mutated = True
+                real_atomic_copy(source, target)
+
+            def fail_final_verification(path: Path | str) -> dict:
+                nonlocal verifications
+                verifications += 1
+                if verifications == 2:
+                    raise DirectorLoopError("injected final verification failure")
+                return real_verify(path)
+
+            with (
+                mock.patch(
+                    "videoactagent.director_loop._atomic_copy",
+                    side_effect=mutate_media_backups,
+                ),
+                mock.patch(
+                    "videoactagent.director_loop.verify_workspace",
+                    side_effect=fail_final_verification,
+                ),
+            ):
+                with self.assertRaisesRegex(DirectorLoopError, "injected final verification"):
+                    publish_iteration(
+                        manifest, job_path, d0 / "diagnostic.mp4", d0 / "clay.mp4"
+                    )
+
+            self.assertTrue(mutated)
+            self.assertEqual(diagnostic_path.read_bytes(), diagnostic_before)
+            self.assertEqual(clay_path.read_bytes(), clay_before)
+            self.assertEqual(job_path.read_bytes(), job_before)
+            self.assertEqual(state_path.read_bytes(), state_before)
+            for name, path in input_paths.items():
+                self.assertEqual(path.read_bytes(), input_bytes[name], name)
+            self.assertFalse((job_path.parent / "iteration.json").exists())
+            self.assertFalse((job_path.parent / "approval.json").exists())
+            self.assertEqual(list(manifest.parent.glob(".publish-*.staging")), [])
 
     def test_byte_ranges_support_video_seeking(self) -> None:
         self.assertEqual(byte_range(None, 100), (0, 99, False))
@@ -197,10 +926,24 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertIn('id="visual-style"', html)
         self.assertIn('id="mood"', html)
         self.assertIn('id="prompt-preview"', html)
-        self.assertIn('id="prompt-output"', html)
+        self.assertIn('id="trajectory-prompt-output"', html)
+        self.assertIn('id="restyle-prompt-output"', html)
         self.assertIn("预览自动 Prompt", html)
         self.assertIn("/api/prompt-preview", html)
-        self.assertIn('id="prompt-output" readonly', html)
+        self.assertIn('id="trajectory-prompt-output" readonly', html)
+        self.assertIn('id="restyle-prompt-output" readonly', html)
+        self.assertNotIn('textarea id="prompt"', html)
+
+    def test_panel_switches_diagnostic_and_clay_without_changing_iteration(self) -> None:
+        html = (ROOT / "static" / "director_panel.html").read_text(encoding="utf-8")
+        self.assertIn('id="proxy-view"', html)
+        self.assertIn('value="diagnostic"', html)
+        self.assertIn('value="clay"', html)
+        self.assertIn("只有中性粘土视图会送入生成", html)
+        self.assertIn("session.current.diagnostic_url", html)
+        self.assertIn("session.current.clay_url", html)
+        self.assertIn("selectedProxyView", html)
+        self.assertNotIn("$('proxy-view').value='diagnostic'", html)
 
     def test_approved_iteration_builds_vace_job_without_rerendering_proxy(self) -> None:
         from videoactagent.vace_coded_draft import (
@@ -220,6 +963,8 @@ class DirectorLoopTests(unittest.TestCase):
         self.assertTrue(verified["director_binding"]["approved"])
         self.assertEqual(verified["mapping"]["src_video"], "control/src_video.mp4")
         self.assertIsNone(verified["mapping"]["src_ref_images"])
+        self.assertIn("K0 to K1", verified["prompt"]["text"])
+        self.assertNotIn("Subjects and wardrobe", verified["prompt"]["text"])
 
 
 if __name__ == "__main__":

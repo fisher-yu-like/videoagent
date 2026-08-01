@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "scene_id": "station_reunion",
+  "subjects": [
+    {
+      "actor_id": "actor_a",
+      "description": "an adult traveler wearing an orange coat and subdued travel clothes"
+    },
+    {
+      "actor_id": "actor_b",
+      "description": "an adult friend wearing a blue coat and subdued travel clothes"
+    }
+  ],
+  "environment": "a grounded railway platform with stable station architecture",
+  "lighting": "consistent natural station lighting",
+  "quality": "photoreal live-action people, natural anatomy, realistic skin and cloth"
+}

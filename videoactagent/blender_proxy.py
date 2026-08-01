@@ -27,6 +27,14 @@ from videoactagent.director_annotation import (
     CameraKeyframe,
     camera_trajectory_from_path,
 )
+from videoactagent.humanoid_proxy import (
+    ACTOR_GEOMETRY_PROFILE,
+    HEADING_TOLERANCE,
+    HUMANOID_PARTS,
+    REQUIRED_ACTOR_PARTS,
+    path_heading_degrees,
+    unwrap_heading_degrees,
+)
 
 
 @dataclass(frozen=True)
@@ -297,11 +305,49 @@ def create_studio_room_environment(profile: RenderProfile):
     create_action_axis(profile)
 
 
+def create_cafe_environment(profile: RenderProfile):
+    floor = create_material(profile, "cafe_floor_mat", (0.30, 0.20, 0.12, 1.0), roughness=0.86)
+    counter = create_material(profile, "cafe_counter_mat", (0.13, 0.07, 0.035, 1.0), roughness=0.72)
+    furniture = create_material(profile, "cafe_furniture_mat", (0.42, 0.24, 0.10, 1.0), roughness=0.78)
+    wall = create_material(profile, "cafe_wall_mat", (0.55, 0.44, 0.31, 1.0), roughness=0.9)
+    warm = create_emissive_material(profile, "cafe_warm_mat", (1.0, 0.55, 0.18, 1.0))
+    add_cube("cafe_floor", (0, 0, -0.14), (6.0, 4.2, 0.14), floor)
+    add_cube("cafe_back_wall", (0, 4.05, 2.7), (6.0, 0.12, 2.8), wall)
+    add_cube("cafe_counter", (0, 3.0, 0.65), (3.8, 0.5, 0.65), counter)
+    for index, x in enumerate((-4.0, 4.0)):
+        add_cylinder(f"cafe_table_{index}", (x, 1.8, 0.55), 0.65, 0.12, furniture)
+        for side in (-0.9, 0.9):
+            add_cube(f"cafe_chair_{index}_{side}", (x + side, 1.8, 0.42), (0.28, 0.28, 0.42), furniture)
+    for index, x in enumerate((-2.5, 0.0, 2.5)):
+        add_uv_sphere(f"cafe_lamp_{index}", (x, 3.2, 2.8), 0.18, warm)
+    create_action_axis(profile)
+
+
+def create_warehouse_environment(profile: RenderProfile):
+    floor = create_material(profile, "warehouse_floor_mat", (0.16, 0.17, 0.18, 1.0), roughness=0.92)
+    shelf = create_material(profile, "warehouse_shelf_mat", (0.20, 0.25, 0.29, 1.0), metallic=0.55, roughness=0.42)
+    crate = create_material(profile, "warehouse_crate_mat", (0.36, 0.20, 0.08, 1.0), roughness=0.88)
+    light = create_emissive_material(profile, "warehouse_light_mat", (0.75, 0.88, 1.0, 1.0))
+    add_cube("warehouse_floor", (0, 0, -0.14), (6.0, 4.2, 0.14), floor)
+    for row, y in enumerate((-2.8, 2.8)):
+        for x in (-5.2, -3.8, 3.8, 5.2):
+            add_cube(f"warehouse_post_{row}_{x}", (x, y, 1.6), (0.10, 0.10, 1.6), shelf)
+        for z in (0.45, 1.45, 2.45):
+            add_cube(f"warehouse_shelf_{row}_{z}", (0, y, z), (5.3, 0.45, 0.07), shelf)
+        for index, x in enumerate((-4.5, -2.8, 2.7, 4.4)):
+            add_cube(f"warehouse_crate_{row}_{index}", (x, y, 0.28), (0.38, 0.35, 0.28), crate)
+    for index, x in enumerate((-3.0, 0.0, 3.0)):
+        add_cube(f"warehouse_light_{index}", (x, 0, 3.5), (0.8, 0.08, 0.04), light)
+    create_action_axis(profile)
+
+
 ENVIRONMENT_BUILDERS = {
     "station": create_station_environment,
     "city_crosswalk": create_city_crosswalk_environment,
     "forest_path": create_forest_path_environment,
     "studio_room": create_studio_room_environment,
+    "cafe": create_cafe_environment,
+    "warehouse": create_warehouse_environment,
 }
 
 
@@ -324,17 +370,33 @@ def create_actor(profile: RenderProfile, actor: ActorPlan, actor_index: int):
         clay_gray=clay_actor_color(actor_index)[0],
     )
 
-    bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.34, depth=1.45, location=(0, 0, 0.95))
-    body = bpy.context.object
-    body.name = f"{actor.actor_id}_body"
-    body.data.materials.append(material)
-    body.parent = root
+    anchors = {}
+    for part in HUMANOID_PARTS:
+        anchor = bpy.data.objects.new(
+            f"{actor.actor_id}__anchor__{part.name}", None
+        )
+        bpy.context.collection.objects.link(anchor)
+        anchors[part.name] = anchor
+    for part in HUMANOID_PARTS:
+        anchor = anchors[part.name]
+        anchor.parent = root if part.parent == "root" else anchors[part.parent]
+        anchor.location = part.anchor
 
-    bpy.ops.mesh.primitive_uv_sphere_add(segments=24, ring_count=12, radius=0.31, location=(0, 0, 1.9))
-    head = bpy.context.object
-    head.name = f"{actor.actor_id}_head"
-    head.data.materials.append(material)
-    head.parent = root
+        if part.primitive == "cube":
+            bpy.ops.mesh.primitive_cube_add(size=2.0)
+        elif part.primitive == "cylinder":
+            bpy.ops.mesh.primitive_cylinder_add(vertices=8, radius=1.0, depth=2.0)
+        elif part.primitive == "ico_sphere":
+            bpy.ops.mesh.primitive_ico_sphere_add(subdivisions=2, radius=1.0)
+        else:
+            raise ValueError(f"unsupported humanoid primitive: {part.primitive}")
+        body_part = bpy.context.object
+        body_part.name = f"{actor.actor_id}__{part.name}"
+        body_part.parent = anchor
+        body_part.location = part.local_center
+        body_part.scale = part.local_scale
+        bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
+        body_part.data.materials.append(material)
 
     label_curve = bpy.data.curves.new(f"{actor.actor_id}_label_curve", type="FONT")
     label_curve.body = actor.actor_id.replace("actor_", "").upper()
@@ -342,7 +404,8 @@ def create_actor(profile: RenderProfile, actor: ActorPlan, actor_index: int):
     label_curve.size = 0.32
     label = bpy.data.objects.new(f"{actor.actor_id}_label", label_curve)
     bpy.context.collection.objects.link(label)
-    label.location = (0, 0, 2.45)
+    label.location = (0, 0, 3.35)
+    label.rotation_mode = "XYZ"
     label.rotation_euler = (math.radians(90), 0, 0)
     label.data.materials.append(material)
     label.parent = root
@@ -382,6 +445,28 @@ def target_position(shot: Shot, frame_fraction: float, look_at: str) -> Vector:
 def point_camera(camera, target: Vector):
     direction = target - camera.location
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def _actor_motion_context(
+    ranges,
+    actor_id: str,
+    replacement_shot_id: str | None = None,
+    replacement_points: list[Vector] | None = None,
+    replacement_frames: list[int] | None = None,
+) -> tuple[list[Vector], list[int]]:
+    points = []
+    frames = []
+    for shot, start_frame, end_frame in ranges:
+        if shot.shot_id == replacement_shot_id:
+            if replacement_points is None or replacement_frames is None:
+                raise ValueError("replacement actor motion requires points and frames")
+            points.extend(replacement_points)
+            frames.extend(replacement_frames)
+        else:
+            actor = actor_plan(shot, actor_id)
+            points.extend((vec(actor.start), vec(actor.end)))
+            frames.extend((start_frame, end_frame))
+    return points, frames
 
 
 def configure_scene(
@@ -464,6 +549,14 @@ def configure_scene(
 
         frame_cursor = end_frame + 1
 
+    for actor_id, root in actor_roots.items():
+        points, frames = _actor_motion_context(ranges, actor_id)
+        animate_actor_motion(
+            root,
+            points,
+            frames,
+        )
+
     scene.frame_start = 1
     scene.frame_end = frame_cursor - 1
     return scene, actor_roots, camera, ranges
@@ -476,6 +569,63 @@ def _remove_keyframes(owner, data_paths: tuple[str, ...], start_frame: int, end_
                 owner.keyframe_delete(data_path=data_path, frame=frame)
             except (RuntimeError, TypeError):
                 pass
+
+
+def _actor_anchor(actor, part_name: str):
+    return bpy.data.objects[f"{actor.name}__anchor__{part_name}"]
+
+
+def animate_actor_motion(
+    actor,
+    points: list[Vector],
+    frames: list[int],
+    *,
+    replace: bool = False,
+):
+    """Key authored heading and a restrained neutral walk cycle on one actor."""
+
+    if len(points) != len(frames) or not points:
+        raise ValueError("actor motion requires matching non-empty points and frames")
+    limb_names = ("upper_arm.L", "upper_arm.R", "upper_leg.L", "upper_leg.R")
+    limbs = {name: _actor_anchor(actor, name) for name in limb_names}
+    label = bpy.data.objects[f"{actor.name}_label"]
+    if replace:
+        start_frame, end_frame = min(frames), max(frames)
+        _remove_keyframes(actor, ("rotation_euler",), start_frame, end_frame)
+        _remove_keyframes(label, ("rotation_euler",), start_frame, end_frame)
+        for limb in limbs.values():
+            _remove_keyframes(limb, ("rotation_euler",), start_frame, end_frame)
+
+    headings = unwrap_heading_degrees(
+        tuple(path_heading_degrees(points, index) for index in range(len(points)))
+    )
+    for heading, frame in zip(headings, frames):
+        actor_yaw = math.radians(heading - 90.0)
+        actor.rotation_euler = (0.0, 0.0, actor_yaw)
+        actor.keyframe_insert(data_path="rotation_euler", frame=frame)
+        label.rotation_euler = (math.radians(90.0), 0.0, -actor_yaw)
+        label.keyframe_insert(data_path="rotation_euler", frame=frame)
+        for limb in limbs.values():
+            limb.rotation_euler = (0.0, 0.0, 0.0)
+            limb.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+    tolerance_squared = HEADING_TOLERANCE * HEADING_TOLERANCE
+    for index, (start, end) in enumerate(zip(points, points[1:])):
+        dx, dy = float(end[0] - start[0]), float(end[1] - start[1])
+        start_frame, end_frame = frames[index], frames[index + 1]
+        if dx * dx + dy * dy <= tolerance_squared or end_frame - start_frame < 2:
+            continue
+        swing_frame = (start_frame + end_frame) // 2
+        direction = 1.0 if index % 2 == 0 else -1.0
+        angles = {
+            "upper_arm.L": direction * 0.22,
+            "upper_arm.R": -direction * 0.22,
+            "upper_leg.L": -direction * 0.18,
+            "upper_leg.R": direction * 0.18,
+        }
+        for name, angle in angles.items():
+            limbs[name].rotation_euler = (angle, 0.0, 0.0)
+            limbs[name].keyframe_insert(data_path="rotation_euler", frame=swing_frame)
 
 
 def _frame_for_time(start_frame: int, end_frame: int, normalized_time: float) -> int:
@@ -575,6 +725,9 @@ def apply_trajectory(
     actor_material = create_emissive_material(
         profile, "trajectory_actor_material", (0.02, 0.95, 1.0, 1.0)
     )
+    object_material = create_emissive_material(
+        profile, "trajectory_object_material", (0.95, 0.35, 0.05, 1.0)
+    )
     anchor_material = create_emissive_material(
         profile, "trajectory_anchor_material", (0.95, 0.9, 0.05, 1.0)
     )
@@ -606,8 +759,38 @@ def apply_trajectory(
                 frame = _frame_for_time(start_frame, end_frame, point.t)
                 actor.location = world
                 actor.keyframe_insert(data_path="location", frame=frame)
+            track_frames = [
+                _frame_for_time(start_frame, end_frame, point.t)
+                for point in track.points
+            ]
+            motion_points, motion_frames = _actor_motion_context(
+                ranges,
+                track.target_id,
+                shot.shot_id,
+                world_points,
+                track_frames,
+            )
+            animate_actor_motion(
+                actor,
+                motion_points,
+                motion_frames,
+                replace=True,
+            )
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
             material = actor_material
+        elif track.target_type == "object":
+            name = f"prop__{track.target_id}"
+            prop = bpy.data.objects.get(name)
+            if prop is None:
+                prop = add_cube(name, (0, 0, 0.28), (0.24, 0.18, 0.18), object_material)
+            _remove_keyframes(prop, ("location",), start_frame, end_frame)
+            world_points = [_actor_world(point, script.world_bounds) for point in track.points]
+            for point, world in zip(track.points, world_points):
+                frame = _frame_for_time(start_frame, end_frame, point.t)
+                prop.location = (world.x, world.y, 0.28)
+                prop.keyframe_insert(data_path="location", frame=frame)
+            overlay_points = [Vector((world.x, world.y, 0.28)) for world in world_points]
+            material = object_material
         elif track.target_type == "anchor":
             world_points = [_actor_world(point, script.world_bounds) for point in track.points]
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
@@ -644,19 +827,24 @@ def apply_camera_trajectory(
     _remove_keyframes(camera, ("location", "rotation_euler"), start_frame, end_frame)
     _remove_keyframes(camera.data, ("lens",), start_frame, end_frame)
     previous_interpolation = bpy.context.preferences.edit.keyframe_new_interpolation_type
+    previous_frame = bpy.context.scene.frame_current
+    target = bpy.data.objects.new("DirectorCameraLookAt", None)
+    bpy.context.collection.objects.link(target)
+    target["director_roll_degrees"] = 0.0
     applied = []
     try:
         for state in states:
             frame = _frame_for_time(start_frame, end_frame, state.t)
             bpy.context.preferences.edit.keyframe_new_interpolation_type = state.interpolation.upper()
             camera.location = Vector(state.position)
-            direction = Vector(state.look_at) - camera.location
-            camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-            if state.roll_degrees:
-                camera.rotation_euler.rotate_axis("Z", math.radians(state.roll_degrees))
+            target.location = Vector(state.look_at)
+            target["director_roll_degrees"] = state.roll_degrees
             camera.data.lens = state.focal_length_mm
             camera.keyframe_insert(data_path="location", frame=frame)
-            camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            target.keyframe_insert(data_path="location", frame=frame)
+            target.keyframe_insert(
+                data_path='["director_roll_degrees"]', frame=frame
+            )
             camera.data.keyframe_insert(data_path="lens", frame=frame)
             applied.append({
                 "keyframe_id": state.keyframe_id, "t": state.t, "frame": frame,
@@ -665,7 +853,24 @@ def apply_camera_trajectory(
                 "shot_size": state.shot_size, "interpolation": state.interpolation,
                 "roll_degrees": state.roll_degrees,
             })
+
+        bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
+        previous_rotation = None
+        for frame in range(start_frame, end_frame + 1):
+            bpy.context.scene.frame_set(frame)
+            direction = target.location - camera.location
+            rotation = direction.to_track_quat("-Z", "Y").to_euler("XYZ")
+            roll_degrees = float(target["director_roll_degrees"])
+            if roll_degrees:
+                rotation.rotate_axis("Z", math.radians(roll_degrees))
+            if previous_rotation is not None:
+                rotation.make_compatible(previous_rotation)
+            camera.rotation_euler = rotation
+            camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            previous_rotation = rotation.copy()
     finally:
+        bpy.context.scene.frame_set(previous_frame)
+        bpy.data.objects.remove(target, do_unlink=True)
         bpy.context.preferences.edit.keyframe_new_interpolation_type = previous_interpolation
     return applied
 
@@ -797,6 +1002,8 @@ def render_outputs(
         "blender_version": bpy.app.version_string,
         "scene_id": script.scene_id,
         "environment_preset": script.environment_preset,
+        "actor_geometry_profile": ACTOR_GEOMETRY_PROFILE,
+        "required_actor_parts": list(REQUIRED_ACTOR_PARTS),
         "scene_frame_start": scene.frame_start,
         "scene_frame_end": scene.frame_end,
         "rendered_frames": scene.frame_end - scene.frame_start + 1,
@@ -892,6 +1099,8 @@ def render_trajectory_outputs(
         "schema_version": "0.1",
         "renderer": "blender",
         "blender_version": bpy.app.version_string,
+        "actor_geometry_profile": ACTOR_GEOMETRY_PROFILE,
+        "required_actor_parts": list(REQUIRED_ACTOR_PARTS),
         "render_style": profile.style,
         "effective_profile": profile.as_dict(),
         "shotscript_sha256": sha256_file(shotscript_path),

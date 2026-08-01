@@ -7,7 +7,7 @@ import math
 from typing import Any
 
 
-PROMPT_COMPILER_VERSION = "trajectory-facts-v1"
+PROMPT_COMPILER_VERSION = "trajectory-facts-v2"
 _TOLERANCE = 0.01
 _STYLES = {
     "source_default": None,
@@ -45,6 +45,33 @@ def _distance(first: Sequence[float], second: Sequence[float]) -> float:
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(first, second)))
 
 
+def _screen_motion(
+    first: Sequence[float], second: Sequence[float],
+) -> str:
+    directions: list[str] = []
+    horizontal = second[0] - first[0]
+    vertical = second[1] - first[1]
+    if abs(horizontal) > _TOLERANCE:
+        directions.append("right" if horizontal > 0 else "left")
+    if abs(vertical) > _TOLERANCE:
+        directions.append("down" if vertical > 0 else "up")
+    if not directions:
+        return "holds position"
+    return "moves " + " and ".join(directions)
+
+
+def _spacing_change(
+    first_a: Sequence[float], first_b: Sequence[float],
+    second_a: Sequence[float], second_b: Sequence[float],
+) -> str:
+    delta = _distance(second_a, second_b) - _distance(first_a, first_b)
+    if delta < -_TOLERANCE:
+        return "move closer"
+    if delta > _TOLERANCE:
+        return "move farther apart"
+    return "keep similar spacing"
+
+
 def _actor_point(frame: Mapping[str, Any], actor: str) -> tuple[float, float]:
     actors = frame.get("actors")
     point = actors.get(actor) if isinstance(actors, Mapping) else None
@@ -62,6 +89,50 @@ def _camera_vector(frame: Mapping[str, Any], field: str) -> tuple[float, float, 
     if not isinstance(value, list) or len(value) != 3:
         raise TrajectoryPromptError(f"camera {field} must be a 3D point")
     return tuple(_number(item, f"camera.{field}") for item in value)  # type: ignore[return-value]
+
+
+def _camera_segment(
+    first: Mapping[str, Any], second: Mapping[str, Any],
+) -> list[str]:
+    first_camera = first["camera"]
+    second_camera = second["camera"]
+    facts: list[str] = []
+    if (
+        _distance(
+            _camera_vector(first, "position"),
+            _camera_vector(second, "position"),
+        )
+        > _TOLERANCE
+    ):
+        facts.append("camera moves along the approved path")
+    if (
+        _distance(
+            _camera_vector(first, "look_at"),
+            _camera_vector(second, "look_at"),
+        )
+        > _TOLERANCE
+    ):
+        facts.append("camera look-at changes")
+
+    first_focal = _number(first_camera.get("focal_length_mm"), "focal")
+    second_focal = _number(second_camera.get("focal_length_mm"), "focal")
+    if abs(second_focal - first_focal) > _TOLERANCE:
+        facts.append(
+            f"focal length changes from {first_focal:g} mm to {second_focal:g} mm"
+        )
+
+    first_shot = first_camera.get("shot_size")
+    second_shot = second_camera.get("shot_size")
+    if first_shot != second_shot:
+        facts.append(f"shot size changes from {first_shot} to {second_shot}")
+
+    first_roll = _number(first_camera.get("roll_degrees"), "roll")
+    second_roll = _number(second_camera.get("roll_degrees"), "roll")
+    if abs(second_roll - first_roll) > _TOLERANCE:
+        facts.append(
+            f"roll changes from {first_roll:g} degrees to {second_roll:g} degrees"
+        )
+    return facts
 
 
 def _validated_frames(keyframes: object) -> tuple[list[Mapping[str, Any]], list[str]]:
@@ -99,7 +170,7 @@ def compile_trajectory_prompt(
     duration_seconds: object, keyframes: object, visual_style: object, mood: object,
 ) -> str:
     """Compile only observable trajectory/camera facts into stable English text."""
-    story = _text(story_prompt, "story_prompt")
+    _text(story_prompt, "story_prompt")
     appearance = _text(appearance_instruction, "appearance_instruction")
     duration = _number(duration_seconds, "duration_seconds")
     if duration <= 0:
@@ -111,56 +182,31 @@ def compile_trajectory_prompt(
     frames, actors = _validated_frames(keyframes)
 
     facts: list[str] = []
-    for actor in actors:
-        points = [_actor_point(frame, actor) for frame in frames]
-        moved = any(
-            _distance(first, second) > _TOLERANCE
-            for first, second in zip(points, points[1:])
-        )
-        facts.append(
-            f"{actor} follows the authored path"
-            if moved else f"{actor} remains stationary"
+    for segment_index, (first, second) in enumerate(zip(frames, frames[1:])):
+        segment = f"K{segment_index} to K{segment_index + 1}"
+        for actor in actors:
+            facts.append(
+                f"{segment}, {actor} "
+                f"{_screen_motion(_actor_point(first, actor), _actor_point(second, actor))}"
+            )
+
+        for first_index, first_actor in enumerate(actors):
+            for second_actor in actors[first_index + 1:]:
+                facts.append(
+                    f"{segment}, {first_actor} and {second_actor} "
+                    f"{_spacing_change(
+                        _actor_point(first, first_actor),
+                        _actor_point(first, second_actor),
+                        _actor_point(second, first_actor),
+                        _actor_point(second, second_actor),
+                    )}"
+                )
+
+        facts.extend(
+            f"{segment}, {camera_fact}"
+            for camera_fact in _camera_segment(first, second)
         )
 
-    for first_index, first_actor in enumerate(actors):
-        for second_actor in actors[first_index + 1:]:
-            start = _distance(
-                _actor_point(frames[0], first_actor),
-                _actor_point(frames[0], second_actor),
-            )
-            end = _distance(
-                _actor_point(frames[-1], first_actor),
-                _actor_point(frames[-1], second_actor),
-            )
-            delta = end - start
-            relation = (
-                "move closer" if delta < -_TOLERANCE
-                else "move farther apart" if delta > _TOLERANCE
-                else "keep similar spacing"
-            )
-            facts.append(f"{first_actor} and {second_actor} {relation}")
-
-    camera_changed = False
-    for first, second in zip(frames, frames[1:]):
-        if (
-            _distance(_camera_vector(first, "position"), _camera_vector(second, "position")) > _TOLERANCE
-            or _distance(_camera_vector(first, "look_at"), _camera_vector(second, "look_at")) > _TOLERANCE
-            or abs(
-                _number(first["camera"].get("focal_length_mm"), "focal")
-                - _number(second["camera"].get("focal_length_mm"), "focal")
-            ) > _TOLERANCE
-            or first["camera"].get("shot_size") != second["camera"].get("shot_size")
-            or abs(
-                _number(first["camera"].get("roll_degrees"), "roll")
-                - _number(second["camera"].get("roll_degrees"), "roll")
-            ) > _TOLERANCE
-        ):
-            camera_changed = True
-            break
-    facts.append(
-        "camera follows the authored camera path"
-        if camera_changed else "camera remains static"
-    )
     first_camera = frames[0]["camera"]
     last_camera = frames[-1]["camera"]
     facts.append(
@@ -172,7 +218,6 @@ def compile_trajectory_prompt(
 
     creative = [value for value in (_STYLES[visual_style], _MOODS[mood]) if value]
     parts = [
-        story.rstrip(". ") + ".",
         appearance.rstrip(". ") + ".",
         "; ".join(facts) + ".",
     ]

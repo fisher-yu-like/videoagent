@@ -1,0 +1,11 @@
+{
+  "schema_version": "multicam-suite-1.0",
+  "cases": [
+    {"scene_id": "station_reunion", "prompt": "../prompts/station_reunion.txt", "shotscript": "../stories/station_reunion.json"},
+    {"scene_id": "city_crosswalk", "prompt": "../prompts/city_crosswalk.txt", "shotscript": "../examples/city_crosswalk_shotscript.json"},
+    {"scene_id": "forest_path", "prompt": "../prompts/forest_path.txt", "shotscript": "../examples/forest_path_shotscript.json"},
+    {"scene_id": "studio_room", "prompt": "../prompts/studio_room.txt", "shotscript": "../examples/studio_room_shotscript.json"},
+    {"scene_id": "cafe_handoff", "prompt": "../prompts/cafe_handoff.txt", "shotscript": "../stories/cafe_handoff.json"},
+    {"scene_id": "warehouse_chase", "prompt": "../prompts/warehouse_chase.txt", "shotscript": "../stories/warehouse_chase.json"}
+  ]
+}

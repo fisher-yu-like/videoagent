@@ -8,6 +8,7 @@ EvidenceState = Literal[
     "client_declared",
     "model_supported",
     "gateway_unverified",
+    "gateway_verified",
     "unsupported",
 ]
 

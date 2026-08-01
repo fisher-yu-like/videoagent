@@ -195,6 +195,8 @@ class ShotScript:
             "city_crosswalk",
             "forest_path",
             "studio_room",
+            "cafe",
+            "warehouse",
         }
         if environment_preset not in allowed_environment_presets:
             raise ShotScriptError(

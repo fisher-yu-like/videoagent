@@ -204,7 +204,7 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
         self.assertTrue(self.proxy.hide_in_clay("TrajectoryCurve_camera_orbit"))
         self.assertTrue(self.proxy.hide_in_clay("TrajectoryPoint_actor_a_01"))
         self.assertTrue(self.proxy.hide_in_clay("TrajectoryLabel_actor_a_00"))
-        self.assertFalse(self.proxy.hide_in_clay("actor_a_body"))
+        self.assertFalse(self.proxy.hide_in_clay("actor_a__torso"))
 
     def test_render_profile_is_immutable_and_explicitly_consumed(self):
         profile = self.proxy.RenderProfile("clay", 6, (160, 90))
@@ -331,6 +331,38 @@ class BlenderClayRenderProfileIntegrationTests(unittest.TestCase):
             self.assertEqual(rows[2]["lens"], 50.0)
             self.assertEqual(rows[-1]["position"], [1.0, -9.2, 6.0])
 
+    def test_camera_keeps_looking_at_fixed_target_across_angle_wrap(self):
+        expression = (
+            "import bpy,json,sys; "
+            f"sys.path.insert(0,{str(ROOT)!r}); "
+            "from mathutils import Vector; "
+            "from videoactagent.blender_proxy import apply_camera_trajectory; "
+            "from videoactagent.director_annotation import CameraKeyframe; "
+            "data=bpy.data.cameras.new('WrapCameraData'); "
+            "camera=bpy.data.objects.new('WrapCamera',data); "
+            "bpy.context.collection.objects.link(camera); "
+            "target=(0.0,0.0,1.0); "
+            "states=tuple(CameraKeyframe(f'K{i}',t,p,target,35.0,'wide','linear',0.0) "
+            "for i,(t,p) in enumerate(((0.0,(0.0,-4.0,2.0)),"
+            "(0.5,(0.0,4.0,2.0)),(1.0,(-4.0,0.0,2.0))))); "
+            "apply_camera_trajectory(states,camera,1,9); "
+            "scene=bpy.context.scene; rows=[]; "
+            "[(scene.frame_set(frame),rows.append(round((camera.matrix_world.to_quaternion()@Vector((0,0,-1))).dot((Vector(target)-camera.matrix_world.translation).normalized()),6))) for frame in range(1,10)]; "
+            "print('CAMERA_ALIGNMENT='+json.dumps(rows))"
+        )
+        completed = subprocess.run(
+            [str(BLENDER), "--background", "--python-expr", expression],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        line = next(
+            line for line in (completed.stdout + completed.stderr).splitlines()
+            if line.startswith("CAMERA_ALIGNMENT=")
+        )
+        alignments = json.loads(line.partition("=")[2])
+        self.assertGreater(min(alignments), 0.999)
+
     def test_real_clay_render_persists_and_decodes_the_effective_profile(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
@@ -373,6 +405,17 @@ class BlenderClayRenderProfileIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(report["scene_frame_end"], 6)
             self.assertEqual(report["rendered_frames"], 6)
+            self.assertEqual(report["actor_geometry_profile"], "humanoid_v1")
+            self.assertEqual(
+                report["required_actor_parts"],
+                sorted(
+                    [
+                        "head", "torso", "pelvis",
+                        "upper_arm.L", "lower_arm.L", "upper_arm.R", "lower_arm.R",
+                        "upper_leg.L", "lower_leg.L", "upper_leg.R", "lower_leg.R",
+                    ]
+                ),
+            )
 
             reader = imageio_ffmpeg.read_frames(
                 str(output / "station_proxy.mp4"), pix_fmt="rgb24"
@@ -541,6 +584,14 @@ def keyframes(owner):
 
 camera = bpy.data.objects["DirectorCamera"]
 actors = [bpy.data.objects[name] for name in ("actor_a", "actor_b")]
+actor_objects = sorted(
+    (
+        obj for obj in bpy.data.objects
+        if obj.name in {"actor_a", "actor_b", "actor_a_label", "actor_b_label"}
+        or obj.name.startswith(("actor_a__", "actor_b__"))
+    ),
+    key=lambda obj: obj.name,
+)
 payload = {
     "overlays": {
         obj.name: bool(obj.hide_render)
@@ -549,12 +600,12 @@ payload = {
     },
     "transforms": {
         "camera": transform_samples(camera),
-        **{actor.name: transform_samples(actor) for actor in actors},
+        **{obj.name: transform_samples(obj) for obj in actor_objects},
     },
     "keyframes": {
         "camera": keyframes(camera),
         "camera_data": keyframes(camera.data),
-        **{actor.name: keyframes(actor) for actor in actors},
+        **{obj.name: keyframes(obj) for obj in actor_objects},
     },
 }
 print("BLENDER_STYLE_PROBE=" + json.dumps(payload, sort_keys=True))
@@ -594,6 +645,15 @@ print("BLENDER_STYLE_PROBE=" + json.dumps(payload, sort_keys=True))
             self.assertEqual(diagnostic["keyframes"], clay["keyframes"])
             self.assertTrue(diagnostic["keyframes"]["camera"])
             self.assertTrue(diagnostic["keyframes"]["actor_a"])
+            self.assertTrue(diagnostic["keyframes"]["actor_a__anchor__upper_arm.L"])
+            self.assertTrue(diagnostic["keyframes"]["actor_a_label"])
+            manifest = json.loads(
+                (directory / "diagnostic" / "trajectory_proxy_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(manifest["actor_geometry_profile"], "humanoid_v1")
+            self.assertEqual(manifest["required_actor_parts"], sorted(manifest["required_actor_parts"]))
 
 
 if __name__ == "__main__":

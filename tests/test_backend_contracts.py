@@ -30,6 +30,15 @@ class BackendContractTests(unittest.TestCase):
         self.assertEqual(kling.first_last_frame, "unsupported")
         self.assertEqual(kling.reference_video, "gateway_unverified")
 
+    def test_evidence_state_type_accepts_verified_without_changing_static_seedance(self):
+        from typing import get_args
+        from videoactagent.backends.capabilities import EvidenceState, gateway_capability
+
+        self.assertIn("gateway_verified", get_args(EvidenceState))
+        self.assertEqual(
+            gateway_capability("seedance").reference_video, "gateway_unverified"
+        )
+
     def test_builds_prompt_payloads_in_inherited_jd_demo_shape(self):
         from videoactagent.backends.jd import build_kling_t2v, build_seedance_t2v
 

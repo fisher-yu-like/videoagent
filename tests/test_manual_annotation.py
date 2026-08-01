@@ -87,6 +87,96 @@ def _shotscript(path: Path) -> None:
 
 
 class ManualAnnotationTests(unittest.TestCase):
+    def test_reference_k0_k4_template_autofills_no_human_judgments(self) -> None:
+        from videoactagent.manual_annotation import reference_k0_k4_annotation_template
+
+        frame_hashes = {f"K{i}": f"{i + 1:x}" * 64 for i in range(5)}
+        template = reference_k0_k4_annotation_template(
+            source_result_sha256="a" * 64,
+            source_report_sha256="b" * 64,
+            frame_hashes=frame_hashes,
+            actor_ids=("actor_a", "actor_b"),
+            annotator_id="annotator_1",
+        )
+        self.assertFalse(template["eligible_for_paper"])
+        self.assertEqual(template["viewed"]["decoded_frames"], [])
+        for frame in template["frames"].values():
+            self.assertIsNone(frame["pair_relation"])
+            self.assertIsNone(frame["camera_motion_direction"])
+            for actor in frame["actors"].values():
+                self.assertTrue(all(value is None for value in actor.values()))
+
+    def test_reference_k0_k4_annotation_requires_explicit_hash_bound_human_labels(self) -> None:
+        from videoactagent.manual_annotation import validate_reference_k0_k4_annotation
+
+        frame_hashes = {f"K{i}": f"{i + 1:x}" * 64 for i in range(5)}
+        frames = {}
+        for frame_id, frame_sha in frame_hashes.items():
+            actors = {}
+            for actor_id, x in (("actor_a", 0.25), ("actor_b", 0.75)):
+                actors[actor_id] = {
+                    "center": {"x": x, "y": 0.5},
+                    "center_unknown": False,
+                    "visibility": "visible",
+                    "completeness": "complete",
+                    "humanness": "human",
+                    "identity_stability": "stable",
+                    "wardrobe_distinction": "distinct",
+                    "wardrobe_stability": "stable",
+                }
+            frames[frame_id] = {
+                "source_frame_sha256": frame_sha,
+                "actors": actors,
+                "pair_relation": "side_by_side",
+                "pair_distance_evidence": "centers_separated",
+                "background_motion_direction": "left",
+                "camera_motion_direction": "right",
+                "notes": "Explicit code-fixture labels; not model evidence.",
+                "unknown": False,
+            }
+        payload = {
+            "schema_version": "reference-video-k0-k4-annotation/1",
+            "annotation_status": "draft",
+            "annotator_id": "annotator_1",
+            "review": None,
+            "eligible_for_paper": False,
+            "source_result_sha256": "a" * 64,
+            "source_report_sha256": "b" * 64,
+            "viewed": {
+                "full_proxy_video": True,
+                "full_result_video": True,
+                "decoded_frames": ["K0", "K1", "K2", "K3", "K4"],
+            },
+            "frames": frames,
+            "overall_notes": "Manual review pending independent promotion.",
+        }
+        validated = validate_reference_k0_k4_annotation(
+            payload,
+            expected_result_sha256="a" * 64,
+            expected_report_sha256="b" * 64,
+            expected_frame_hashes=frame_hashes,
+            actor_ids=("actor_a", "actor_b"),
+        )
+        self.assertEqual(validated, payload)
+        self.assertFalse(validated["eligible_for_paper"])
+
+        for mutation, message in (
+            (lambda value: value["frames"].pop("K4"), "K0-K4"),
+            (lambda value: value["frames"]["K2"].update(source_frame_sha256="f" * 64), "frame SHA"),
+            (lambda value: value["frames"]["K1"]["actors"]["actor_a"].pop("humanness"), "actor fields"),
+            (lambda value: value["viewed"].update(full_result_video=False), "view"),
+        ):
+            changed = json.loads(json.dumps(payload))
+            mutation(changed)
+            with self.assertRaisesRegex(ValueError, message):
+                validate_reference_k0_k4_annotation(
+                    changed,
+                    expected_result_sha256="a" * 64,
+                    expected_report_sha256="b" * 64,
+                    expected_frame_hashes=frame_hashes,
+                    actor_ids=("actor_a", "actor_b"),
+                )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
