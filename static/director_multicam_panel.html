@@ -104,7 +104,7 @@ function updateStagingEditState(){
 function undoStaging(){
   if(!editHistory.length)return;const selected=$('target-select').value;trajectory=editHistory.pop();fillTargets();
   if([...$('target-select').options].some(option=>option.value===selected))$('target-select').value=selected;
-  drawStaging();updateStagingEditState();setStatus('已撤销上一步，本次修改尚未保存。');
+  drawStaging();updateStagingEditState();setStatus(isDirty()?'已撤销上一步，仍有未保存修改。':'已撤销上一步，当前没有未保存修改。');
 }
 function clearSelectedDrawing(){
   const selectedId=$('target-select').value,current=currentTrack();if(!current)return;

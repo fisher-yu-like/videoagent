@@ -27,6 +27,7 @@ class DirectorMulticamPanelTests(unittest.TestCase):
             self.assertIn(javascript_contract, html)
         self.assertIn("本次编辑：无未保存修改", html)
         self.assertIn("本次编辑：有未保存修改", html)
+        self.assertIn("当前没有未保存修改", html)
         self.assertNotEqual(
             html, Path("static/director_panel.html").read_text(encoding="utf-8")
         )
