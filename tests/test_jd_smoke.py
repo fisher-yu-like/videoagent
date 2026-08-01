@@ -7,6 +7,7 @@ secret handling only; they must not be reported as a real API submission.
 """
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -14,7 +15,119 @@ import unittest
 from unittest.mock import patch
 
 
+def _reference_candidate():
+    from tests.test_seedance_reference import approved_export, evidence_document
+    from videoactagent.seedance_reference import (
+        load_seedance_capability_evidence,
+        prepare_reference_candidate,
+    )
+
+    return prepare_reference_candidate(
+        approved_export=approved_export(),
+        proxy_url="https://media.volccdn.com/approved/clay.mp4",
+        capability=load_seedance_capability_evidence(evidence_document(verified=False)),
+    )
+
+
 class JdSmokeCliTests(unittest.TestCase):
+    def test_submit_reference_accepts_only_exact_candidate_and_claims_one_attempt(self):
+        from videoactagent import jd_smoke
+
+        candidate = _reference_candidate()
+        calls = []
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            candidate_path = root_path / "candidate.json"
+            candidate_path.write_text(json.dumps(candidate), encoding="utf-8")
+            run_root = root_path / "runs"
+
+            def controlled_submit(payload, api_key, base_url, run):
+                calls.append(payload)
+                self.assertTrue((run.path / "request.json").is_file())
+                return "code-only-task"
+
+            args = [
+                "submit-seedance-reference", "--candidate", str(candidate_path),
+                "--run-root", str(run_root),
+            ]
+            with patch.dict(os.environ, {"JD_KLING_KEY": "unit-key"}):
+                with patch.object(jd_smoke, "submit_once", side_effect=controlled_submit):
+                    jd_smoke.main(args)
+                    with self.assertRaisesRegex(RuntimeError, "already.*attempted"):
+                        jd_smoke.main(args)
+
+            self.assertEqual(calls, [candidate["payload"]])
+            runs = [path for path in run_root.iterdir() if path.is_dir() and not path.name.startswith(".")]
+            self.assertEqual(len(runs), 1)
+            metadata = json.loads((runs[0] / "metadata.json").read_text(encoding="utf-8"))
+            candidate_sha = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+            self.assertEqual(metadata["candidate_sha256"], candidate_sha)
+            self.assertEqual(metadata["generation_submit_limit"], 1)
+            self.assertEqual(metadata["generation_submit_count"], 1)
+            self.assertEqual(metadata["automatic_retry_limit"], 0)
+            self.assertEqual(metadata["input_mode"], "reference_video")
+            self.assertEqual(metadata["status"], "combined_probe")
+
+    def test_submit_reference_rejects_tampering_before_credentials_or_run(self):
+        from videoactagent import jd_smoke
+
+        candidate = _reference_candidate()
+        mutations = []
+        for mutate in (
+            lambda value: value.update(network_called=True),
+            lambda value: value.update(payload_sha256="0" * 64),
+            lambda value: value["payload"]["parameters"].update(duration=4),
+            lambda value: value["capability"].update(role="image"),
+        ):
+            changed = json.loads(json.dumps(candidate))
+            mutate(changed)
+            mutations.append(changed)
+        with tempfile.TemporaryDirectory() as root:
+            root_path = Path(root)
+            for index, changed in enumerate(mutations):
+                path = root_path / f"candidate-{index}.json"
+                path.write_text(json.dumps(changed), encoding="utf-8")
+                run_root = root_path / f"runs-{index}"
+                with patch.dict(os.environ, {"JD_KLING_KEY": ""}):
+                    with self.assertRaises(ValueError):
+                        jd_smoke.main([
+                            "submit-seedance-reference", "--candidate", str(path),
+                            "--run-root", str(run_root),
+                        ])
+                self.assertFalse(run_root.exists())
+
+    def test_query_records_immutable_attempt_hash_and_cumulative_count(self):
+        from videoactagent import jd_smoke
+
+        response = {"task_id": "task-1", "status": "processing", "content": []}
+        canonical = json.dumps(
+            response, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as root:
+            run = Path(root) / "run"
+            run.mkdir()
+            (run / "state.json").write_text(json.dumps({
+                "base_url": "https://modelservice.jdcloud.com",
+                "task_id": "task-1", "status": "submitted", "video_urls": [],
+            }), encoding="utf-8")
+            with patch.dict(os.environ, {"JD_KLING_KEY": "unit-key"}):
+                with patch("videoactagent.backends.jd._request_once", return_value=response):
+                    with patch.object(jd_smoke, "submit_once") as submit:
+                        jd_smoke.main(["query", "--run-dir", str(run)])
+                        jd_smoke.main(["query", "--run-dir", str(run)])
+            submit.assert_not_called()
+            state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+            self.assertEqual(state["query_count"], 2)
+            attempts = sorted(run.glob("query_attempt_*.json"))
+            self.assertEqual(len(attempts), 2)
+            values = [json.loads(path.read_text(encoding="utf-8")) for path in attempts]
+            self.assertEqual([value["query_count"] for value in values], [1, 2])
+            for value in values:
+                self.assertTrue(value["attempted_at_utc"].endswith("Z"))
+                self.assertEqual(
+                    value["response_sha256"], hashlib.sha256(canonical).hexdigest()
+                )
+
     def test_submit_seedance_requires_key_before_creating_run_directory(self):
         from videoactagent import jd_smoke
 

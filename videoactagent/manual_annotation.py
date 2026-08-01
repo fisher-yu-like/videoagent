@@ -54,6 +54,18 @@ CAMERA_CATEGORIES = frozenset(
     }
 )
 CAMERA_INTENSITIES = frozenset({"none", "low", "medium", "high", "ambiguous"})
+REFERENCE_K_IDS = ("K0", "K1", "K2", "K3", "K4")
+REFERENCE_K_SCHEMA_VERSION = "reference-video-k0-k4-annotation/1"
+REFERENCE_VISIBILITY_VALUES = frozenset(
+    {"visible", "partial", "occluded", "out_of_frame", "unknown"}
+)
+COMPLETENESS_VALUES = frozenset({"complete", "partial", "incomplete", "unknown"})
+HUMANNESS_VALUES = frozenset({"human", "clay", "mannequin", "cg", "unknown"})
+STABILITY_VALUES = frozenset({"stable", "unstable", "unknown"})
+WARDROBE_DISTINCTION_VALUES = frozenset({"distinct", "not_distinct", "unknown"})
+MOTION_DIRECTION_VALUES = frozenset(
+    {"none", "left", "right", "up", "down", "toward", "away", "complex", "unknown"}
+)
 _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*", flags=re.ASCII)
 
 
@@ -614,6 +626,192 @@ def _human_id(value: object, label: str) -> str:
     if any(ord(character) < 32 for character in result) or len(result) > 200:
         raise ValueError(f"{label} is invalid")
     return result
+
+
+def validate_reference_k0_k4_annotation(
+    payload: Mapping[str, object],
+    *,
+    expected_result_sha256: str,
+    expected_report_sha256: str,
+    expected_frame_hashes: Mapping[str, str],
+    actor_ids: Sequence[str],
+) -> dict[str, object]:
+    """Validate explicit manual K0-K4 labels without inferring any label."""
+
+    expected_top = {
+        "schema_version", "annotation_status", "annotator_id", "review",
+        "eligible_for_paper", "source_result_sha256", "source_report_sha256",
+        "viewed", "frames", "overall_notes",
+    }
+    if not isinstance(payload, Mapping) or set(payload) != expected_top:
+        raise ValueError("reference K0-K4 annotation fields do not match the schema")
+    if payload.get("schema_version") != REFERENCE_K_SCHEMA_VERSION:
+        raise ValueError("reference K0-K4 annotation schema mismatch")
+    result_sha = _sha256_text(expected_result_sha256, "expected result SHA-256")
+    report_sha = _sha256_text(expected_report_sha256, "expected report SHA-256")
+    if payload.get("source_result_sha256") != result_sha:
+        raise ValueError("reference K0-K4 result SHA-256 binding mismatch")
+    if payload.get("source_report_sha256") != report_sha:
+        raise ValueError("reference K0-K4 report SHA-256 binding mismatch")
+    if (
+        not isinstance(expected_frame_hashes, Mapping)
+        or tuple(expected_frame_hashes) != REFERENCE_K_IDS
+    ):
+        raise ValueError("expected frame hashes must contain ordered K0-K4")
+    normalized_hashes = {
+        key: _sha256_text(expected_frame_hashes[key], f"expected {key} frame SHA-256")
+        for key in REFERENCE_K_IDS
+    }
+    actors_expected = tuple(actor_ids)
+    if (
+        len(actors_expected) != 2
+        or len(set(actors_expected)) != 2
+        or any(not isinstance(actor, str) or not actor for actor in actors_expected)
+    ):
+        raise ValueError("reference K0-K4 annotation requires exactly two actor ids")
+    viewed = payload.get("viewed")
+    if not isinstance(viewed, Mapping) or set(viewed) != {
+        "full_proxy_video", "full_result_video", "decoded_frames"
+    }:
+        raise ValueError("reference K0-K4 viewing evidence fields mismatch")
+    if (
+        viewed.get("full_proxy_video") is not True
+        or viewed.get("full_result_video") is not True
+        or viewed.get("decoded_frames") != list(REFERENCE_K_IDS)
+    ):
+        raise ValueError("annotator must view both full videos and exact decoded K0-K4 frames")
+
+    frames = payload.get("frames")
+    if not isinstance(frames, Mapping) or tuple(frames) != REFERENCE_K_IDS:
+        raise ValueError("reference annotation frames must contain ordered K0-K4")
+    expected_frame_fields = {
+        "source_frame_sha256", "actors", "pair_relation",
+        "pair_distance_evidence", "background_motion_direction",
+        "camera_motion_direction", "notes", "unknown",
+    }
+    expected_actor_fields = {
+        "center", "center_unknown", "visibility", "completeness", "humanness",
+        "identity_stability", "wardrobe_distinction", "wardrobe_stability",
+    }
+    for frame_id in REFERENCE_K_IDS:
+        frame = frames[frame_id]
+        if not isinstance(frame, Mapping) or set(frame) != expected_frame_fields:
+            raise ValueError(f"{frame_id} fields do not match the schema")
+        if frame.get("source_frame_sha256") != normalized_hashes[frame_id]:
+            raise ValueError(f"{frame_id} source frame SHA mismatch")
+        actors = frame.get("actors")
+        if not isinstance(actors, Mapping) or set(actors) != set(actors_expected):
+            raise ValueError(f"{frame_id} must label both actors")
+        for actor_id in actors_expected:
+            actor = actors[actor_id]
+            if not isinstance(actor, Mapping) or set(actor) != expected_actor_fields:
+                raise ValueError(f"{frame_id} actor fields do not match the schema")
+            center_unknown = actor.get("center_unknown")
+            center = actor.get("center")
+            if type(center_unknown) is not bool:
+                raise ValueError(f"{frame_id} actor center_unknown must be boolean")
+            if center_unknown:
+                if center is not None:
+                    raise ValueError(f"{frame_id} unknown actor center must be null")
+            else:
+                if not isinstance(center, Mapping) or set(center) != {"x", "y"}:
+                    raise ValueError(f"{frame_id} actor center must have normalized x/y")
+                _unit(center["x"], f"{frame_id} actor center x")
+                _unit(center["y"], f"{frame_id} actor center y")
+            if actor.get("visibility") not in REFERENCE_VISIBILITY_VALUES:
+                raise ValueError(f"{frame_id} actor visibility is invalid")
+            if actor.get("completeness") not in COMPLETENESS_VALUES:
+                raise ValueError(f"{frame_id} actor completeness is invalid")
+            if actor.get("humanness") not in HUMANNESS_VALUES:
+                raise ValueError(f"{frame_id} actor humanness is invalid")
+            if actor.get("identity_stability") not in STABILITY_VALUES:
+                raise ValueError(f"{frame_id} actor identity stability is invalid")
+            if actor.get("wardrobe_distinction") not in WARDROBE_DISTINCTION_VALUES:
+                raise ValueError(f"{frame_id} actor wardrobe distinction is invalid")
+            if actor.get("wardrobe_stability") not in STABILITY_VALUES:
+                raise ValueError(f"{frame_id} actor wardrobe stability is invalid")
+        for field in ("pair_relation", "pair_distance_evidence", "notes"):
+            if not isinstance(frame.get(field), str):
+                raise ValueError(f"{frame_id} {field} must be explicit text")
+        if frame.get("background_motion_direction") not in MOTION_DIRECTION_VALUES:
+            raise ValueError(f"{frame_id} background motion direction is invalid")
+        if frame.get("camera_motion_direction") not in MOTION_DIRECTION_VALUES:
+            raise ValueError(f"{frame_id} camera motion direction is invalid")
+        if type(frame.get("unknown")) is not bool:
+            raise ValueError(f"{frame_id} unknown flag must be boolean")
+    if not isinstance(payload.get("overall_notes"), str):
+        raise ValueError("reference K0-K4 overall_notes must be explicit text")
+    annotator = _human_id(payload.get("annotator_id"), "annotator_id")
+    status = payload.get("annotation_status")
+    if status == "draft":
+        if payload.get("review") is not None or payload.get("eligible_for_paper") is not False:
+            raise ValueError("draft K0-K4 annotation is excluded from paper statistics")
+    elif status == "reviewed":
+        review = payload.get("review")
+        if not isinstance(review, Mapping) or set(review) != {
+            "reviewer_id", "reviewer_identity_sha256", "reviewed_at_utc"
+        }:
+            raise ValueError("reviewed K0-K4 annotation reviewer binding is invalid")
+        if _human_id(review.get("reviewer_id"), "reviewer_id") == annotator:
+            raise ValueError("reviewer_id must differ from annotator_id")
+        _sha256_text(review.get("reviewer_identity_sha256"), "reviewer identity SHA-256")
+        timestamp = review.get("reviewed_at_utc")
+        if not isinstance(timestamp, str) or not timestamp.endswith("Z"):
+            raise ValueError("reviewed K0-K4 timestamp is invalid")
+        try:
+            datetime.fromisoformat(timestamp.removesuffix("Z") + "+00:00")
+        except ValueError as exc:
+            raise ValueError("reviewed K0-K4 timestamp is invalid") from exc
+        if payload.get("eligible_for_paper") is not True:
+            raise ValueError("reviewed K0-K4 annotation eligibility mismatch")
+    else:
+        raise ValueError("reference K0-K4 annotation status is invalid")
+    return dict(payload)
+
+
+def reference_k0_k4_annotation_template(
+    *, source_result_sha256: str, source_report_sha256: str,
+    frame_hashes: Mapping[str, str], actor_ids: Sequence[str], annotator_id: str,
+) -> dict[str, object]:
+    """Create an incomplete UI draft with no inferred human judgments."""
+
+    _sha256_text(source_result_sha256, "result SHA-256")
+    _sha256_text(source_report_sha256, "report SHA-256")
+    actors = tuple(actor_ids)
+    if tuple(frame_hashes) != REFERENCE_K_IDS or len(actors) != 2:
+        raise ValueError("template requires exact K0-K4 hashes and two actors")
+    return {
+        "schema_version": REFERENCE_K_SCHEMA_VERSION,
+        "annotation_status": "draft",
+        "annotator_id": _human_id(annotator_id, "annotator_id"),
+        "review": None,
+        "eligible_for_paper": False,
+        "source_result_sha256": source_result_sha256,
+        "source_report_sha256": source_report_sha256,
+        "viewed": {
+            "full_proxy_video": False, "full_result_video": False,
+            "decoded_frames": [],
+        },
+        "frames": {
+            frame_id: {
+                "source_frame_sha256": frame_hashes[frame_id],
+                "actors": {
+                    actor: {
+                        "center": None, "center_unknown": None, "visibility": None,
+                        "completeness": None, "humanness": None,
+                        "identity_stability": None, "wardrobe_distinction": None,
+                        "wardrobe_stability": None,
+                    }
+                    for actor in actors
+                },
+                "pair_relation": None, "pair_distance_evidence": None,
+                "background_motion_direction": None, "camera_motion_direction": None,
+                "notes": None, "unknown": None,
+            }
+            for frame_id in REFERENCE_K_IDS
+        },
+        "overall_notes": None,
+    }
 
 
 def _validate_reference_snapshot(
