@@ -773,19 +773,24 @@ def apply_camera_trajectory(
     _remove_keyframes(camera, ("location", "rotation_euler"), start_frame, end_frame)
     _remove_keyframes(camera.data, ("lens",), start_frame, end_frame)
     previous_interpolation = bpy.context.preferences.edit.keyframe_new_interpolation_type
+    previous_frame = bpy.context.scene.frame_current
+    target = bpy.data.objects.new("DirectorCameraLookAt", None)
+    bpy.context.collection.objects.link(target)
+    target["director_roll_degrees"] = 0.0
     applied = []
     try:
         for state in states:
             frame = _frame_for_time(start_frame, end_frame, state.t)
             bpy.context.preferences.edit.keyframe_new_interpolation_type = state.interpolation.upper()
             camera.location = Vector(state.position)
-            direction = Vector(state.look_at) - camera.location
-            camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-            if state.roll_degrees:
-                camera.rotation_euler.rotate_axis("Z", math.radians(state.roll_degrees))
+            target.location = Vector(state.look_at)
+            target["director_roll_degrees"] = state.roll_degrees
             camera.data.lens = state.focal_length_mm
             camera.keyframe_insert(data_path="location", frame=frame)
-            camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            target.keyframe_insert(data_path="location", frame=frame)
+            target.keyframe_insert(
+                data_path='["director_roll_degrees"]', frame=frame
+            )
             camera.data.keyframe_insert(data_path="lens", frame=frame)
             applied.append({
                 "keyframe_id": state.keyframe_id, "t": state.t, "frame": frame,
@@ -794,7 +799,24 @@ def apply_camera_trajectory(
                 "shot_size": state.shot_size, "interpolation": state.interpolation,
                 "roll_degrees": state.roll_degrees,
             })
+
+        bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
+        previous_rotation = None
+        for frame in range(start_frame, end_frame + 1):
+            bpy.context.scene.frame_set(frame)
+            direction = target.location - camera.location
+            rotation = direction.to_track_quat("-Z", "Y").to_euler("XYZ")
+            roll_degrees = float(target["director_roll_degrees"])
+            if roll_degrees:
+                rotation.rotate_axis("Z", math.radians(roll_degrees))
+            if previous_rotation is not None:
+                rotation.make_compatible(previous_rotation)
+            camera.rotation_euler = rotation
+            camera.keyframe_insert(data_path="rotation_euler", frame=frame)
+            previous_rotation = rotation.copy()
     finally:
+        bpy.context.scene.frame_set(previous_frame)
+        bpy.data.objects.remove(target, do_unlink=True)
         bpy.context.preferences.edit.keyframe_new_interpolation_type = previous_interpolation
     return applied
 

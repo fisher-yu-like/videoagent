@@ -331,6 +331,38 @@ class BlenderClayRenderProfileIntegrationTests(unittest.TestCase):
             self.assertEqual(rows[2]["lens"], 50.0)
             self.assertEqual(rows[-1]["position"], [1.0, -9.2, 6.0])
 
+    def test_camera_keeps_looking_at_fixed_target_across_angle_wrap(self):
+        expression = (
+            "import bpy,json,sys; "
+            f"sys.path.insert(0,{str(ROOT)!r}); "
+            "from mathutils import Vector; "
+            "from videoactagent.blender_proxy import apply_camera_trajectory; "
+            "from videoactagent.director_annotation import CameraKeyframe; "
+            "data=bpy.data.cameras.new('WrapCameraData'); "
+            "camera=bpy.data.objects.new('WrapCamera',data); "
+            "bpy.context.collection.objects.link(camera); "
+            "target=(0.0,0.0,1.0); "
+            "states=tuple(CameraKeyframe(f'K{i}',t,p,target,35.0,'wide','linear',0.0) "
+            "for i,(t,p) in enumerate(((0.0,(0.0,-4.0,2.0)),"
+            "(0.5,(0.0,4.0,2.0)),(1.0,(-4.0,0.0,2.0))))); "
+            "apply_camera_trajectory(states,camera,1,9); "
+            "scene=bpy.context.scene; rows=[]; "
+            "[(scene.frame_set(frame),rows.append(round((camera.matrix_world.to_quaternion()@Vector((0,0,-1))).dot((Vector(target)-camera.matrix_world.translation).normalized()),6))) for frame in range(1,10)]; "
+            "print('CAMERA_ALIGNMENT='+json.dumps(rows))"
+        )
+        completed = subprocess.run(
+            [str(BLENDER), "--background", "--python-expr", expression],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        line = next(
+            line for line in (completed.stdout + completed.stderr).splitlines()
+            if line.startswith("CAMERA_ALIGNMENT=")
+        )
+        alignments = json.loads(line.partition("=")[2])
+        self.assertGreater(min(alignments), 0.999)
+
     def test_real_clay_render_persists_and_decodes_the_effective_profile(self):
         with tempfile.TemporaryDirectory() as root:
             directory = Path(root)
