@@ -4,7 +4,7 @@
 
 本轮完成了 6 个不同场景的完整 5 秒 Blender 参考 Proxy，并执行了 6 次正式 DeepSeek 三机位规划请求。基础 Proxy 为真实 Blender 输出；没有 Seedance、Kling、VACE 调用，没有自动重试，没有伪造人工批准。
 
-当前状态：5 个场景 `planned_waiting_human`，1 个场景 `failed`。因为人工尚未批准规划，所以 6 场景三机位正式渲染数为 0，人工批准数为 0；不能称为六场景端到端实验完成。
+当前状态：station 已完成规划人工批准并渲染 `M1`，其余 4 个场景为 `planned_waiting_human`，forest 为 `failed`。station 的自动几何检查通过，但人工构图仍待查看；因此 6 场景矩阵尚未完成。
 
 ## 参考 Proxy
 
@@ -36,6 +36,16 @@
 
 单独的真实 Blender 集成检查已跑通：批准过的测试规划 → 三套 K0–K4 数值轨迹 → 一个共享 `.blend` → 三路各 3/3 帧 MP4 → 每路 Depth + CryptoObject00/01/02 EXR → 同步、职责目标可见性、相邻视角角度和相机/人物间距评估。该检查是代码集成证据，不冒充用户场景的人工实验结论。
 
+## station M1 真实三机位结果
+
+运行目录：`runs/work/agent_multicam_suite_20260801/station_reunion/iterations/M1/`。三个 MP4 均为 15 帧、3 FPS、960×540，自动评估 `automatic_passed=true`，`human_composition_status=unknown`。
+
+| 机位 | 文件 | SHA-256 |
+|---|---|---|
+| camera_a | `iterations/M1/render/camera_a/proxy.mp4` | `78e30959ee0ef7d534cd68a3308e099f86000a31bf8a05b08aa5eb728793fe9f` |
+| camera_b | `iterations/M1/render/camera_b/proxy.mp4` | `99835599034183e9decbe553063d08478736a6ba2673ce221cb4f395eb4b8b0d` |
+| camera_c | `iterations/M1/render/camera_c/proxy.mp4` | `85a237f271e11e7a024b027d1934d9281477b0de49b03a38f7580c3dbb0b51bc` |
+
 ## 下一道人工作业门
 
-打开 `http://127.0.0.1:8770` 查看 station 的 Agent 规划。只有用户点击“批准职责规划”后，系统才允许渲染该场景三路正式 Proxy。forest 不自动重试；需要用户明确选择重新规划或人工修正失败响应。
+打开 `http://127.0.0.1:8770` 查看 station 的三路 M1。只有用户点击“批准本次三机位 Proxy”后，系统才把它记为人工批准版本。forest 不自动重试；需要用户明确选择重新规划或人工修正失败响应。
