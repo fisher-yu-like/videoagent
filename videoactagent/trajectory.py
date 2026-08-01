@@ -18,7 +18,7 @@ from uuid import uuid4
 
 SCHEMA_VERSION = "0.1"
 COORDINATE_SPACE = "normalized_0_1_top_left"
-TARGET_TYPES = frozenset({"camera", "actor", "anchor", "local_deformation"})
+TARGET_TYPES = frozenset({"camera", "actor", "object", "anchor", "local_deformation"})
 PRIMITIVES = frozenset({"polyline", "circle", "static"})
 CAMERA_SEMANTICS = frozenset(
     {
@@ -199,7 +199,7 @@ class TrajectoryTrack:
                 self.primitive == "polyline"
                 and self.semantic in _CAMERA_LINEAR_SEMANTICS
             )
-        elif target_type == "actor":
+        elif target_type in {"actor", "object"}:
             allowed = self.primitive == "polyline" and self.semantic == "move"
         elif target_type == "anchor":
             allowed = self.primitive == "static" and self.semantic == "anchor"

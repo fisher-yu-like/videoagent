@@ -725,6 +725,9 @@ def apply_trajectory(
     actor_material = create_emissive_material(
         profile, "trajectory_actor_material", (0.02, 0.95, 1.0, 1.0)
     )
+    object_material = create_emissive_material(
+        profile, "trajectory_object_material", (0.95, 0.35, 0.05, 1.0)
+    )
     anchor_material = create_emissive_material(
         profile, "trajectory_anchor_material", (0.95, 0.9, 0.05, 1.0)
     )
@@ -775,6 +778,19 @@ def apply_trajectory(
             )
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]
             material = actor_material
+        elif track.target_type == "object":
+            name = f"prop__{track.target_id}"
+            prop = bpy.data.objects.get(name)
+            if prop is None:
+                prop = add_cube(name, (0, 0, 0.28), (0.24, 0.18, 0.18), object_material)
+            _remove_keyframes(prop, ("location",), start_frame, end_frame)
+            world_points = [_actor_world(point, script.world_bounds) for point in track.points]
+            for point, world in zip(track.points, world_points):
+                frame = _frame_for_time(start_frame, end_frame, point.t)
+                prop.location = (world.x, world.y, 0.28)
+                prop.keyframe_insert(data_path="location", frame=frame)
+            overlay_points = [Vector((world.x, world.y, 0.28)) for world in world_points]
+            material = object_material
         elif track.target_type == "anchor":
             world_points = [_actor_world(point, script.world_bounds) for point in track.points]
             overlay_points = [Vector((world.x, world.y, 0.12)) for world in world_points]

@@ -21,7 +21,7 @@ Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject
 仓库保留两个互不替换的界面：
 
 - `director-loop`：原单摄像机人工标注器，端口 8769。
-- `director-multicam`：新 Agent 三机位标注器，端口 8770。
+- `director-multicam`：单页三阶段向导；先人工批准人物/物体轨迹，再由 Agent 规划三机位，端口 8770。
 
 日常只需启动对应页面：
 

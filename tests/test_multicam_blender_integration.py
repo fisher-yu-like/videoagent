@@ -14,6 +14,7 @@ from tests.test_director_multicam import (
 )
 from videoactagent.director_multicam import (
     approve_plan,
+    approve_staging,
     create_plan,
     prepare_render,
     prepare_workspace,
@@ -43,6 +44,9 @@ class MulticamBlenderIntegrationTests(unittest.TestCase):
             manifest = prepare_workspace(
                 PROMPT, shotscript, BLENDER, directory / "workspace",
                 reference_renderer=fake_reference_renderer,
+            )
+            approve_staging(
+                manifest, "S1", author_id="integration-test-staging-gate"
             )
             create_plan(manifest, planner=fake_planner)
             approve_plan(manifest, "P1", author_id="integration-test-human-gate")

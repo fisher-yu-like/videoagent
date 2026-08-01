@@ -26,6 +26,7 @@ from videoactagent.multicam_plan import MulticamPlanError, load_multicam_plan
 from videoactagent.multicam_eval import evaluate_multicam_iteration
 from videoactagent.multicam_rig import compile_camera_rig
 from videoactagent.shotscript import ShotScript, ShotScriptError
+from videoactagent.trajectory import TrajectoryInstruction
 
 
 SCHEMA_VERSION = "multicam-director-1.0"
@@ -205,12 +206,27 @@ def prepare_workspace(
         }
         manifest = staging / "multicam_manifest.json"
         _write(manifest, manifest_value)
+        staging_dir = staging / "staging" / "S1"
+        staging_dir.mkdir(parents=True)
+        trajectory_path = staging_dir / "trajectory.json"
+        _write(trajectory_path, _actor_trajectory(manifest_value))
+        _write(staging_dir / "record.json", {
+            "schema_version": SCHEMA_VERSION,
+            "staging_id": "S1",
+            "trajectory": _record(trajectory_path, staging),
+            "base_staging_id": None,
+            "locked_through_keyframe": None,
+            "created_at": _now(),
+        })
         _write(staging / "state.json", {
             "schema_version": SCHEMA_VERSION,
+            "current_staging": "S1",
+            "approved_staging": None,
             "current_plan": None,
             "approved_plan": None,
             "current_iteration": None,
             "approved_iteration": None,
+            "next_staging": 2,
             "next_plan": 1,
             "next_iteration": 1,
         })
@@ -271,6 +287,49 @@ def prepare_suite(
         raise
 
 
+def _ensure_staging(
+    root: Path, document: Mapping[str, Any], state: dict[str, Any],
+) -> dict[str, Any]:
+    """Migrate pre-staging workspaces without replacing historical plan evidence."""
+    required = {"current_staging", "approved_staging", "next_staging"}
+    if required <= set(state):
+        return state
+    directory = root / "staging" / "S1"
+    directory.mkdir(parents=True, exist_ok=True)
+    trajectory_path = directory / "trajectory.json"
+    if not trajectory_path.exists():
+        _write(trajectory_path, _actor_trajectory(document))
+    record_path = directory / "record.json"
+    if not record_path.exists():
+        _write(record_path, {
+            "schema_version": SCHEMA_VERSION,
+            "staging_id": "S1",
+            "trajectory": _record(trajectory_path, root),
+            "base_staging_id": None,
+            "locked_through_keyframe": None,
+            "created_at": _now(),
+            "migration": "pre-staging-workspace",
+        })
+    approved = "S1" if state.get("approved_plan") else None
+    if approved:
+        approval_path = directory / "approval.json"
+        if not approval_path.exists():
+            _write(approval_path, {
+                "schema_version": SCHEMA_VERSION,
+                "staging_id": "S1",
+                "trajectory_sha256": _sha(trajectory_path),
+                "author_id": "migrated-from-approved-plan",
+                "approved_at": _now(),
+            })
+    state.update({
+        "current_staging": "S1",
+        "approved_staging": approved,
+        "next_staging": 2,
+    })
+    _write(root / "state.json", state)
+    return state
+
+
 def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
     manifest = Path(manifest_path).resolve(strict=True)
     root = manifest.parent
@@ -278,6 +337,7 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
     state = _read(root / "state.json", "multicam state")
     if document.get("schema_version") != SCHEMA_VERSION or state.get("schema_version") != SCHEMA_VERSION:
         raise DirectorMulticamError("multicam workspace schema is invalid")
+    state = _ensure_staging(root, document, state)
     for name in ("prompt", "shotscript", "reference"):
         _verify_record(root, document.get("source", {}).get(name), f"source {name}")
     if not Path(document.get("blender_path", "")).is_file():
@@ -285,15 +345,181 @@ def verify_workspace(manifest_path: Path | str) -> dict[str, Any]:
     return {"root": root, "document": document, "state": state}
 
 
+def _staging_record(root: Path, staging_id: str) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    record = _read(root / "staging" / staging_id / "record.json", f"{staging_id} record")
+    if record.get("staging_id") != staging_id:
+        raise DirectorMulticamError(f"{staging_id} record identity mismatch")
+    trajectory_path = _verify_record(root, record.get("trajectory"), f"{staging_id} trajectory")
+    trajectory = _read(trajectory_path, f"{staging_id} trajectory")
+    return record, trajectory_path, trajectory
+
+
+def _validated_staging(value: object, document: Mapping[str, Any]) -> dict[str, Any]:
+    try:
+        instruction = TrajectoryInstruction.from_dict(value)
+        instruction.validate_identity(document["story_id"], document["shot_id"])
+    except ValueError as exc:
+        raise DirectorMulticamError(f"staging trajectory is invalid: {exc}") from exc
+    if (
+        instruction.duration_seconds != float(document["timeline"]["duration_seconds"])
+        or instruction.sample_count != document["timeline"]["frame_count"]
+    ):
+        raise DirectorMulticamError("staging trajectory timeline differs from the workspace")
+    actors: list[str] = []
+    targets: set[str] = set()
+    for track in instruction.tracks:
+        if track.target_id in targets:
+            raise DirectorMulticamError("staging target IDs must be unique")
+        targets.add(track.target_id)
+        if track.target_type not in {"actor", "object"}:
+            raise DirectorMulticamError("staging supports only actor and object tracks")
+        if track.target_type == "actor":
+            actors.append(track.target_id)
+        if len(track.points) != 5 or any(
+            abs(point.t - _TIMES[index]) > 1e-9
+            for index, point in enumerate(track.points)
+        ):
+            raise DirectorMulticamError("every staging track must contain exact K0--K4 times")
+    if set(actors) != set(document["actors"]) or len(actors) != len(document["actors"]):
+        raise DirectorMulticamError("staging must contain exactly one track for every source actor")
+    return instruction.to_dict()
+
+
+def _approved_staging(
+    workspace: Mapping[str, Any],
+) -> tuple[str, dict[str, Any], Path, dict[str, Any]]:
+    root, state = workspace["root"], workspace["state"]
+    staging_id = state.get("approved_staging")
+    if not isinstance(staging_id, str):
+        raise DirectorMulticamError("staging must be human approved before camera planning")
+    record, trajectory_path, trajectory = _staging_record(root, staging_id)
+    approval = _read(root / "staging" / staging_id / "approval.json", "staging approval")
+    if (
+        approval.get("staging_id") != staging_id
+        or approval.get("trajectory_sha256") != _sha(trajectory_path)
+    ):
+        raise DirectorMulticamError("approved staging binding mismatch")
+    return staging_id, record, trajectory_path, trajectory
+
+
+def _trajectory_keyframes(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
+    tracks = trajectory.get("tracks")
+    if not isinstance(tracks, list):
+        raise DirectorMulticamError("staging trajectory tracks are invalid")
+    frames = []
+    for index, time in enumerate(_TIMES):
+        actors = {
+            str(track["target"]["id"]): {
+                "x": track["points"][index]["x"],
+                "y": track["points"][index]["y"],
+            }
+            for track in tracks
+        }
+        frames.append({"id": f"K{index}", "t": time, "actors": actors})
+    return frames
+
+
+def _trajectory_targets(trajectory: Mapping[str, Any]) -> list[str]:
+    return [str(track["target"]["id"]) for track in trajectory["tracks"]]
+
+
+def save_staging(
+    manifest_path: Path | str, trajectory: object, *, base_staging_id: str,
+    locked_through_keyframe: str | None = None,
+) -> dict[str, Any]:
+    workspace = verify_workspace(manifest_path)
+    root, document, state = workspace["root"], workspace["document"], workspace["state"]
+    if state.get("current_staging") != base_staging_id:
+        raise DirectorMulticamError("staging edit must use the current base staging")
+    if locked_through_keyframe not in {None, "K0", "K1", "K2", "K3"}:
+        raise DirectorMulticamError("locked staging prefix is invalid")
+    clean = _validated_staging(trajectory, document)
+    _unused, _base_path, base = _staging_record(root, base_staging_id)
+    if locked_through_keyframe is not None:
+        locked_index = int(locked_through_keyframe[1])
+        base_tracks = {
+            (track["target"]["type"], track["target"]["id"]): track
+            for track in base["tracks"]
+        }
+        clean_tracks = {
+            (track["target"]["type"], track["target"]["id"]): track
+            for track in clean["tracks"]
+        }
+        if set(base_tracks) != set(clean_tracks) or any(
+            base_tracks[target]["points"][: locked_index + 1]
+            != clean_tracks[target]["points"][: locked_index + 1]
+            for target in base_tracks
+        ):
+            raise DirectorMulticamError("staging edit changes the frozen prefix")
+    staging_id = f"S{state['next_staging']}"
+    directory = root / "staging" / staging_id
+    directory.mkdir(parents=True, exist_ok=False)
+    trajectory_path = directory / "trajectory.json"
+    _write(trajectory_path, clean)
+    record = {
+        "schema_version": SCHEMA_VERSION,
+        "staging_id": staging_id,
+        "trajectory": _record(trajectory_path, root),
+        "base_staging_id": base_staging_id,
+        "locked_through_keyframe": locked_through_keyframe,
+        "created_at": _now(),
+    }
+    _write(directory / "record.json", record)
+    state.update({
+        "current_staging": staging_id,
+        "approved_staging": None,
+        "current_plan": None,
+        "approved_plan": None,
+        "current_iteration": None,
+        "approved_iteration": None,
+        "next_staging": state["next_staging"] + 1,
+    })
+    _write(root / "state.json", state)
+    return record
+
+
+def approve_staging(
+    manifest_path: Path | str, staging_id: str, *, author_id: str,
+) -> Path:
+    workspace = verify_workspace(manifest_path)
+    root, state = workspace["root"], workspace["state"]
+    if state.get("approved_staging") is not None:
+        raise DirectorMulticamError("staging is already approved")
+    if state.get("current_staging") != staging_id or not author_id.strip():
+        raise DirectorMulticamError("only the current staging can be approved by a named human")
+    _record_value, trajectory_path, _trajectory = _staging_record(root, staging_id)
+    approval = root / "staging" / staging_id / "approval.json"
+    if approval.exists():
+        raise DirectorMulticamError("staging is already approved")
+    _write(approval, {
+        "schema_version": SCHEMA_VERSION,
+        "staging_id": staging_id,
+        "trajectory_sha256": _sha(trajectory_path),
+        "author_id": author_id.strip(),
+        "approved_at": _now(),
+    })
+    state["approved_staging"] = staging_id
+    _write(root / "state.json", state)
+    return approval
+
+
 def _scene_context(workspace: Mapping[str, Any], locked: str | None) -> dict[str, Any]:
     document, root = workspace["document"], workspace["root"]
     prompt = _verify_record(root, document["source"]["prompt"], "source prompt")
+    staging_id, _record_value, _trajectory_path, trajectory = _approved_staging(workspace)
     return {
         "scene_id": document["story_id"],
         "story_prompt": prompt.read_text(encoding="utf-8").strip(),
         "actors": document["actors"],
+        "objects": [
+            track["target"]["id"] for track in trajectory["tracks"]
+            if track["target"]["type"] == "object"
+        ],
+        "controllable_targets": _trajectory_targets(trajectory),
         "world_bounds": document["world_bounds"],
-        "keyframes": document["actor_keyframes"],
+        "keyframes": _trajectory_keyframes(trajectory),
+        "approved_staging_id": staging_id,
+        "trajectory": trajectory,
         "locked_through_keyframe": locked,
     }
 
@@ -304,6 +530,7 @@ def create_plan(
 ) -> dict[str, Any]:
     workspace = verify_workspace(manifest_path)
     root, state = workspace["root"], workspace["state"]
+    _staging_id, _staging_record_value, _trajectory_path, trajectory = _approved_staging(workspace)
     plan_id = f"P{state['next_plan']}"
     state["next_plan"] += 1
     _write(root / "state.json", state)
@@ -319,7 +546,7 @@ def create_plan(
         load_multicam_plan(
             plan_value,
             scene_id=workspace["document"]["story_id"],
-            actors=workspace["document"]["actors"],
+            actors=_trajectory_targets(trajectory),
             locked_through_keyframe=locked_through_keyframe,
         )
     except MulticamPlanError as exc:
@@ -353,10 +580,13 @@ def approve_plan(
     approval = root / "plans" / plan_id / "approval.json"
     if approval.exists():
         raise DirectorMulticamError("plan is already approved")
+    staging_id, _staging_record_value, staging_path, _trajectory = _approved_staging(workspace)
     _write(approval, {
         "schema_version": SCHEMA_VERSION,
         "plan_id": plan_id,
         "plan_sha256": _sha(plan),
+        "staging_id": staging_id,
+        "staging_sha256": _sha(staging_path),
         "locked_through_keyframe": plan_value.get("locked_through_keyframe"),
         "author_id": author_id.strip(),
         "approved_at": _now(),
@@ -454,16 +684,23 @@ def prepare_render(
     plan_path = root / "plans" / plan_id / "plan.json"
     if approval.get("plan_sha256") != _sha(plan_path):
         raise DirectorMulticamError("approved plan binding mismatch")
+    staging_id, staging_record, staging_path, trajectory = _approved_staging(workspace)
+    if (
+        approval.get("staging_id") != staging_id
+        or approval.get("staging_sha256") != _sha(staging_path)
+    ):
+        raise DirectorMulticamError("approved plan uses a different staging version")
+    targets = _trajectory_targets(trajectory)
     plan = load_multicam_plan(
         _read(plan_path, "approved plan"),
         scene_id=document["story_id"],
-        actors=document["actors"],
+        actors=targets,
         locked_through_keyframe=approval.get("locked_through_keyframe"),
     )
     cameras = compile_camera_rig(
         plan=plan,
         world_bounds=tuple(document["world_bounds"]),
-        actor_keyframes=document["actor_keyframes"],
+        actor_keyframes=_trajectory_keyframes(trajectory),
     )
     iteration_id = f"M{state['next_iteration']}"
     directory = root / "iterations" / iteration_id
@@ -471,7 +708,7 @@ def prepare_render(
     inputs.mkdir(parents=True, exist_ok=False)
     actor_path = inputs / "actor_trajectory.json"
     camera_path = inputs / "camera_bundle.json"
-    _write(actor_path, _actor_trajectory(document))
+    _write(actor_path, trajectory)
     compiled_bundle = {
         "schema_version": "1.0",
         "scene_id": document["story_id"],
@@ -495,8 +732,13 @@ def prepare_render(
         "job_id": f"render-{iteration_id}",
         "iteration_id": iteration_id,
         "plan_id": plan_id,
+        "staging_id": staging_id,
         "status": "queued",
         "created_at": _now(),
+        "source_bindings": {
+            "approved_staging": staging_record["trajectory"],
+            "approved_plan": _record(root / "plans" / plan_id / "approval.json", root),
+        },
         "inputs": {
             "actor_trajectory": _record(actor_path, root),
             "camera_bundle": _record(camera_path, root),
@@ -527,12 +769,32 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
             raise DirectorMulticamError("render job is not queued")
         plan_id = job_value.get("plan_id")
         plan_path = root / "plans" / str(plan_id) / "plan.json"
+        actor_path = _verify_record(
+            root, job_value["inputs"]["actor_trajectory"], "actor trajectory"
+        )
+        source_bindings = job_value.get("source_bindings", {})
+        staging_source = _verify_record(
+            root, source_bindings.get("approved_staging"), "approved staging"
+        )
+        approval_path = _verify_record(
+            root, source_bindings.get("approved_plan"), "approved plan"
+        )
+        plan_approval = _read(approval_path, "approved plan binding")
+        if (
+            _sha(actor_path) != _sha(staging_source)
+            or plan_approval.get("plan_sha256") != _sha(plan_path)
+            or plan_approval.get("staging_id") != job_value.get("staging_id")
+            or plan_approval.get("staging_sha256") != _sha(staging_source)
+        ):
+            raise DirectorMulticamError("render source binding mismatch")
+        trajectory = _validated_staging(
+            _read(actor_path, "actor trajectory"), document
+        )
         plan = load_multicam_plan(
             _read(plan_path, "approved plan"),
-            scene_id=document["story_id"], actors=document["actors"],
+            scene_id=document["story_id"], actors=_trajectory_targets(trajectory),
         )
         inputs = job.parent / "input"
-        _verify_record(root, job_value["inputs"]["actor_trajectory"], "actor trajectory")
         _verify_record(root, job_value["inputs"]["camera_bundle"], "camera bundle")
         shotscript = _verify_record(root, document["source"]["shotscript"], "ShotScript")
         output = job.parent / "render"
@@ -625,17 +887,37 @@ def approve_iteration(
 def session_document(manifest_path: Path | str) -> dict[str, Any]:
     workspace = verify_workspace(manifest_path)
     document, state = workspace["document"], workspace["state"]
+    staging_id = state["current_staging"]
+    staging_record, _staging_path, trajectory = _staging_record(
+        workspace["root"], staging_id
+    )
+    actor_keyframes = _trajectory_keyframes(trajectory)
+    workflow_step = "staging"
+    if state["approved_staging"]:
+        workflow_step = "camera"
+    if state["current_iteration"]:
+        workflow_step = "result"
     result = {
         "schema_version": SCHEMA_VERSION,
         "story_id": document["story_id"],
         "actors": document["actors"],
         "world_bounds": document["world_bounds"],
         "timeline": document["timeline"],
-        "actor_keyframes": document["actor_keyframes"],
+        "actor_keyframes": actor_keyframes,
+        "current_staging": staging_id,
+        "approved_staging": state["approved_staging"],
+        "staging": {
+            "staging_id": staging_id,
+            "approved": state["approved_staging"] == staging_id,
+            "base_staging_id": staging_record.get("base_staging_id"),
+            "locked_through_keyframe": staging_record.get("locked_through_keyframe"),
+            "trajectory": trajectory,
+        },
         "current_plan": state["current_plan"],
         "approved_plan": state["approved_plan"],
         "current_iteration": state["current_iteration"],
         "approved_iteration": state["approved_iteration"],
+        "workflow_step": workflow_step,
         "reference_url": "/reference/reference.mp4",
     }
     if state["current_plan"]:
@@ -644,12 +926,13 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         )
         result["plan"] = plan_value
         plan = load_multicam_plan(
-            plan_value, scene_id=document["story_id"], actors=document["actors"],
+            plan_value, scene_id=document["story_id"],
+            actors=_trajectory_targets(trajectory),
             locked_through_keyframe=plan_value.get("locked_through_keyframe"),
         )
         states = compile_camera_rig(
             plan=plan, world_bounds=tuple(document["world_bounds"]),
-            actor_keyframes=document["actor_keyframes"],
+            actor_keyframes=actor_keyframes,
         )
         result["camera_bundle"] = {
             "schema_version": "1.0", "scene_id": document["story_id"],
@@ -752,6 +1035,23 @@ class _Handler(BaseHTTPRequestHandler):
                     locked_through_keyframe=payload.get("locked_through_keyframe"),
                 )
                 self._json(record, HTTPStatus.CREATED)
+                return
+            if path == "/api/staging" and set(payload) <= {
+                "trajectory", "base_staging_id", "locked_through_keyframe"
+            } and {"trajectory", "base_staging_id"} <= set(payload):
+                record = save_staging(
+                    self.manifest, payload["trajectory"],
+                    base_staging_id=str(payload["base_staging_id"]),
+                    locked_through_keyframe=payload.get("locked_through_keyframe"),
+                )
+                self._json(record, HTTPStatus.CREATED)
+                return
+            match = re.fullmatch(r"/api/staging/(S[1-9][0-9]*)/approve", path)
+            if match and set(payload) == {"author_id"}:
+                approval = approve_staging(
+                    self.manifest, match.group(1), author_id=str(payload["author_id"])
+                )
+                self._json({"approved": True, "approval_sha256": _sha(approval)})
                 return
             match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/approve", path)
             if match and set(payload) == {"author_id"}:

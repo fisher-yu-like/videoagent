@@ -96,8 +96,13 @@ def request_multicam_plan(
         endpoint, redacted_base = _endpoint(raw_base)
         scene_id = scene_context.get("scene_id")
         actors = scene_context.get("actors")
+        targets = scene_context.get("controllable_targets", actors)
         locked = scene_context.get("locked_through_keyframe")
-        if not isinstance(scene_id, str) or not isinstance(actors, list):
+        if (
+            not isinstance(scene_id, str) or not isinstance(actors, list)
+            or not isinstance(targets, list) or not targets
+            or not all(isinstance(target, str) for target in targets)
+        ):
             raise DeepSeekPlannerError("scene context identity is invalid")
         schema_example = {
             "schema_version": "1.0",
@@ -115,7 +120,7 @@ def request_multicam_plan(
                     "rationale": "establish spatial relationships",
                 },
                 {
-                    "camera_id": "camera_b", "role": "follow", "target": actors[0],
+                    "camera_id": "camera_b", "role": "follow", "target": targets[0],
                     "side": "south_west", "shot_size": "medium", "motion": "follow",
                     "look_at_policy": "target_actor",
                     "responsibility_segments": [[0.34, 0.67]],
@@ -123,7 +128,7 @@ def request_multicam_plan(
                     "rationale": "cover the moving subject",
                 },
                 {
-                    "camera_id": "camera_c", "role": "reverse", "target": actors[-1],
+                    "camera_id": "camera_c", "role": "reverse", "target": targets[-1],
                     "side": "north_east", "shot_size": "medium", "motion": "arc",
                     "look_at_policy": "target_actor",
                     "responsibility_segments": [[0.67, 1.0]],
@@ -186,7 +191,7 @@ def request_multicam_plan(
             plan = load_multicam_plan(
                 plan_value,
                 scene_id=scene_id,
-                actors=actors,
+                actors=targets,
                 locked_through_keyframe=locked,
             )
         except MulticamPlanError as exc:
