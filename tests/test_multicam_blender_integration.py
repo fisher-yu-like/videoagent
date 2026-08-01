@@ -1,7 +1,5 @@
 import json
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import unittest
 
@@ -19,6 +17,7 @@ from videoactagent.director_multicam import (
     create_plan,
     prepare_render,
     prepare_workspace,
+    run_render_job,
 )
 
 
@@ -48,21 +47,13 @@ class MulticamBlenderIntegrationTests(unittest.TestCase):
             create_plan(manifest, planner=fake_planner)
             approve_plan(manifest, "P1", author_id="integration-test-human-gate")
             job = prepare_render(manifest, "P1")
-            output = directory / "render"
-            source_script = manifest.parent / "source" / "shotscript.json"
-            completed = subprocess.run([
-                sys.executable, "-m", "videoactagent.multicam_blender_runner",
-                "--blender", str(BLENDER),
-                "--shotscript", str(source_script),
-                "--trajectory", str(job.parent / "input" / "actor_trajectory.json"),
-                "--camera-bundle", str(job.parent / "input" / "camera_bundle.json"),
-                "--output-dir", str(output),
-                "--render-style", "diagnostic",
-                "--fps", "3",
-                "--resolution", "160x90",
-                "--timeout", "240",
-            ], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=260)
-            self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+            manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_value["timeline"]["resolution"] = [160, 90]
+            manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+            run_render_job(manifest, job)
+            job_value = json.loads(job.read_text(encoding="utf-8"))
+            self.assertEqual(job_value["status"], "succeeded", job_value.get("error"))
+            output = job.parent / "render"
             render_manifest = json.loads(
                 (output / "multicam_manifest.json").read_text(encoding="utf-8")
             )
@@ -85,6 +76,11 @@ class MulticamBlenderIntegrationTests(unittest.TestCase):
                     self.assertGreater((output / path).stat().st_size, 0)
             self.assertEqual(len(render_manifest["shared_world_frames"]), 3)
             self.assertTrue((output / render_manifest["shared_blend"]["path"]).is_file())
+            self.assertTrue(
+                json.loads((job.parent / "evaluation.json").read_text(encoding="utf-8"))[
+                    "automatic_passed"
+                ]
+            )
 
 
 if __name__ == "__main__":

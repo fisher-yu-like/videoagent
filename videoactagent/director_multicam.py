@@ -6,17 +6,23 @@ import argparse
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 import hashlib
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from threading import Thread
 from typing import Any
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from videoactagent.deepseek_planner import request_multicam_plan
 from videoactagent.multicam_plan import MulticamPlanError, load_multicam_plan
+from videoactagent.multicam_eval import evaluate_multicam_iteration
 from videoactagent.multicam_rig import compile_camera_rig
 from videoactagent.shotscript import ShotScript, ShotScriptError
 
@@ -395,10 +401,125 @@ def prepare_render(manifest_path: Path | str, plan_id: str) -> Path:
     return job
 
 
+def _update_job(job_path: Path, **changes: object) -> dict[str, Any]:
+    job = _read(job_path, "render job")
+    job.update(changes)
+    job["updated_at"] = _now()
+    _write(job_path, job)
+    return job
+
+
+def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
+    """Run exactly one real Blender process and publish only measured evidence."""
+    manifest = Path(manifest_path).resolve(strict=True)
+    job = Path(job_path).resolve(strict=True)
+    try:
+        workspace = verify_workspace(manifest)
+        root, document = workspace["root"], workspace["document"]
+        job_value = _read(job, "render job")
+        if job_value.get("status") != "queued":
+            raise DirectorMulticamError("render job is not queued")
+        plan_id = job_value.get("plan_id")
+        plan_path = root / "plans" / str(plan_id) / "plan.json"
+        plan = load_multicam_plan(
+            _read(plan_path, "approved plan"),
+            scene_id=document["story_id"], actors=document["actors"],
+        )
+        inputs = job.parent / "input"
+        _verify_record(root, job_value["inputs"]["actor_trajectory"], "actor trajectory")
+        _verify_record(root, job_value["inputs"]["camera_bundle"], "camera bundle")
+        shotscript = _verify_record(root, document["source"]["shotscript"], "ShotScript")
+        output = job.parent / "render"
+        command = [
+            sys.executable, "-m", "videoactagent.multicam_blender_runner",
+            "--blender", document["blender_path"],
+            "--shotscript", str(shotscript),
+            "--trajectory", str(inputs / "actor_trajectory.json"),
+            "--camera-bundle", str(inputs / "camera_bundle.json"),
+            "--output-dir", str(output), "--render-style", "diagnostic",
+            "--fps", str(document["timeline"]["fps"]),
+            "--resolution", "x".join(str(value) for value in document["timeline"]["resolution"]),
+            "--timeout", "300",
+        ]
+        _update_job(job, status="rendering", command=command)
+        completed = subprocess.run(
+            command, cwd=Path(__file__).resolve().parents[1], capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=330,
+        )
+        log = job.parent / "render.log"
+        log.write_text(
+            "COMMAND\n" + json.dumps(command) + "\nSTDOUT\n" + completed.stdout
+            + "\nSTDERR\n" + completed.stderr,
+            encoding="utf-8",
+        )
+        if completed.returncode != 0 or "MULTICAM_PROXY_OK" not in completed.stdout + completed.stderr:
+            raise DirectorMulticamError("real Blender multicamera render failed; see render.log")
+        render_manifest = output / "multicam_manifest.json"
+        render_value = _read(render_manifest, "Blender render manifest")
+        evaluation_value = evaluate_multicam_iteration(plan=plan, render_manifest=render_value)
+        evaluation = job.parent / "evaluation.json"
+        _write(evaluation, evaluation_value)
+        outputs = {
+            "render_manifest": _record(render_manifest, root),
+            "evaluation": _record(evaluation, root),
+            "log": _record(log, root),
+            "videos": {
+                camera_id: _record(output / record["video"]["path"], root)
+                for camera_id, record in render_value["cameras"].items()
+            },
+        }
+        if not evaluation_value["automatic_passed"]:
+            _update_job(job, status="failed_checks", outputs=outputs)
+            return
+        _update_job(job, status="succeeded", outputs=outputs)
+        state = _read(root / "state.json", "multicam state")
+        state["current_iteration"] = job_value["iteration_id"]
+        state["approved_iteration"] = None
+        _write(root / "state.json", state)
+    except BaseException as exc:
+        try:
+            _update_job(job, status="failed", error=f"{type(exc).__name__}: {exc}")
+        except BaseException:
+            pass
+
+
+def approve_iteration(
+    manifest_path: Path | str, iteration_id: str, *, author_id: str,
+) -> Path:
+    workspace = verify_workspace(manifest_path)
+    root, state = workspace["root"], workspace["state"]
+    if state.get("current_iteration") != iteration_id or not author_id.strip():
+        raise DirectorMulticamError("only the current successful Proxy can be approved")
+    job = _read(root / "iterations" / iteration_id / "job.json", "render job")
+    if job.get("status") != "succeeded":
+        raise DirectorMulticamError("Proxy checks have not succeeded")
+    outputs = job.get("outputs", {})
+    evaluation_path = _verify_record(root, outputs.get("evaluation"), "evaluation")
+    if not _read(evaluation_path, "evaluation").get("automatic_passed"):
+        raise DirectorMulticamError("automatic geometry checks failed")
+    approval = root / "iterations" / iteration_id / "approval.json"
+    if approval.exists():
+        raise DirectorMulticamError("Proxy is already approved")
+    _write(approval, {
+        "schema_version": SCHEMA_VERSION,
+        "iteration_id": iteration_id,
+        "plan_sha256": _sha(root / "plans" / job["plan_id"] / "plan.json"),
+        "render_manifest_sha256": outputs["render_manifest"]["sha256"],
+        "evaluation_sha256": outputs["evaluation"]["sha256"],
+        "video_sha256": {
+            camera_id: record["sha256"] for camera_id, record in outputs["videos"].items()
+        },
+        "author_id": author_id.strip(), "approved_at": _now(),
+    })
+    state["approved_iteration"] = iteration_id
+    _write(root / "state.json", state)
+    return approval
+
+
 def session_document(manifest_path: Path | str) -> dict[str, Any]:
     workspace = verify_workspace(manifest_path)
     document, state = workspace["document"], workspace["state"]
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "story_id": document["story_id"],
         "actors": document["actors"],
@@ -411,6 +532,174 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         "approved_iteration": state["approved_iteration"],
         "reference_url": "/reference/reference.mp4",
     }
+    if state["current_plan"]:
+        result["plan"] = _read(
+            workspace["root"] / "plans" / state["current_plan"] / "plan.json", "current plan"
+        )
+    if state["current_iteration"]:
+        iteration = state["current_iteration"]
+        job = _read(workspace["root"] / "iterations" / iteration / "job.json", "render job")
+        result["iteration"] = {
+            "iteration_id": iteration,
+            "status": job["status"],
+            "videos": {
+                camera_id: f"/media/{iteration}/{camera_id}.mp4"
+                for camera_id in ("camera_a", "camera_b", "camera_c")
+            },
+            "evaluation": _read(
+                workspace["root"] / "iterations" / iteration / "evaluation.json", "evaluation"
+            ),
+        }
+    return result
+
+
+def _byte_range(header: str | None, size: int) -> tuple[int, int, bool]:
+    if not header:
+        return 0, size - 1, False
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+    if match is None or (not match.group(1) and not match.group(2)):
+        raise DirectorMulticamError("invalid Range header")
+    if not match.group(1):
+        length = int(match.group(2))
+        start, end = max(0, size - length), size - 1
+    else:
+        start = int(match.group(1))
+        end = int(match.group(2)) if match.group(2) else size - 1
+    if start < 0 or start >= size or end < start:
+        raise DirectorMulticamError("unsatisfiable Range header")
+    return start, min(end, size - 1), True
+
+
+class _Handler(BaseHTTPRequestHandler):
+    manifest: Path
+    root: Path
+    html: bytes
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        try:
+            if path == "/":
+                self._send(self.html, "text/html; charset=utf-8")
+            elif path == "/api/session":
+                self._json(session_document(self.manifest))
+            elif path == "/reference/reference.mp4":
+                self._video(_verify_record(
+                    self.root,
+                    verify_workspace(self.manifest)["document"]["source"]["reference"],
+                    "reference",
+                ))
+            elif path.startswith("/api/jobs/"):
+                job_id = unquote(path.removeprefix("/api/jobs/"))
+                if not re.fullmatch(r"render-M[1-9][0-9]*", job_id):
+                    raise DirectorMulticamError("job ID is invalid")
+                self._json(_read(
+                    self.root / "iterations" / job_id.removeprefix("render-") / "job.json",
+                    "render job",
+                ))
+            elif path.startswith("/media/"):
+                match = re.fullmatch(r"/media/(M[1-9][0-9]*)/(camera_[abc])\.mp4", path)
+                if match is None:
+                    raise DirectorMulticamError("media path is invalid")
+                job = _read(
+                    self.root / "iterations" / match.group(1) / "job.json", "render job"
+                )
+                video = _verify_record(
+                    self.root, job.get("outputs", {}).get("videos", {}).get(match.group(2)),
+                    "camera video",
+                )
+                self._video(video)
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND)
+        except (DirectorMulticamError, OSError, ValueError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urlsplit(self.path).path
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 1024 * 1024:
+                raise DirectorMulticamError("invalid request size")
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            if not isinstance(payload, Mapping):
+                raise DirectorMulticamError("request body must be one object")
+            if path == "/api/plans" and set(payload) <= {"locked_through_keyframe"}:
+                record = create_plan(
+                    self.manifest,
+                    locked_through_keyframe=payload.get("locked_through_keyframe"),
+                )
+                self._json(record, HTTPStatus.CREATED)
+                return
+            match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/approve", path)
+            if match and set(payload) == {"author_id"}:
+                approval = approve_plan(
+                    self.manifest, match.group(1), author_id=str(payload["author_id"])
+                )
+                self._json({"approved": True, "approval_sha256": _sha(approval)})
+                return
+            match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/render", path)
+            if match and not payload:
+                job = prepare_render(self.manifest, match.group(1))
+                Thread(target=run_render_job, args=(self.manifest, job), daemon=True).start()
+                value = _read(job, "render job")
+                self._json({"job_id": value["job_id"], "status": "queued"}, HTTPStatus.ACCEPTED)
+                return
+            match = re.fullmatch(r"/api/iterations/(M[1-9][0-9]*)/approve", path)
+            if match and set(payload) == {"author_id"}:
+                approval = approve_iteration(
+                    self.manifest, match.group(1), author_id=str(payload["author_id"])
+                )
+                self._json({"approved": True, "approval_sha256": _sha(approval)})
+                return
+            self.send_error(HTTPStatus.NOT_FOUND)
+        except (DirectorMulticamError, OSError, ValueError, json.JSONDecodeError) as exc:
+            self._json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def _video(self, path: Path) -> None:
+        start, end, partial = _byte_range(self.headers.get("Range"), path.stat().st_size)
+        self.send_response(HTTPStatus.PARTIAL_CONTENT if partial else HTTPStatus.OK)
+        self.send_header("Content-Type", "video/mp4")
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(end - start + 1))
+        if partial:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{path.stat().st_size}")
+        self.end_headers()
+        with path.open("rb") as handle:
+            handle.seek(start)
+            remaining = end - start + 1
+            while remaining:
+                block = handle.read(min(1024 * 1024, remaining))
+                if not block:
+                    break
+                self.wfile.write(block)
+                remaining -= len(block)
+
+    def _json(self, value: object, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self._send(_json_bytes(value), "application/json", status)
+
+    def _send(self, data: bytes, media_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_args: object) -> None:
+        return
+
+
+def serve_workspace(manifest_path: Path | str, port: int = 8770) -> None:
+    if not 1 <= port <= 65535:
+        raise DirectorMulticamError("port must be in 1..65535")
+    manifest = Path(manifest_path).resolve(strict=True)
+    workspace = verify_workspace(manifest)
+    _Handler.manifest = manifest
+    _Handler.root = workspace["root"]
+    _Handler.html = (
+        Path(__file__).resolve().parents[1] / "static" / "director_multicam_panel.html"
+    ).read_bytes()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
+    print(f"DIRECTOR_MULTICAM_SERVING http://127.0.0.1:{port}")
+    server.serve_forever()
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -436,7 +725,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"DIRECTOR_MULTICAM_PREPARED {manifest}")
         else:
-            raise DirectorMulticamError("serve is not available until the panel task is complete")
+            serve_workspace(args.manifest, args.port)
     except (DirectorMulticamError, OSError, ValueError) as exc:
         print(f"DIRECTOR_MULTICAM_FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
