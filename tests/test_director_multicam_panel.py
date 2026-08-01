@@ -8,6 +8,7 @@ class DirectorMulticamPanelTests(unittest.TestCase):
         for element_id in (
             "stage-staging", "stage-camera", "stage-result", "target-select",
             "add-object", "save-staging", "approve-staging",
+            "undo-staging", "clear-staging-drawing", "staging-dirty",
             "proxy-camera-a", "proxy-camera-b", "proxy-camera-c", "sync-play",
             "coverage-timeline", "camera-tabs", "trajectory-plane", "agent-plan",
             "approve-plan", "render-proxy", "approve-proxy", "status",
@@ -19,6 +20,13 @@ class DirectorMulticamPanelTests(unittest.TestCase):
         self.assertIn('class="hint"', html)
         self.assertIn("scrollIntoView", html)
         self.assertIn("三台摄像机同步播放", html)
+        for javascript_contract in (
+            "savedTrajectory", "editHistory", "pushHistory",
+            "undoStaging", "clearSelectedDrawing", "advanceStagingKeyframe",
+        ):
+            self.assertIn(javascript_contract, html)
+        self.assertIn("本次编辑：无未保存修改", html)
+        self.assertIn("本次编辑：有未保存修改", html)
         self.assertNotEqual(
             html, Path("static/director_panel.html").read_text(encoding="utf-8")
         )

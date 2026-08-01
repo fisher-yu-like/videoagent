@@ -35,6 +35,9 @@
       <div class="row">
         <button id="save-staging">保存为新轨迹版本</button>
         <button id="approve-staging" class="primary">批准人物/物体轨迹</button>
+        <button id="undo-staging">撤销上一步</button>
+        <button id="clear-staging-drawing">清除所选目标的本次绘制</button>
+        <span id="staging-dirty" class="hint">本次编辑：无未保存修改</span>
       </div>
       <p class="hint">彩色折线是人物或物体的完整路径，实心点是当前 K 帧。保存会生成不可变的 S 版本；只有批准后，DeepSeek 才能规划摄像机。</p>
     </div>
@@ -80,7 +83,7 @@
   <div class="status"><b>状态：</b><span id="status">正在读取工作区……</span></div>
 
 <script>
-const $=id=>document.getElementById(id);let session=null,trajectory=null,bundle=null,currentCamera='camera_a';
+const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a';
 const videos=[$('proxy-camera-a'),$('proxy-camera-b'),$('proxy-camera-c')];
 async function postJSON(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||r.statusText);return v}
 function author(){return $('author').value.trim()||'human-director'}
@@ -89,6 +92,31 @@ function setStatus(text,bad=false){$('status').textContent=text;$('status').clas
 function clone(value){return JSON.parse(JSON.stringify(value))}
 function safeId(value){return value.trim().replace(/[^A-Za-z0-9_.-]+/g,'_').replace(/^[_\-.]+/,'').slice(0,128)}
 function currentTrack(){return trajectory?.tracks.find(track=>track.target.id===$('target-select').value)}
+function isDirty(){return !!savedTrajectory&&JSON.stringify(trajectory)!==JSON.stringify(savedTrajectory)}
+function pushHistory(){editHistory.push(clone(trajectory))}
+function updateStagingEditState(){
+  const current=currentTrack(),saved=savedTrajectory?.tracks.find(track=>track.target.id===$('target-select').value),dirty=isDirty();
+  $('undo-staging').disabled=editHistory.length===0;
+  $('clear-staging-drawing').disabled=!current||!!saved&&JSON.stringify(current)===JSON.stringify(saved);
+  $('staging-dirty').textContent=dirty?'本次编辑：有未保存修改':'本次编辑：无未保存修改';
+  if(session)$('approve-staging').disabled=session.approved_staging===session.current_staging||dirty;
+}
+function undoStaging(){
+  if(!editHistory.length)return;const selected=$('target-select').value;trajectory=editHistory.pop();fillTargets();
+  if([...$('target-select').options].some(option=>option.value===selected))$('target-select').value=selected;
+  drawStaging();updateStagingEditState();setStatus('已撤销上一步，本次修改尚未保存。');
+}
+function clearSelectedDrawing(){
+  const selectedId=$('target-select').value,current=currentTrack();if(!current)return;
+  const saved=savedTrajectory.tracks.find(track=>track.target.id===selectedId);
+  if(saved&&JSON.stringify(current)===JSON.stringify(saved))return;
+  pushHistory();
+  if(saved){const index=trajectory.tracks.findIndex(track=>track.target.id===selectedId);trajectory.tracks[index]=clone(saved)}
+  else trajectory.tracks=trajectory.tracks.filter(track=>track.target.id!==selectedId);
+  fillTargets();if(saved)$('target-select').value=selectedId;drawStaging();updateStagingEditState();
+  setStatus(saved?`${selectedId} 已恢复到当前保存版本。`:`未保存的物体 ${selectedId} 已移除。`);
+}
+function advanceStagingKeyframe(){const current=Number($('staging-keyframe').value.slice(1));if(current<4)$('staging-keyframe').value='K'+(current+1)}
 
 function fillTargets(){const selected=$('target-select').value;$('target-select').replaceChildren();trajectory.tracks.forEach(track=>{const option=document.createElement('option');option.value=track.target.id;option.textContent=(track.target.type==='actor'?'人物 ':'物体 ')+track.target.id;$('target-select').append(option)});if([...$('target-select').options].some(x=>x.value===selected))$('target-select').value=selected}
 function drawGrid(canvas){const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);ctx.strokeStyle='#26354a';for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*100,0);ctx.lineTo(i*100,430);ctx.stroke()}for(let i=0;i<=5;i++){ctx.beginPath();ctx.moveTo(0,i*86);ctx.lineTo(1000,i*86);ctx.stroke()}return ctx}
@@ -109,24 +137,26 @@ function saveFields(){const s=cameraState();if(!s)return;s.focal_length_mm=Numbe
 function tabs(){$('camera-tabs').replaceChildren();['camera_a','camera_b','camera_c'].forEach(id=>{const b=document.createElement('button');b.textContent=id+(id===currentCamera?' ✓':'');b.onclick=()=>{currentCamera=id;tabs();syncFields();drawCamera()};$('camera-tabs').append(b)})}
 function setButtons(){
   $('save-staging').disabled=false;
-  $('approve-staging').disabled=session.approved_staging===session.current_staging;
   $('create-plan').disabled=!session.approved_staging;
   $('approve-plan').disabled=!session.current_plan||session.approved_plan===session.current_plan;
   $('render-proxy').disabled=!session.approved_plan;
   $('approve-proxy').disabled=!session.current_iteration||session.approved_iteration===session.current_iteration;
+  updateStagingEditState();
 }
 function advanceToCurrent(){let id='stage-staging';if(session.approved_staging)id='stage-camera';if(session.current_iteration)id='stage-result';['stage-staging','stage-camera','stage-result'].forEach(x=>$(x).open=x===id);$(id).scrollIntoView({behavior:'smooth',block:'start'})}
 async function refresh(advance=false){
   const response=await fetch('/api/session');session=await response.json();if(!response.ok||session.error)throw Error(session.error||response.statusText);
-  trajectory=clone(session.staging.trajectory);bundle=session.camera_bundle?clone(session.camera_bundle):null;$('reference').src=session.reference_url;
+  savedTrajectory=clone(session.staging.trajectory);trajectory=clone(savedTrajectory);editHistory=[];bundle=session.camera_bundle?clone(session.camera_bundle):null;$('reference').src=session.reference_url;
   fillTargets();drawStaging();renderPlan();tabs();syncFields();drawCamera();setButtons();
   if(session.iteration){Object.entries(session.iteration.videos).forEach(([id,url])=>$('proxy-'+id.replaceAll('_','-')).src=url);$('result-summary').textContent=`${session.iteration.iteration_id}：真实渲染状态 ${session.iteration.status}，自动几何检查 ${session.iteration.evaluation.automatic_passed?'通过':'未通过'}。`}
   setStatus(`场景 ${session.story_id}；轨迹 ${session.current_staging}${session.approved_staging?'（已批准）':''}；规划 ${session.current_plan||'无'}；Proxy ${session.current_iteration||'无'}`);if(advance)advanceToCurrent()
 }
 
-$('trajectory-plane').onclick=e=>{const track=currentTrack();if(!track)return;const k=Number($('staging-keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('该关键帧位于冻结前缀，不能修改。',true);return}const r=e.currentTarget.getBoundingClientRect();track.points[k].x=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));track.points[k].y=Math.max(0,Math.min(1,(e.clientY-r.top)/r.height));drawStaging();setStatus(`${track.target.id} K${k} 已移动，尚未保存。`)};
-$('target-select').onchange=drawStaging;$('staging-keyframe').onchange=drawStaging;
-$('add-object').onclick=()=>{let id=safeId($('object-id').value);if(!id)id='object_'+(trajectory.tracks.filter(x=>x.target.type==='object').length+1);if(trajectory.tracks.some(x=>x.target.id===id)){setStatus('目标名称已存在。',true);return}const times=[0,.2,.5,.8,1];trajectory.tracks.push({track_id:'object_'+id+'_path',target:{type:'object',id},primitive:'polyline',semantic:'move',points:times.map(t=>({t,x:.5,y:.5,visible:true}))});fillTargets();$('target-select').value=id;drawStaging();setStatus(`已增加物体 ${id}，请画轨迹后保存。`)};
+$('trajectory-plane').onclick=e=>{const track=currentTrack();if(!track)return;const k=Number($('staging-keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('该关键帧位于冻结前缀，不能修改。',true);return}pushHistory();const r=e.currentTarget.getBoundingClientRect();track.points[k].x=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));track.points[k].y=Math.max(0,Math.min(1,(e.clientY-r.top)/r.height));advanceStagingKeyframe();drawStaging();updateStagingEditState();setStatus(`${track.target.id} K${k} 已移动，已自动进入下一个 K，尚未保存。`)};
+$('target-select').onchange=()=>{drawStaging();updateStagingEditState()};$('staging-keyframe').onchange=drawStaging;
+$('add-object').onclick=()=>{let id=safeId($('object-id').value);if(!id)id='object_'+(trajectory.tracks.filter(x=>x.target.type==='object').length+1);if(trajectory.tracks.some(x=>x.target.id===id)){setStatus('目标名称已存在。',true);return}pushHistory();const times=[0,.2,.5,.8,1];trajectory.tracks.push({track_id:'object_'+id+'_path',target:{type:'object',id},primitive:'polyline',semantic:'move',points:times.map(t=>({t,x:.5,y:.5,visible:true}))});fillTargets();$('target-select').value=id;drawStaging();updateStagingEditState();setStatus(`已增加物体 ${id}，请画轨迹后保存。`)};
+$('undo-staging').onclick=undoStaging;
+$('clear-staging-drawing').onclick=clearSelectedDrawing;
 $('save-staging').onclick=async()=>{try{setStatus('正在保存不可变轨迹版本……');await postJSON('/api/staging',{trajectory,base_staging_id:session.current_staging,locked_through_keyframe:boundary()});await refresh(false)}catch(e){setStatus(e.message,true)}};
 $('approve-staging').onclick=async()=>{try{await postJSON('/api/staging/'+session.current_staging+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
 $('create-plan').onclick=async()=>{try{setStatus('正在调用一次 DeepSeek，不自动重试……');await postJSON('/api/plans',{locked_through_keyframe:boundary()});await refresh(false)}catch(e){setStatus(e.message,true)}};
