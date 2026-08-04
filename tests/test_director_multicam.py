@@ -4,12 +4,14 @@ import json
 from pathlib import Path
 import tempfile
 from threading import Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from tests.test_multicam_plan import VALID_PLAN
 from videoactagent.director_multicam import (
     DirectorMulticamError,
+    approve_iteration,
     approve_plan,
     approve_staging,
     create_plan,
@@ -85,6 +87,36 @@ class DirectorMulticamTests(unittest.TestCase):
         job = prepare_render(manifest, "P1", camera_bundle_override=bundle)
         self.mark_iteration_succeeded(manifest, job)
         return job
+
+    def run_mock_successful_worker(self, manifest, job, *, started=None, release=None):
+        def blender(command, **kwargs):
+            del kwargs
+            if started is not None:
+                started.set()
+            if release is not None and not release.wait(5):
+                raise RuntimeError("test Blender barrier timed out")
+            output = Path(command[command.index("--output-dir") + 1])
+            output.mkdir(parents=True, exist_ok=False)
+            cameras = {}
+            for camera_id in ("camera_a", "camera_b", "camera_c"):
+                video = output / f"{camera_id}.mp4"
+                video.write_bytes(f"test-{camera_id}".encode("utf-8"))
+                cameras[camera_id] = {"video": {"path": video.name}}
+            (output / "multicam_manifest.json").write_text(
+                json.dumps({"cameras": cameras}), encoding="utf-8"
+            )
+            return SimpleNamespace(
+                returncode=0, stdout="MULTICAM_PROXY_OK", stderr=""
+            )
+
+        with (
+            patch("videoactagent.director_multicam.subprocess.run", blender),
+            patch(
+                "videoactagent.director_multicam.evaluate_multicam_iteration",
+                return_value={"automatic_passed": True},
+            ),
+        ):
+            run_render_job(manifest, job)
 
     def revision_planner(self, calls, *, change_camera="camera_b"):
         def planner(**kwargs):
@@ -489,6 +521,48 @@ class DirectorMulticamTests(unittest.TestCase):
             )
             self.assertEqual(len(failed_evidence), 1)
             self.assertEqual(_pipeline_api_call_count(manifest), original_count + 1)
+
+    def test_render_finishing_after_plan_revision_is_superseded_and_cannot_be_approved(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.prepare_approved_plan(manifest)
+            first_job = prepare_render(manifest, "P1")
+            self.run_mock_successful_worker(manifest, first_job)
+            first_approval = approve_iteration(
+                manifest, "M1", author_id="human-reviewer"
+            )
+            self.assertTrue(first_approval.is_file())
+            self.assertEqual(
+                json.loads(first_job.read_text(encoding="utf-8"))["status"],
+                "succeeded",
+            )
+
+            rerender_job = prepare_rerender(manifest, "M1")
+            worker_started = Event()
+            release_worker = Event()
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                worker = pool.submit(
+                    self.run_mock_successful_worker, manifest, rerender_job,
+                    started=worker_started, release=release_worker,
+                )
+                self.assertTrue(worker_started.wait(2))
+                revise_plan(
+                    manifest, "P1", scope="camera_b", feedback="make B static",
+                    planner=self.revision_planner([]),
+                )
+                release_worker.set()
+                worker.result(5)
+
+            state = json.loads(
+                (manifest.parent / "state.json").read_text(encoding="utf-8")
+            )
+            rerender_value = json.loads(rerender_job.read_text(encoding="utf-8"))
+            self.assertEqual(state["current_plan"], "P2")
+            self.assertEqual(state["current_iteration"], "M1")
+            self.assertEqual(rerender_value["status"], "superseded")
+            self.assertIn("outputs", rerender_value)
+            with self.assertRaisesRegex(DirectorMulticamError, "plan|current"):
+                approve_iteration(manifest, "M2", author_id="human-reviewer")
 
     def test_revision_rejects_invalid_scope_blank_feedback_and_missing_current_success(self):
         with tempfile.TemporaryDirectory() as root:

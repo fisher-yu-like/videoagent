@@ -1122,9 +1122,15 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
         if not evaluation_value["automatic_passed"]:
             _update_job(job, status="failed_checks", outputs=outputs)
             return
-        _update_job(job, status="succeeded", outputs=outputs)
         with _workspace_lock(manifest):
             state = _read(root / "state.json", "multicam state")
+            if (
+                state.get("current_plan") != job_value.get("plan_id")
+                or state.get("approved_plan") != job_value.get("plan_id")
+            ):
+                _update_job(job, status="superseded", outputs=outputs)
+                return
+            _update_job(job, status="succeeded", outputs=outputs)
             state["current_iteration"] = job_value["iteration_id"]
             state["approved_iteration"] = None
             _write(root / "state.json", state)
@@ -1141,9 +1147,16 @@ def approve_iteration(
 ) -> Path:
     workspace = verify_workspace(manifest_path)
     root, state = workspace["root"], workspace["state"]
+    job = _read(root / "iterations" / iteration_id / "job.json", "render job")
+    if (
+        job.get("plan_id") != state.get("current_plan")
+        or job.get("plan_id") != state.get("approved_plan")
+    ):
+        raise DirectorMulticamError(
+            "Proxy plan is no longer the current approved plan"
+        )
     if state.get("current_iteration") != iteration_id or not author_id.strip():
         raise DirectorMulticamError("only the current successful Proxy can be approved")
-    job = _read(root / "iterations" / iteration_id / "job.json", "render job")
     if job.get("status") != "succeeded":
         raise DirectorMulticamError("Proxy checks have not succeeded")
     outputs = job.get("outputs", {})
