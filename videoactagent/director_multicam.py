@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
 from http import HTTPStatus
@@ -565,6 +566,126 @@ def create_plan(
     return record
 
 
+def revise_plan(
+    manifest_path: Path | str, plan_id: str, *, scope: str, feedback: str,
+    planner: Callable[..., Mapping[str, Any]] = request_multicam_plan,
+) -> dict[str, Any]:
+    workspace = verify_workspace(manifest_path)
+    root, document, state = workspace["root"], workspace["document"], workspace["state"]
+    if scope not in {"all", "camera_a", "camera_b", "camera_c"}:
+        raise DirectorMulticamError("revision scope is invalid")
+    clean_feedback = feedback.strip()
+    if not clean_feedback or len(clean_feedback) > 2000:
+        raise DirectorMulticamError("revision feedback must be 1--2000 characters")
+    if state.get("current_plan") != plan_id or state.get("approved_plan") != plan_id:
+        raise DirectorMulticamError("revision requires the current approved plan")
+    iteration_id = state.get("current_iteration")
+    if not isinstance(iteration_id, str):
+        raise DirectorMulticamError("revision requires a current successful iteration")
+    source_job = _read(
+        root / "iterations" / iteration_id / "job.json", "revision source iteration"
+    )
+    if source_job.get("status") != "succeeded" or source_job.get("plan_id") != plan_id:
+        raise DirectorMulticamError("revision requires a current successful iteration for the plan")
+    source_bundle_path = _verify_record(
+        root, source_job.get("inputs", {}).get("camera_bundle"),
+        "revision source camera bundle",
+    )
+    source_bundle = _validated_camera_bundle(
+        _read(source_bundle_path, "revision source camera bundle"),
+        scene_id=document["story_id"], shot_id=document["shot_id"],
+        duration=float(document["timeline"]["duration_seconds"]),
+    )
+    source_record = _read(root / "plans" / plan_id / "record.json", f"{plan_id} record")
+    source_plan_path = _verify_record(root, source_record.get("plan"), f"{plan_id} plan")
+    source_plan = _read(source_plan_path, f"{plan_id} plan")
+    approval = _read(root / "plans" / plan_id / "approval.json", f"{plan_id} approval")
+    if approval.get("plan_sha256") != _sha(source_plan_path):
+        raise DirectorMulticamError("approved plan binding mismatch")
+    _staging_id, _staging_record_value, _trajectory_path, trajectory = _approved_staging(workspace)
+    load_multicam_plan(
+        source_plan, scene_id=document["story_id"], actors=_trajectory_targets(trajectory),
+        locked_through_keyframe=approval.get("locked_through_keyframe"),
+    )
+
+    revised_id = f"P{state['next_plan']}"
+    directory = root / "plans" / revised_id
+    state["next_plan"] += 1
+    _write(root / "state.json", state)
+    evidence = planner(
+        scene_context=_scene_context(workspace, source_plan.get("locked_through_keyframe")),
+        output_dir=directory,
+        environ=os.environ,
+        previous_plan=source_plan,
+        previous_camera_bundle=source_bundle,
+        revision_scope=scope,
+        feedback=clean_feedback,
+    )
+    plan_path = directory / "plan.json"
+    revised_plan = _read(plan_path, f"{revised_id} plan")
+    try:
+        parsed_plan = load_multicam_plan(
+            revised_plan, scene_id=document["story_id"],
+            actors=_trajectory_targets(trajectory),
+            locked_through_keyframe=source_plan.get("locked_through_keyframe"),
+        )
+    except MulticamPlanError as exc:
+        raise DirectorMulticamError(str(exc)) from exc
+    if scope != "all":
+        previous_assignments = {
+            assignment["camera_id"]: assignment for assignment in source_plan["cameras"]
+        }
+        revised_assignments = {
+            assignment["camera_id"]: assignment for assignment in revised_plan["cameras"]
+        }
+        if any(
+            revised_assignments[camera_id] != previous_assignments[camera_id]
+            for camera_id in ("camera_a", "camera_b", "camera_c")
+            if camera_id != scope
+        ):
+            raise DirectorMulticamError("revision changed an unselected camera assignment")
+    compiled = compile_camera_rig(
+        plan=parsed_plan, world_bounds=tuple(document["world_bounds"]),
+        actor_keyframes=_trajectory_keyframes(trajectory),
+    )
+    revised_cameras = {
+        camera_id: (
+            {"states": [camera_state.to_dict() for camera_state in compiled[camera_id]]}
+            if scope == "all" or camera_id == scope
+            else deepcopy(source_bundle["cameras"][camera_id])
+        )
+        for camera_id in ("camera_a", "camera_b", "camera_c")
+    }
+    bundle = _validated_camera_bundle(
+        {
+            "schema_version": "1.0", "scene_id": document["story_id"],
+            "shot_id": document["shot_id"],
+            "duration_seconds": document["timeline"]["duration_seconds"],
+            "cameras": revised_cameras,
+        },
+        scene_id=document["story_id"], shot_id=document["shot_id"],
+        duration=float(document["timeline"]["duration_seconds"]),
+    )
+    bundle_path = directory / "camera_bundle.json"
+    _write(bundle_path, bundle)
+    record = {
+        "plan_id": revised_id,
+        "parent_plan_id": plan_id,
+        "revision_scope": scope,
+        "feedback": clean_feedback,
+        "plan": _record(plan_path, root),
+        "evidence": _record(directory / "evidence.json", root),
+        "camera_bundle": _record(bundle_path, root),
+        "status": evidence.get("status"),
+    }
+    _write(directory / "record.json", record)
+    state = _read(root / "state.json", "multicam state")
+    state["current_plan"] = revised_id
+    state["approved_plan"] = None
+    _write(root / "state.json", state)
+    return record
+
+
 def approve_plan(
     manifest_path: Path | str, plan_id: str, *, author_id: str,
 ) -> Path:
@@ -673,6 +794,21 @@ def _validated_camera_bundle(
     }
 
 
+def _bound_plan_camera_bundle(
+    root: Path, document: Mapping[str, Any], plan_id: str,
+) -> dict[str, Any] | None:
+    record = _read(root / "plans" / plan_id / "record.json", f"{plan_id} record")
+    binding = record.get("camera_bundle")
+    if binding is None:
+        return None
+    path = _verify_record(root, binding, f"{plan_id} camera bundle")
+    return _validated_camera_bundle(
+        _read(path, f"{plan_id} camera bundle"),
+        scene_id=document["story_id"], shot_id=document["shot_id"],
+        duration=float(document["timeline"]["duration_seconds"]),
+    )
+
+
 def prepare_render(
     manifest_path: Path | str, plan_id: str, *, camera_bundle_override: object = None,
 ) -> Path:
@@ -697,11 +833,6 @@ def prepare_render(
         actors=targets,
         locked_through_keyframe=approval.get("locked_through_keyframe"),
     )
-    cameras = compile_camera_rig(
-        plan=plan,
-        world_bounds=tuple(document["world_bounds"]),
-        actor_keyframes=_trajectory_keyframes(trajectory),
-    )
     iteration_id = f"M{state['next_iteration']}"
     directory = root / "iterations" / iteration_id
     inputs = directory / "input"
@@ -709,22 +840,29 @@ def prepare_render(
     actor_path = inputs / "actor_trajectory.json"
     camera_path = inputs / "camera_bundle.json"
     _write(actor_path, trajectory)
-    compiled_bundle = {
-        "schema_version": "1.0",
-        "scene_id": document["story_id"],
-        "shot_id": document["shot_id"],
-        "duration_seconds": document["timeline"]["duration_seconds"],
-        "cameras": {
-            camera_id: {"states": [state.to_dict() for state in states]}
-            for camera_id, states in cameras.items()
-        },
-    }
-    camera_bundle = (
-        compiled_bundle if camera_bundle_override is None else _validated_camera_bundle(
+    if camera_bundle_override is not None:
+        camera_bundle = _validated_camera_bundle(
             camera_bundle_override, scene_id=document["story_id"], shot_id=document["shot_id"],
             duration=float(document["timeline"]["duration_seconds"]),
         )
-    )
+    else:
+        camera_bundle = _bound_plan_camera_bundle(root, document, plan_id)
+        if camera_bundle is None:
+            cameras = compile_camera_rig(
+                plan=plan,
+                world_bounds=tuple(document["world_bounds"]),
+                actor_keyframes=_trajectory_keyframes(trajectory),
+            )
+            camera_bundle = {
+                "schema_version": "1.0",
+                "scene_id": document["story_id"],
+                "shot_id": document["shot_id"],
+                "duration_seconds": document["timeline"]["duration_seconds"],
+                "cameras": {
+                    camera_id: {"states": [state.to_dict() for state in states]}
+                    for camera_id, states in cameras.items()
+                },
+            }
     _write(camera_path, camera_bundle)
     job = directory / "job.json"
     _write(job, {
@@ -747,6 +885,35 @@ def prepare_render(
     state["next_iteration"] += 1
     _write(root / "state.json", state)
     return job
+
+
+def prepare_rerender(manifest_path: Path | str, iteration_id: str) -> Path:
+    workspace = verify_workspace(manifest_path)
+    root, state = workspace["root"], workspace["state"]
+    if state.get("current_iteration") != iteration_id:
+        raise DirectorMulticamError("only the current iteration can be rerendered")
+    job = _read(root / "iterations" / iteration_id / "job.json", "rerender source")
+    if (
+        job.get("iteration_id") != iteration_id
+        or job.get("job_id") != f"render-{iteration_id}"
+    ):
+        raise DirectorMulticamError("rerender source job identity mismatch")
+    if job.get("status") != "succeeded":
+        raise DirectorMulticamError("rerender source must have succeeded")
+    plan_id = job.get("plan_id")
+    if (
+        not isinstance(plan_id, str)
+        or state.get("current_plan") != plan_id
+        or state.get("approved_plan") != plan_id
+    ):
+        raise DirectorMulticamError("rerender source plan is not currently approved")
+    camera_path = _verify_record(
+        root, job.get("inputs", {}).get("camera_bundle"), "rerender camera bundle"
+    )
+    return prepare_render(
+        manifest_path, plan_id,
+        camera_bundle_override=_read(camera_path, "rerender camera bundle"),
+    )
 
 
 def _update_job(job_path: Path, **changes: object) -> dict[str, Any]:
@@ -896,8 +1063,6 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
     workflow_step = "staging"
     if state["approved_staging"]:
         workflow_step = "camera"
-    if state["current_iteration"]:
-        workflow_step = "result"
     result = {
         "schema_version": SCHEMA_VERSION,
         "story_id": document["story_id"],
@@ -926,30 +1091,47 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
             workspace["root"] / "plans" / state["current_plan"] / "plan.json", "current plan"
         )
         result["plan"] = plan_value
-        plan = load_multicam_plan(
-            plan_value, scene_id=document["story_id"],
-            actors=_trajectory_targets(trajectory),
-            locked_through_keyframe=plan_value.get("locked_through_keyframe"),
+        bound_bundle = _bound_plan_camera_bundle(
+            workspace["root"], document, state["current_plan"]
         )
-        states = compile_camera_rig(
-            plan=plan, world_bounds=tuple(document["world_bounds"]),
-            actor_keyframes=actor_keyframes,
-        )
-        result["camera_bundle"] = {
-            "schema_version": "1.0", "scene_id": document["story_id"],
-            "shot_id": document["shot_id"],
-            "duration_seconds": document["timeline"]["duration_seconds"],
-            "cameras": {
-                camera_id: {"states": [state.to_dict() for state in camera_states]}
-                for camera_id, camera_states in states.items()
-            },
-        }
+        if bound_bundle is not None:
+            result["camera_bundle"] = bound_bundle
+        else:
+            plan = load_multicam_plan(
+                plan_value, scene_id=document["story_id"],
+                actors=_trajectory_targets(trajectory),
+                locked_through_keyframe=plan_value.get("locked_through_keyframe"),
+            )
+            states = compile_camera_rig(
+                plan=plan, world_bounds=tuple(document["world_bounds"]),
+                actor_keyframes=actor_keyframes,
+            )
+            result["camera_bundle"] = {
+                "schema_version": "1.0", "scene_id": document["story_id"],
+                "shot_id": document["shot_id"],
+                "duration_seconds": document["timeline"]["duration_seconds"],
+                "cameras": {
+                    camera_id: {"states": [state.to_dict() for state in camera_states]}
+                    for camera_id, camera_states in states.items()
+                },
+            }
     if state["current_iteration"]:
         iteration = state["current_iteration"]
         job = _read(workspace["root"] / "iterations" / iteration / "job.json", "render job")
+        camera_path = _verify_record(
+            workspace["root"], job.get("inputs", {}).get("camera_bundle"),
+            "iteration camera bundle",
+        )
+        iteration_bundle = _validated_camera_bundle(
+            _read(camera_path, "iteration camera bundle"),
+            scene_id=document["story_id"], shot_id=document["shot_id"],
+            duration=float(document["timeline"]["duration_seconds"]),
+        )
         result["iteration"] = {
             "iteration_id": iteration,
+            "plan_id": job["plan_id"],
             "status": job["status"],
+            "camera_bundle": iteration_bundle,
             "videos": {
                 camera_id: f"/media/{iteration}/{camera_id}.mp4"
                 for camera_id in ("camera_a", "camera_b", "camera_c")
@@ -958,6 +1140,12 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
                 workspace["root"] / "iterations" / iteration / "evaluation.json", "evaluation"
             ),
         }
+        if (
+            job.get("status") == "succeeded"
+            and job.get("plan_id") == state.get("current_plan")
+            and job.get("plan_id") == state.get("approved_plan")
+        ):
+            result["workflow_step"] = "result"
     return result
 
 
@@ -1024,10 +1212,14 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         path = urlsplit(self.path).path
         try:
-            length = int(self.headers.get("Content-Length", "0"))
-            if length <= 0 or length > 1024 * 1024:
-                raise DirectorMulticamError("invalid request size")
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            payload = getattr(self, "_forwarded_payload", None)
+            if payload is None:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 1024 * 1024:
+                    raise DirectorMulticamError("invalid request size")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            else:
+                del self._forwarded_payload
             if not isinstance(payload, Mapping):
                 raise DirectorMulticamError("request body must be one object")
             if path == "/api/plans" and set(payload) <= {"locked_through_keyframe"}:
@@ -1061,12 +1253,27 @@ class _Handler(BaseHTTPRequestHandler):
                 )
                 self._json({"approved": True, "approval_sha256": _sha(approval)})
                 return
+            match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/revise", path)
+            if match and set(payload) == {"scope", "feedback"}:
+                record = revise_plan(
+                    self.manifest, match.group(1), scope=str(payload["scope"]),
+                    feedback=str(payload["feedback"]),
+                )
+                self._json(record, HTTPStatus.CREATED)
+                return
             match = re.fullmatch(r"/api/plans/(P[1-9][0-9]*)/render", path)
             if match and set(payload) <= {"camera_bundle"}:
                 job = prepare_render(
                     self.manifest, match.group(1),
                     camera_bundle_override=payload.get("camera_bundle"),
                 )
+                Thread(target=run_render_job, args=(self.manifest, job), daemon=True).start()
+                value = _read(job, "render job")
+                self._json({"job_id": value["job_id"], "status": "queued"}, HTTPStatus.ACCEPTED)
+                return
+            match = re.fullmatch(r"/api/iterations/(M[1-9][0-9]*)/rerender", path)
+            if match and not payload:
+                job = prepare_rerender(self.manifest, match.group(1))
                 Thread(target=run_render_job, args=(self.manifest, job), daemon=True).start()
                 value = _read(job, "render job")
                 self._json({"job_id": value["job_id"], "status": "queued"}, HTTPStatus.ACCEPTED)

@@ -40,6 +40,35 @@ class DirectorWizardHttpTests(unittest.TestCase):
         with urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
+    def approve_reference_pipeline(self):
+        from videoactagent import director_multicam
+        from videoactagent.director_wizard import (
+            approve_reference,
+            approve_scene_plan,
+            render_reference,
+            save_scene_plan,
+        )
+
+        save_scene_plan(
+            self.manifest, VALID_DRAFT, prompt="delegation test story", parent=None
+        )
+        approve_scene_plan(self.manifest, "SP1", author_id="human")
+
+        def prepare_without_blender(*args, **kwargs):
+            def renderer(*, blender, shotscript, output_dir, fps, resolution):
+                del blender, shotscript, fps, resolution
+                output_dir.mkdir(parents=True, exist_ok=False)
+                video = output_dir / "reference.mp4"
+                video.write_bytes(b"delegation reference video")
+                return video
+
+            kwargs["reference_renderer"] = renderer
+            return director_multicam.prepare_workspace(*args, **kwargs)
+
+        with patch("videoactagent.director_wizard.prepare_workspace", prepare_without_blender):
+            render_reference(self.manifest, "SP1")
+        approve_reference(self.manifest, "R1", author_id="human")
+
     def test_http_wizard_flow_uses_async_reference_job_then_delegates_staging(self):
         from videoactagent import director_multicam
 
@@ -141,6 +170,63 @@ class DirectorWizardHttpTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 400)
         error = json.loads(caught.exception.read().decode("utf-8"))
         self.assertIsInstance(error.get("error"), str)
+
+    def test_wizard_delegates_revision_and_rerender_with_one_body_parse(self):
+        self.approve_reference_pipeline()
+        real_loads = json.loads
+        revision_text = json.dumps({"scope": "camera_b", "feedback": "make B static"})
+        revision_request = Request(
+            self.base + "/api/plans/P1/revise",
+            data=revision_text.encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with (
+            patch("videoactagent.director_multicam.revise_plan") as revise,
+            patch("json.loads", wraps=real_loads) as loads,
+        ):
+            revise.return_value = {"plan_id": "P2", "revision_scope": "camera_b"}
+            with urlopen(revision_request, timeout=5) as response:
+                revision_status = response.status
+                revision_body = response.read()
+        self.assertEqual(
+            sum(call.args and call.args[0] == revision_text for call in loads.call_args_list),
+            1,
+        )
+        self.assertEqual(revision_status, 201)
+        self.assertEqual(real_loads(revision_body)["plan_id"], "P2")
+        revise.assert_called_once()
+        self.assertEqual(revise.call_args.args[1], "P1")
+        self.assertEqual(revise.call_args.kwargs["scope"], "camera_b")
+        self.assertEqual(revise.call_args.kwargs["feedback"], "make B static")
+
+        fake_job = self.root / "rerender-job.json"
+        fake_job.write_text(
+            json.dumps({"job_id": "render-M2", "status": "queued"}), encoding="utf-8"
+        )
+        rerender_request = Request(
+            self.base + "/api/iterations/M1/rerender",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with (
+            patch("videoactagent.director_multicam.prepare_rerender", return_value=fake_job) as rerender,
+            patch("videoactagent.director_multicam.Thread") as thread,
+            patch("json.loads", wraps=real_loads) as loads,
+        ):
+            with urlopen(rerender_request, timeout=5) as response:
+                rerender_status = response.status
+                rerender_body = response.read()
+        self.assertEqual(
+            sum(call.args and call.args[0] == "{}" for call in loads.call_args_list),
+            1,
+        )
+        self.assertEqual(rerender_status, 202)
+        self.assertEqual(real_loads(rerender_body)["job_id"], "render-M2")
+        rerender.assert_called_once()
+        self.assertEqual(rerender.call_args.args[1], "M1")
+        thread.return_value.start.assert_called_once_with()
 
 
 if __name__ == "__main__":

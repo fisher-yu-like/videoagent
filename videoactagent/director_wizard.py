@@ -967,16 +967,11 @@ class _Handler(_MulticamHandler):
                 path == "/api/plans"
                 or path == "/api/staging"
                 or re.fullmatch(r"/api/staging/S[1-9][0-9]*/approve", path)
-                or re.fullmatch(r"/api/plans/P[1-9][0-9]*/(?:approve|render)", path)
-                or re.fullmatch(r"/api/iterations/M[1-9][0-9]*/approve", path)
+                or re.fullmatch(r"/api/plans/P[1-9][0-9]*/(?:approve|render|revise)", path)
+                or re.fullmatch(r"/api/iterations/M[1-9][0-9]*/(?:approve|rerender)", path)
             ):
                 self._downstream()
-                # The parent handler must parse the request body itself.
-                encoded = _json_bytes(payload)
-                from io import BytesIO
-
-                self.rfile = BytesIO(encoded)
-                self.headers.replace_header("Content-Length", str(len(encoded)))
+                self._forwarded_payload = payload
                 super().do_POST()
                 return
             self._json({"error": "route not found"}, HTTPStatus.NOT_FOUND)
