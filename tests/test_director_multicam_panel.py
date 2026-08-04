@@ -166,6 +166,59 @@ process.stdout.write(String(
         self.assertIn('id="reference-audit-log"', self.html)
         self.assertIn("JSON / 来源哈希日志", self.html)
 
+    def test_camera_editor_exposes_position_and_look_at_controls(self):
+        for element_id in (
+            "camera-edit-position", "camera-edit-look-at", "look-height",
+            "revision-scope", "camera-feedback", "revise-camera-plan",
+            "rerender-proxy",
+        ):
+            self.assertIn(f'id="{element_id}"', self.html)
+        for scope in ("all", "camera_a", "camera_b", "camera_c"):
+            self.assertIn(f'<option value="{scope}">', self.html)
+        for javascript_contract in (
+            "cameraEditMode", "editCameraPoint", "look_at[2]",
+            "#00d8ff", "#58d68d", "setLineDash([8,6])",
+        ):
+            self.assertIn(javascript_contract, self.html)
+
+    def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
+        for javascript_contract in (
+            "`/api/plans/${session.approved_plan}/revise`",
+            "{scope:$('revision-scope').value,feedback}",
+            "`/api/iterations/${session.current_iteration}/rerender`",
+            "postJSON(`/api/iterations/${session.current_iteration}/rerender`,{})",
+            "poll(j.job_id)",
+            "$('revise-camera-plan').disabled=!session.approved_plan",
+            "$('rerender-proxy').disabled=!session.current_iteration",
+        ):
+            self.assertIn(javascript_contract, self.html)
+
+    def test_camera_point_editor_keeps_position_and_look_at_independent(self):
+        self.assertIn("function editCameraPoint", self.html)
+        helper = self.html.split("function editCameraPoint", 1)[1].split(
+            "function drawCamera", 1
+        )[0]
+        javascript = """
+function editCameraPoint%s
+const state={position:[1,2,3],look_at:[4,5,6]};
+const originalLook=JSON.stringify(state.look_at);
+editCameraPoint(state,'position',[10,20]);
+if(JSON.stringify(state.position)!==JSON.stringify([10,20,3]))process.exit(1);
+if(JSON.stringify(state.look_at)!==originalLook)process.exit(2);
+const originalPosition=JSON.stringify(state.position);
+editCameraPoint(state,'look_at',[30,40]);
+if(JSON.stringify(state.look_at)!==JSON.stringify([30,40,6]))process.exit(3);
+if(JSON.stringify(state.position)!==originalPosition)process.exit(4);
+process.stdout.write('independent');
+""" % helper
+        result = subprocess.run(
+            ["node", "-e", javascript],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.stdout, "independent")
+
 
 if __name__ == "__main__":
     unittest.main()
