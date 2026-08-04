@@ -189,7 +189,7 @@
   <div class="status"><b>状态：</b><span id="status">正在读取工作区……</span></div>
 
 <script>
-const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a',cameraEditMode='position',loadedScenePlanId=null,scenePlanDraft=null,trajectoryInitialized=false;
+const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a',cameraEditMode='position',resultMutationBusy=false,loadedScenePlanId=null,scenePlanDraft=null,trajectoryInitialized=false;
 const videos=[$('proxy-camera-a'),$('proxy-camera-b'),$('proxy-camera-c')];
 async function postJSON(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||r.statusText);return v}
 function author(){return $('author').value.trim()||'human-director'}
@@ -310,14 +310,20 @@ function cameraState(){return bundle?.cameras[currentCamera].states[Number($('ke
 function syncFields(){const s=cameraState();['focal','height','look-height','roll'].forEach(id=>$(id).disabled=!s);if(!s)return;$('focal').value=s.focal_length_mm;$('height').value=s.position[2];$('look-height').value=s.look_at[2];$('roll').value=s.roll_degrees}
 function saveFields(){const s=cameraState();if(!s)return;s.focal_length_mm=Number($('focal').value);s.position[2]=Number($('height').value);s.look_at[2]=Number($('look-height').value);s.roll_degrees=Number($('roll').value);drawCamera()}
 function tabs(){$('camera-tabs').replaceChildren();['camera_a','camera_b','camera_c'].forEach(id=>{const b=document.createElement('button');b.textContent='Camera '+id.slice(-1).toUpperCase()+(id===currentCamera?' ✓':'');b.onclick=()=>{currentCamera=id;tabs();syncFields();drawCamera()};$('camera-tabs').append(b)})}
+function canMutateResult(value,busy){const iteration=value?.iteration;return !busy&&!!iteration&&iteration.iteration_id===value.current_iteration&&iteration.status==='succeeded'&&iteration.plan_id===value.current_plan&&iteration.plan_id===value.approved_plan}
+async function runResultMutation(operation){
+  if(!canMutateResult(session,resultMutationBusy))return false;resultMutationBusy=true;setButtons();
+  try{await operation();return true}finally{resultMutationBusy=false;if(session)setButtons()}
+}
 function setButtons(){
   $('save-staging').disabled=false;
   $('create-plan').disabled=!session.approved_staging;
   $('approve-plan').disabled=!session.current_plan||session.approved_plan===session.current_plan;
   $('render-proxy').disabled=!session.approved_plan;
   $('approve-proxy').disabled=!session.current_iteration||session.approved_iteration===session.current_iteration;
-  $('revise-camera-plan').disabled=!session.approved_plan;
-  $('rerender-proxy').disabled=!session.current_iteration;
+  const resultReady=canMutateResult(session,resultMutationBusy);
+  $('revise-camera-plan').disabled=!resultReady;
+  $('rerender-proxy').disabled=!resultReady;
   updateStagingEditState();
 }
 function initializeTrajectoryStages(){
@@ -364,11 +370,15 @@ $('camera-edit-position').onclick=()=>{cameraEditMode='position';$('camera-edit-
 $('camera-edit-look-at').onclick=()=>{cameraEditMode='look_at';$('camera-edit-look-at').classList.add('primary');$('camera-edit-position').classList.remove('primary');drawCamera()};
 $('camera-plane').onclick=e=>{if(!bundle)return;const k=Number($('keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('该摄像机关键帧位于冻结前缀，不能修改。',true);return}const r=e.currentTarget.getBoundingClientRect(),p=canvasToWorld((e.clientX-r.left)/r.width*1000,(e.clientY-r.top)/r.height*430);editCameraPoint(bundle.cameras[currentCamera].states[k],cameraEditMode,p);drawCamera();setStatus(`${currentCamera} K${k} 的${cameraEditMode==='look_at'?'注视点':'位置'}已移动，渲染时会提交。`)};
 $('keyframe').onchange=()=>{syncFields();drawCamera()};['focal','height','look-height','roll'].forEach(id=>$(id).onchange=saveFields);
-$('render-proxy').onclick=async()=>{try{const j=await postJSON('/api/plans/'+session.approved_plan+'/render',{camera_bundle:bundle});setStatus('Blender 正在真实渲染 '+j.job_id);poll(j.job_id)}catch(e){setStatus(e.message,true)}};
-async function poll(id){const j=await fetch('/api/jobs/'+id).then(r=>r.json());if(['queued','rendering'].includes(j.status))setTimeout(()=>poll(id),1000);else{await refresh(true);setStatus('渲染状态：'+j.status,j.status!=='succeeded')}}
+$('render-proxy').onclick=async()=>{try{const j=await postJSON('/api/plans/'+session.approved_plan+'/render',{camera_bundle:bundle});setStatus('Blender 正在真实渲染 '+j.job_id);await poll(j.job_id)}catch(e){setStatus(e.message,true)}};
+async function poll(id){
+  const response=await fetch('/api/jobs/'+id),j=await response.json();if(!response.ok||j.error)throw Error(j.error||response.statusText);if(typeof j.status!=='string'||!j.status)throw Error('渲染任务没有返回状态。');
+  if(['queued','rendering'].includes(j.status)){await new Promise(resolve=>setTimeout(resolve,1000));return await poll(id)}
+  await refresh(true);setStatus('渲染状态：'+j.status,j.status!=='succeeded');return j
+}
 $('approve-proxy').onclick=async()=>{try{await postJSON('/api/iterations/'+session.current_iteration+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
-$('revise-camera-plan').onclick=async()=>{try{const feedback=$('camera-feedback').value.trim();if(!feedback)throw Error('请先填写摄像机修改意见。');setStatus('正在按意见重新规划摄像机……');await postJSON(`/api/plans/${session.approved_plan}/revise`,{scope:$('revision-scope').value,feedback});await refresh(true)}catch(e){setStatus(e.message,true)}};
-$('rerender-proxy').onclick=async()=>{try{const j=await postJSON(`/api/iterations/${session.current_iteration}/rerender`,{});setStatus('Blender 正在按当前参数重新渲染 '+j.job_id);poll(j.job_id)}catch(e){setStatus(e.message,true)}};
+$('revise-camera-plan').onclick=async()=>{try{await runResultMutation(async()=>{const feedback=$('camera-feedback').value.trim();if(!feedback)throw Error('请先填写摄像机修改意见。');setStatus('正在按意见重新规划摄像机……');await postJSON(`/api/plans/${session.approved_plan}/revise`,{scope:$('revision-scope').value,feedback});await refresh(true)})}catch(e){setStatus(e.message,true)}};
+$('rerender-proxy').onclick=async()=>{try{await runResultMutation(async()=>{const j=await postJSON(`/api/iterations/${session.current_iteration}/rerender`,{});setStatus('Blender 正在按当前参数重新渲染 '+j.job_id);await poll(j.job_id)})}catch(e){setStatus(e.message,true)}};
 $('sync-play').onclick=()=>{if(videos[0].paused){const t=videos[0].currentTime;videos.forEach(v=>{v.currentTime=t;v.play()})}else videos.forEach(v=>v.pause())};videos[0].ontimeupdate=()=>videos.slice(1).forEach(v=>{if(Math.abs(v.currentTime-videos[0].currentTime)>.08)v.currentTime=videos[0].currentTime});
 refresh(true).catch(e=>setStatus(e.message,true));
 </script>

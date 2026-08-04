@@ -187,11 +187,106 @@ process.stdout.write(String(
             "{scope:$('revision-scope').value,feedback}",
             "`/api/iterations/${session.current_iteration}/rerender`",
             "postJSON(`/api/iterations/${session.current_iteration}/rerender`,{})",
-            "poll(j.job_id)",
-            "$('revise-camera-plan').disabled=!session.approved_plan",
-            "$('rerender-proxy').disabled=!session.current_iteration",
+            "await poll(j.job_id)",
         ):
             self.assertIn(javascript_contract, self.html)
+
+    def test_result_mutation_gate_requires_current_successful_matching_iteration(self):
+        self.assertIn("function canMutateResult", self.html)
+        helper = self.html.split("function canMutateResult", 1)[1].split(
+            "async function runResultMutation", 1
+        )[0]
+        javascript = """
+function canMutateResult%s
+const ready={
+  current_plan:'P1',approved_plan:'P1',current_iteration:'M1',
+  iteration:{iteration_id:'M1',plan_id:'P1',status:'succeeded'}
+};
+if(!canMutateResult(ready,false))process.exit(1);
+if(canMutateResult(ready,true))process.exit(2);
+if(canMutateResult({...ready,iteration:{...ready.iteration,status:'failed'}},false))process.exit(3);
+if(canMutateResult({...ready,current_plan:'P2'},false))process.exit(4);
+if(canMutateResult({...ready,approved_plan:'P2'},false))process.exit(5);
+if(canMutateResult({...ready,current_iteration:'M2'},false))process.exit(6);
+process.stdout.write('gate-safe');
+""" % helper
+        result = subprocess.run(
+            ["node", "-e", javascript], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "gate-safe")
+
+    def test_result_mutation_busy_guard_rejects_duplicate_submission(self):
+        self.assertIn("async function runResultMutation", self.html)
+        gate = self.html.split("function canMutateResult", 1)[1].split(
+            "async function runResultMutation", 1
+        )[0]
+        runner = self.html.split("async function runResultMutation", 1)[1].split(
+            "function setButtons", 1
+        )[0]
+        javascript = """
+function canMutateResult%s
+let session={
+  current_plan:'P1',approved_plan:'P1',current_iteration:'M1',
+  iteration:{iteration_id:'M1',plan_id:'P1',status:'succeeded'}
+},resultMutationBusy=false,buttonStates=[];
+function setButtons(){buttonStates.push(resultMutationBusy)}
+async function runResultMutation%s
+(async()=>{
+  let release,calls=0;
+  const first=runResultMutation(()=>{calls++;return new Promise(resolve=>release=resolve)});
+  await Promise.resolve();
+  const duplicate=await runResultMutation(async()=>{calls++});
+  if(duplicate!==false||calls!==1||!resultMutationBusy)process.exit(1);
+  release();
+  if(await first!==true||resultMutationBusy)process.exit(2);
+  if(JSON.stringify(buttonStates)!==JSON.stringify([true,false]))process.exit(3);
+  process.stdout.write('busy-safe');
+})().catch(error=>{console.error(error);process.exit(4)});
+""" % (gate, runner)
+        result = subprocess.run(
+            ["node", "-e", javascript], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "busy-safe")
+
+    def test_render_poll_awaits_completion_and_propagates_http_and_refresh_errors(self):
+        helper = self.html.split("async function poll(id)", 1)[1].split(
+            "$('approve-proxy')", 1
+        )[0]
+        javascript = """
+let responses=[],statuses=[],refreshError=null,refreshCalls=0;
+async function fetch(){return responses.shift()}
+async function refresh(){refreshCalls++;if(refreshError)throw refreshError}
+function setStatus(...values){statuses.push(values)}
+function setTimeout(callback){callback()}
+async function poll(id)%s
+const response=(ok,body,statusText='')=>({ok,statusText,json:async()=>body});
+(async()=>{
+  responses=[response(false,{},'Bad Gateway')];
+  try{await poll('render-M1');process.exit(1)}catch(error){if(error.message!=='Bad Gateway')process.exit(2)}
+  responses=[response(true,{error:'render exploded'})];
+  try{await poll('render-M1');process.exit(3)}catch(error){if(error.message!=='render exploded')process.exit(4)}
+  responses=[response(true,{})];
+  try{await poll('render-M1');process.exit(10)}catch(error){if(error.message!=='渲染任务没有返回状态。')process.exit(11)}
+  if(statuses.some(values=>String(values[0]).includes('undefined')))process.exit(12);
+  responses=[response(true,{status:'queued'}),response(true,{status:'succeeded'})];
+  const completed=await poll('render-M2');
+  if(completed.status!=='succeeded'||refreshCalls!==1)process.exit(5);
+  if(statuses.at(-1)[0]!=='渲染状态：succeeded')process.exit(6);
+  refreshError=Error('refresh failed');responses=[response(true,{status:'succeeded'})];
+  try{await poll('render-M3');process.exit(7)}catch(error){if(error.message!=='refresh failed')process.exit(8)}
+  process.stdout.write('poll-safe');
+})().catch(error=>{console.error(error);process.exit(9)});
+""" % helper
+        result = subprocess.run(
+            ["node", "-e", javascript], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "poll-safe")
 
     def test_camera_point_editor_keeps_position_and_look_at_independent(self):
         self.assertIn("function editCameraPoint", self.html)
