@@ -248,6 +248,13 @@ process.stdout.write('viewport-safe');
         ):
             self.assertIn(javascript_contract, self.html)
 
+    def test_camera_plan_render_remains_available_after_camera_edit(self):
+        self.assertIn(
+            "$('render-proxy').disabled=!session.approved_plan||!bundle||resultMutationBusy",
+            self.html,
+        )
+        self.assertIn("$('rerender-proxy').disabled=!resultReady", self.html)
+
     def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
         for javascript_contract in (
             "`/api/plans/${session.approved_plan}/revise`",

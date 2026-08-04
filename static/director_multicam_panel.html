@@ -339,8 +339,8 @@ function setButtons(){
   $('save-staging').disabled=false;
   $('create-plan').disabled=!session.approved_staging;
   $('approve-plan').disabled=!session.current_plan||session.approved_plan===session.current_plan;
-  $('render-proxy').disabled=!session.approved_plan;
-  $('rerender-proxy-from-staging').disabled=!session.approved_plan||!bundle;
+  $('render-proxy').disabled=!session.approved_plan||!bundle||resultMutationBusy;
+  $('rerender-proxy-from-staging').disabled=!session.approved_plan||!bundle||resultMutationBusy;
   $('approve-proxy').disabled=!session.current_iteration||session.approved_iteration===session.current_iteration;
   const resultReady=canMutateResult(session,resultMutationBusy);
   $('revise-camera-plan').disabled=!resultReady;
