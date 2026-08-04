@@ -255,6 +255,27 @@ process.stdout.write('viewport-safe');
         )
         self.assertIn("$('rerender-proxy').disabled=!resultReady", self.html)
 
+    def test_editing_k0_does_not_auto_select_the_old_k1_point(self):
+        helper = "function advanceStagingKeyframe" + self.html.split(
+            "function advanceStagingKeyframe", 1
+        )[1].split(
+            "function drawStaging", 1
+        )[0]
+        javascript = """
+        const keyframe={value:'K0'};
+        function $(id){return id==='staging-keyframe'?keyframe:null}
+        %s
+        advanceStagingKeyframe();
+        if(keyframe.value!=='K0')process.exit(1);
+process.stdout.write('k0-stays-selected');
+""" % helper
+        result = subprocess.run(
+            ["node", "-e", javascript], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "k0-stays-selected")
+
     def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
         for javascript_contract in (
             "`/api/plans/${session.approved_plan}/revise`",

@@ -289,7 +289,7 @@ function clearSelectedDrawing(){
   fillTargets();if(saved)$('target-select').value=selectedId;drawStaging();updateStagingEditState();
   setStatus(saved?`${selectedId} 已恢复到当前保存版本。`:`未保存的物体 ${selectedId} 已移除。`);
 }
-function advanceStagingKeyframe(){const current=Number($('staging-keyframe').value.slice(1));if(current<4)$('staging-keyframe').value='K'+(current+1)}
+function advanceStagingKeyframe(){const current=Number($('staging-keyframe').value.slice(1));if(current>0&&current<4)$('staging-keyframe').value='K'+(current+1)}
 
 function fillTargets(){const selected=$('target-select').value;$('target-select').replaceChildren();trajectory.tracks.forEach(track=>{const option=document.createElement('option');option.value=track.target.id;option.textContent=(track.target.type==='actor'?'人物 ':'物体 ')+track.target.id;$('target-select').append(option)});if([...$('target-select').options].some(x=>x.value===selected))$('target-select').value=selected}
 function drawGrid(canvas){const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);ctx.strokeStyle='#26354a';for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*100,0);ctx.lineTo(i*100,430);ctx.stroke()}for(let i=0;i<=5;i++){ctx.beginPath();ctx.moveTo(0,i*86);ctx.lineTo(1000,i*86);ctx.stroke()}return ctx}
