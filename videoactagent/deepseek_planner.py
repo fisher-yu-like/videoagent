@@ -244,11 +244,11 @@ def request_multicam_plan(
             "max_tokens": 4096,
             "stream": False,
         }
-        _write(output / "request.json", {
+        _write(output / "request.json", _redact_json({
             "endpoint": endpoint,
             "payload": request_payload,
             "authorization_saved": False,
-        })
+        }, key))
         request = Request(
             endpoint,
             data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),

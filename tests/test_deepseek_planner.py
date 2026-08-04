@@ -145,6 +145,44 @@ class DeepSeekPlannerTests(unittest.TestCase):
         system_prompt = request_payload["messages"][0]["content"]
         self.assertIn("unselected camera assignment exactly", system_prompt)
 
+    def test_revision_secrets_are_redacted_only_in_saved_request_artifact(self):
+        secret = "revision-secret"
+        calls = []
+        response = json.dumps({
+            "id": "revision-redaction-call",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(VALID_PLAN)},
+            }],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append((request, timeout))
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "P2"
+            request_multicam_plan(
+                scene_context=SCENE_CONTEXT,
+                output_dir=output,
+                environ={
+                    "DEEPSEEK_API_KEY": secret,
+                    "DEEPSEEK_BASE_URL": "https://example.test/v1",
+                },
+                transport=transport,
+                previous_plan={"credential": secret},
+                previous_camera_bundle={"nested": [secret]},
+                revision_scope="camera_b",
+                feedback=f"keep {secret} out of saved evidence",
+            )
+            saved_request = (output / "request.json").read_text(encoding="utf-8")
+
+        sent_request = calls[0][0].data.decode("utf-8")
+        self.assertIn(secret, sent_request)
+        self.assertNotIn(secret, saved_request)
+        self.assertIn("[REDACTED]", saved_request)
+
     def test_invalid_revision_arguments_fail_before_transport(self):
         valid_revision = {
             "previous_plan": VALID_PLAN,
