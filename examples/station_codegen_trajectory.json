@@ -1,0 +1,36 @@
+{
+  "schema_version": "0.1",
+  "scene_id": "station_reunion",
+  "shot_id": "whole",
+  "coordinate_space": "normalized_0_1_top_left",
+  "duration_seconds": 5.0,
+  "sample_count": 5,
+  "tracks": [
+    {
+      "track_id": "actor_a_path",
+      "target": {"type": "actor", "id": "actor_a"},
+      "primitive": "polyline",
+      "semantic": "move",
+      "points": [
+        {"t": 0.0, "x": 0.16, "y": 0.5, "visible": true},
+        {"t": 0.2, "x": 0.255, "y": 0.5, "visible": true},
+        {"t": 0.5, "x": 0.35, "y": 0.5, "visible": true},
+        {"t": 0.8, "x": 0.415, "y": 0.5, "visible": true},
+        {"t": 1.0, "x": 0.44, "y": 0.5, "visible": true}
+      ]
+    },
+    {
+      "track_id": "actor_b_path",
+      "target": {"type": "actor", "id": "actor_b"},
+      "primitive": "polyline",
+      "semantic": "move",
+      "points": [
+        {"t": 0.0, "x": 0.67, "y": 0.5, "visible": true},
+        {"t": 0.2, "x": 0.67, "y": 0.5, "visible": true},
+        {"t": 0.5, "x": 0.67, "y": 0.5, "visible": true},
+        {"t": 0.8, "x": 0.67, "y": 0.5, "visible": true},
+        {"t": 1.0, "x": 0.67, "y": 0.5, "visible": true}
+      ]
+    }
+  ]
+}
