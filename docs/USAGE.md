@@ -26,3 +26,20 @@ K0–K4 是整段视频的五个控制点，分别位于 0%、20%、50%、80%、
 ## 数据真实性
 
 每次保存都会建立不可变的 `S` 轨迹目录；轨迹批准、Agent 规划、摄像机批准和 Blender 作业通过 SHA-256 串联。修改轨迹只会取消当前下游选择，不会删除旧计划、旧视频或失败记录。系统不会把自动检查冒充人工批准，也不会自动调用 Seedance、Kling 或 VACE。
+## 隔离的 DeepSeek Blender Codegen 实验
+
+这是独立于现有 8770 向导的实验后端，不会修改人工标注器或现有 `runs`。它把完整 ShotScript、K0–K4 轨迹和 prompt 快照到 `CG<n>` 作业，然后只允许 DeepSeek-v4-pro 调用一次生成 `build_scene(context)`。代码先经过 AST 安全门，再由本地 Blender 渲染；宿主 runner 会移除 `DEEPSEEK_*` 环境变量，Blender 只接收哈希绑定的输入。
+
+### 五个命令
+
+```text
+videoactagent codegen-blender prepare       # 只快照输入，不调用 API/Blender
+videoactagent codegen-blender generate      # 一次 DeepSeek 请求，零重试
+videoactagent codegen-blender render-smoke  # 640x360、8 FPS 的真实 Blender 视频
+videoactagent codegen-blender render-full   # 同一份代码，960x540、24 FPS
+videoactagent codegen-blender status        # 查看不可变作业状态
+```
+
+每个作业的证据位于 `runs/work/codegen_blender_v1/CG<n>/`：`source/input.json`、`api/request.json`、脱敏响应、`generated_scene.py`、`renders/<profile>/video.mp4`、`scene.blend`、三张 PNG、`codegen_manifest.json` 和 `render.log`。终态会明确标记 `api_failed`、`code_rejected`、`blender_failed`、`output_invalid`、`isolation_failed` 或 `succeeded`；已失败作业不能自动重试。
+
+测试中的 API transport 是假的，只验证请求结构和脱敏；真实 Blender 集成使用手写 fixture，不代表模型质量。只有一次真实 CG 作业、完整视频人工观看、轨迹误差和保护树哈希都通过后，才算 DeepSeek 实验结果。该后端不接入当前向导，也不调用 Seedance、Kling、VACE。
