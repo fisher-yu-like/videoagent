@@ -27,18 +27,26 @@ def build_scene(context):
     _cube("BackWall", (0.0, 3.8, 2.0), (5.0, 0.12, 2.0), gray)
     for index, actor in enumerate(actors):
         obj = _cube(actor["id"], (0.0, 0.0, 0.8), (0.38, 0.38, 0.8), orange if index == 0 else blue)
+        inserted_frames = set()
         for point in actor_tracks[actor["id"]]["points"]:
             world = point["world"]
             frame = context["frame_for_time"](document["render_contract"]["frame_start"], document["render_contract"]["frame_end"], point["t"])
+            if point["t"] < 1.0 and frame == document["render_contract"]["frame_end"]:
+                continue
+            if frame in inserted_frames:
+                continue
             obj.location = (world[0], world[1], 0.8)
             obj.keyframe_insert(data_path="location", frame=frame)
+            inserted_frames.add(frame)
     bpy.ops.object.camera_add(location=(0.0, -10.0, 6.0))
     camera = bpy.context.object
     camera.name = "DirectorCamera"
     camera.data.lens = 35.0
     direction = mathutils.Vector((0.0, 0.0, 0.6)) - camera.location
     camera.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
-    bpy.context.scene.world.color = (0.025, 0.03, 0.05)
+    world = bpy.data.worlds.new("StationWorld")
+    bpy.context.scene.world = world
+    world.color = (0.025, 0.03, 0.05)
     bpy.ops.object.light_add(type="AREA", location=(0.0, -2.0, 7.0))
     key = bpy.context.object
     key.name = "KeyLight"

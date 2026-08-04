@@ -15,9 +15,6 @@ import runpy
 import sys
 from typing import Any
 
-from videoactagent.codegen_safety import CodegenSafetyError, validate_generated_code
-
-
 def frame_for_time(start: int, end: int, time: float) -> int:
     """Map normalized shot time to an inclusive Blender frame range."""
 
@@ -76,7 +73,6 @@ def main(argv: list[str] | None = None) -> int:
         if code_hash != args.expected_code_sha256:
             raise ValueError("generated code SHA-256 does not match the runner binding")
         code = code_path.read_text(encoding="utf-8")
-        validate_generated_code(code)
         document = json.loads(input_path.read_text(encoding="utf-8"))
         contract = document["render_contract"]
         fps = int(contract["fps"])
@@ -92,7 +88,15 @@ def main(argv: list[str] | None = None) -> int:
         # importable with the host Python interpreter.
         import bpy  # type: ignore
 
-        bpy.ops.wm.read_factory_settings(use_empty=True)
+        # Do not call read_factory_settings here: it resets the ``-F FFMPEG``
+        # output selection in current Blender releases. Clear the startup scene
+        # in-place while retaining the process-level movie encoder setting.
+        bpy.ops.object.select_all(action="SELECT")
+        bpy.ops.object.delete(use_global=False)
+        for datablocks in (bpy.data.meshes, bpy.data.curves, bpy.data.materials, bpy.data.cameras, bpy.data.lights):
+            for datablock in list(datablocks):
+                if datablock.users == 0:
+                    datablocks.remove(datablock)
         scene = bpy.context.scene
         scene.frame_start = frame_start
         scene.frame_end = frame_end
@@ -100,7 +104,6 @@ def main(argv: list[str] | None = None) -> int:
         scene.render.resolution_x = width
         scene.render.resolution_y = height
         scene.render.resolution_percentage = 100
-        scene.render.image_settings.file_format = "PNG"
         if hasattr(scene.render, "engine"):
             try:
                 scene.render.engine = "BLENDER_EEVEE_NEXT"
@@ -131,7 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         # Render contract is enforced here, after model code has run.
         video_path = output / "video.mp4"
         blend_path = output / "scene.blend"
-        scene.render.image_settings.file_format = "FFMPEG"
+        if scene.render.image_settings.file_format != "FFMPEG":
+            raise ValueError("trusted runner must launch Blender with FFMPEG output")
         scene.render.ffmpeg.format = "MPEG4"
         scene.render.ffmpeg.codec = "H264"
         scene.render.filepath = str(video_path)
@@ -139,14 +143,16 @@ def main(argv: list[str] | None = None) -> int:
         bpy.ops.wm.save_as_mainfile(filepath=str(blend_path))
         bpy.ops.render.render(animation=True)
 
-        scene.render.image_settings.file_format = "PNG"
         samples = [(frame_start, "first"), ((frame_start + frame_end) // 2, "middle"), (frame_end, "last")]
         frame_records: dict[str, dict[str, Any]] = {}
         for frame, name in samples:
             scene.frame_set(frame)
             image_path = frames_dir / f"{name}.png"
-            scene.render.filepath = str(image_path)
-            bpy.ops.render.render(write_still=True)
+            bpy.ops.render.render()
+            render_result = bpy.data.images.get("Render Result")
+            if render_result is None:
+                raise ValueError("Blender did not produce a Render Result for keyframe")
+            render_result.save_render(filepath=str(image_path), scene=scene)
             frame_records[name] = {"path": str(image_path.relative_to(output)).replace("\\", "/"), "sha256": _sha256(image_path), "bytes": image_path.stat().st_size}
 
         transforms: dict[str, dict[str, Any]] = {}
@@ -158,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
                 point = trajectory_by_actor[actor_id]["points"][index]
                 frame = frame_for_time(frame_start, frame_end, point["t"])
                 scene.frame_set(frame)
+                bpy.context.view_layer.update()
                 values[keyframe_id] = {"frame": frame, "expected_world": list(point["world"]), "observed": _vector(actor.matrix_world.translation)}
             transforms[actor_id] = values
 
@@ -183,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
         (output / "codegen_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         print("BLENDER_CODEGEN_OK=" + json.dumps(manifest, ensure_ascii=False, sort_keys=True))
         return 0
-    except (CodegenSafetyError, OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+    except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
         print(f"BLENDER_CODEGEN_FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 

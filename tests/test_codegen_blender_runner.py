@@ -28,7 +28,7 @@ class CodegenBlenderEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             input_path = root / "input.json"; input_path.write_text("{}", encoding="utf-8")
-            code_path = root / "scene.py"; code_path.write_text("x", encoding="utf-8")
+            code_path = root / "scene.py"; code_path.write_text("import bpy\ndef build_scene(context):\n    pass\n", encoding="utf-8")
             output = root / "render"
             def fake_run(command, **kwargs):
                 output.mkdir()
@@ -54,7 +54,7 @@ class CodegenBlenderEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             input_path = root / "input.json"; input_path.write_text("{}", encoding="utf-8")
-            code_path = root / "scene.py"; code_path.write_text("x", encoding="utf-8")
+            code_path = root / "scene.py"; code_path.write_text("import bpy\ndef build_scene(context):\n    pass\n", encoding="utf-8")
             output = root / "render"
             with patch("videoactagent.codegen_blender_runner.subprocess.run", side_effect=subprocess.TimeoutExpired(["b"], 1)):
                 with self.assertRaisesRegex(CodegenBlenderRunnerError, "timeout"):

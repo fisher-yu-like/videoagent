@@ -9,6 +9,8 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from videoactagent.codegen_safety import CodegenSafetyError, validate_generated_code
+
 
 class CodegenBlenderRunnerError(ValueError):
     """Raised when Blender cannot produce hash-bound evidence."""
@@ -63,9 +65,13 @@ def run_codegen_blender(
     blender_path = Path(blender).resolve(strict=False)
     input_hash = _sha256(input_file)
     code_hash = _sha256(code_file)
+    try:
+        validate_generated_code(code_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, CodegenSafetyError) as exc:
+        raise CodegenBlenderRunnerError(f"generated code rejected before Blender: {exc}") from exc
     entrypoint = Path(__file__).with_name("codegen_blender_entry.py").resolve()
     command = [
-        str(blender_path), "--background", "--factory-startup", "--python", str(entrypoint), "--",
+        str(blender_path), "--background", "--factory-startup", "-F", "FFMPEG", "--python", str(entrypoint), "--",
         "--input", str(input_file), "--code", str(code_file), "--output-dir", str(output),
         "--expected-input-sha256", input_hash, "--expected-code-sha256", code_hash,
     ]
