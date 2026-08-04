@@ -89,6 +89,94 @@ class DeepSeekPlannerTests(unittest.TestCase):
             ["camera_a", "camera_b", "camera_c"],
         )
 
+    def test_scoped_revision_adds_complete_context_to_one_non_streaming_call(self):
+        calls = []
+        previous_camera_bundle = {
+            "schema_version": "1.0",
+            "cameras": {"camera_b": {"states": [{"keyframe_id": "K0"}]}},
+        }
+        response = json.dumps({
+            "id": "revision-call",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(VALID_PLAN)},
+            }],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append((request, timeout))
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            result = request_multicam_plan(
+                scene_context=SCENE_CONTEXT,
+                output_dir=Path(root) / "P2",
+                environ={
+                    "DEEPSEEK_API_KEY": "secret",
+                    "DEEPSEEK_BASE_URL": "https://example.test/v1",
+                },
+                transport=transport,
+                previous_plan=VALID_PLAN,
+                previous_camera_bundle=previous_camera_bundle,
+                revision_scope="camera_b",
+                feedback="  keep B static and looking at actor_b  ",
+            )
+
+        self.assertEqual(len(calls), 1)
+        request_payload = json.loads(calls[0][0].data.decode("utf-8"))
+        self.assertFalse(request_payload["stream"])
+        self.assertEqual(result["api_call_count"], 1)
+        self.assertEqual(result["retry_count"], 0)
+        user_payload = json.loads(request_payload["messages"][1]["content"])
+        self.assertEqual(
+            user_payload["revision"],
+            {
+                "scope": "camera_b",
+                "feedback": "keep B static and looking at actor_b",
+                "previous_plan": VALID_PLAN,
+                "previous_camera_bundle": previous_camera_bundle,
+            },
+        )
+        self.assertEqual(
+            set(user_payload["revision"]),
+            {"scope", "feedback", "previous_plan", "previous_camera_bundle"},
+        )
+        system_prompt = request_payload["messages"][0]["content"]
+        self.assertIn("unselected camera assignment exactly", system_prompt)
+
+    def test_invalid_revision_arguments_fail_before_transport(self):
+        valid_revision = {
+            "previous_plan": VALID_PLAN,
+            "previous_camera_bundle": {"cameras": {}},
+            "revision_scope": "camera_b",
+            "feedback": "keep B static",
+        }
+        invalid_revisions = {
+            "partial": {"previous_plan": VALID_PLAN},
+            "scope": {**valid_revision, "revision_scope": "camera_d"},
+            "empty_feedback": {**valid_revision, "feedback": "   "},
+            "long_feedback": {**valid_revision, "feedback": "x" * 2001},
+            "plan_type": {**valid_revision, "previous_plan": []},
+            "bundle_type": {**valid_revision, "previous_camera_bundle": []},
+        }
+
+        for name, revision in invalid_revisions.items():
+            calls = []
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as root:
+                with self.assertRaises(DeepSeekPlannerError):
+                    request_multicam_plan(
+                        scene_context=SCENE_CONTEXT,
+                        output_dir=Path(root) / "invalid",
+                        environ={
+                            "DEEPSEEK_API_KEY": "secret",
+                            "DEEPSEEK_BASE_URL": "https://example.test/v1",
+                        },
+                        transport=lambda *_args, **_kwargs: calls.append(True),
+                        **revision,
+                    )
+            self.assertEqual(calls, [])
+
     def test_missing_environment_fails_without_transport(self):
         calls = []
         with tempfile.TemporaryDirectory() as root:

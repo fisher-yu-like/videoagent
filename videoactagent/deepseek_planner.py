@@ -128,6 +128,10 @@ def _failure_evidence(
 
 def request_multicam_plan(
     *, scene_context: Mapping[str, Any], output_dir: Path | str,
+    previous_plan: Mapping[str, Any] | None = None,
+    previous_camera_bundle: Mapping[str, Any] | None = None,
+    revision_scope: str | None = None,
+    feedback: str | None = None,
     environ: Mapping[str, str] | None = None,
     transport: Callable[..., Any] = urlopen,
 ) -> dict[str, Any]:
@@ -149,6 +153,27 @@ def request_multicam_plan(
         raise DeepSeekPlannerError(evidence["error"])
     try:
         endpoint, redacted_base = _endpoint(raw_base)
+        revision_values = (
+            previous_plan, previous_camera_bundle, revision_scope, feedback,
+        )
+        revision_requested = any(value is not None for value in revision_values)
+        if revision_requested and not all(value is not None for value in revision_values):
+            raise DeepSeekPlannerError(
+                "previous_plan, previous_camera_bundle, revision_scope and feedback "
+                "must be supplied together"
+            )
+        if revision_requested:
+            if not isinstance(previous_plan, Mapping):
+                raise DeepSeekPlannerError("previous_plan must be an object")
+            if not isinstance(previous_camera_bundle, Mapping):
+                raise DeepSeekPlannerError("previous_camera_bundle must be an object")
+            if revision_scope not in {"all", "camera_a", "camera_b", "camera_c"}:
+                raise DeepSeekPlannerError("revision_scope is invalid")
+            if not isinstance(feedback, str) or not feedback.strip():
+                raise DeepSeekPlannerError("feedback must be a non-empty string")
+            feedback = feedback.strip()
+            if len(feedback) > 2000:
+                raise DeepSeekPlannerError("feedback must be at most 2000 characters")
         scene_id = scene_context.get("scene_id")
         actors = scene_context.get("actors")
         targets = scene_context.get("controllable_targets", actors)
@@ -194,10 +219,23 @@ def request_multicam_plan(
         }
         user_payload = dict(scene_context)
         user_payload["required_json_schema_example"] = schema_example
+        if revision_requested:
+            user_payload["revision"] = {
+                "scope": revision_scope,
+                "feedback": feedback,
+                "previous_plan": dict(previous_plan),
+                "previous_camera_bundle": dict(previous_camera_bundle),
+            }
+        system_prompt = SYSTEM_JSON_PROMPT
+        if revision_scope in {"camera_a", "camera_b", "camera_c"}:
+            system_prompt += (
+                " For a single-camera revision, reproduce every unselected camera "
+                "assignment exactly."
+            )
         request_payload = {
             "model": model,
             "messages": [
-                {"role": "system", "content": SYSTEM_JSON_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
             ],
             "response_format": {"type": "json_object"},
