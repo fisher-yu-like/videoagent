@@ -698,6 +698,13 @@ def _pipeline_api_call_count(pipeline_manifest: Path) -> int:
             total += _evidence_api_call_count(
                 evidence, f"{plan_id} unpublished camera plan evidence"
             )
+    for evidence in (root / "plans" / "_failed").glob("P*-*/evidence.json"):
+        resolved = evidence.resolve()
+        if resolved not in counted:
+            counted.add(resolved)
+            total += _evidence_api_call_count(
+                evidence, "failed camera plan evidence"
+            )
     return total
 
 

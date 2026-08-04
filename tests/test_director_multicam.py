@@ -1,7 +1,9 @@
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 from pathlib import Path
 import tempfile
+from threading import Event
 import unittest
 from unittest.mock import patch
 
@@ -383,6 +385,110 @@ class DirectorMulticamTests(unittest.TestCase):
             self.assertEqual(record["plan_id"], "P2")
             self.assertEqual(len(calls), 1)
             self.assertTrue((manifest.parent / "plans" / "P2" / "record.json").is_file())
+
+    def test_blocked_revision_and_rerender_merge_state_without_reusing_ids(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.prepare_approved_plan(manifest)
+            self.successful_iteration(manifest)
+            planner_started = Event()
+            release_planner = Event()
+            base_planner = self.revision_planner([])
+
+            def blocked_planner(**kwargs):
+                planner_started.set()
+                if not release_planner.wait(5):
+                    raise RuntimeError("test planner barrier timed out")
+                return base_planner(**kwargs)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                revision = pool.submit(
+                    revise_plan, manifest, "P1", scope="camera_b",
+                    feedback="make B static", planner=blocked_planner,
+                )
+                self.assertTrue(planner_started.wait(2))
+                try:
+                    rerender = pool.submit(prepare_rerender, manifest, "M1").result(2)
+                finally:
+                    release_planner.set()
+                revised = revision.result(5)
+
+            self.assertEqual(revised["plan_id"], "P2")
+            self.assertEqual(rerender.parent.name, "M2")
+            state = json.loads(
+                (manifest.parent / "state.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["next_plan"], 3)
+            self.assertEqual(state["next_iteration"], 3)
+            approve_plan(manifest, "P2", author_id="human-reviewer")
+            next_job = prepare_render(manifest, "P2")
+            self.assertEqual(next_job.parent.name, "M3")
+
+    def test_revision_keeps_published_plan_when_state_write_committed_then_raised(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.prepare_approved_plan(manifest)
+            self.successful_iteration(manifest)
+            state_path = manifest.parent / "state.json"
+            from videoactagent import director_multicam
+
+            real_write = director_multicam._write
+
+            def committed_then_raised(path, value):
+                real_write(path, value)
+                if path == state_path:
+                    raise OSError("injected after committed state replace")
+
+            with patch("videoactagent.director_multicam._write", committed_then_raised):
+                record = revise_plan(
+                    manifest, "P1", scope="camera_b", feedback="make B static",
+                    planner=self.revision_planner([]),
+                )
+
+            self.assertEqual(record["plan_id"], "P2")
+            self.assertTrue((manifest.parent / "plans" / "P2" / "record.json").is_file())
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["current_plan"], "P2")
+            self.assertEqual(state["next_plan"], 3)
+
+    def test_failed_revision_preserves_audit_evidence_and_api_count(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.prepare_approved_plan(manifest)
+            self.successful_iteration(manifest)
+            from videoactagent.director_wizard import _pipeline_api_call_count
+
+            state_path = manifest.parent / "state.json"
+            original_state = state_path.read_bytes()
+            original_count = _pipeline_api_call_count(manifest)
+
+            def failing_planner(**kwargs):
+                output = Path(kwargs["output_dir"])
+                output.mkdir(parents=True, exist_ok=False)
+                (output / "request.json").write_text("{}", encoding="utf-8")
+                (output / "response.json").write_text("{}", encoding="utf-8")
+                (output / "evidence.json").write_text(
+                    json.dumps({
+                        "schema_version": "1.0", "status": "failed",
+                        "api_call_count": 1, "retry_count": 0,
+                    }),
+                    encoding="utf-8",
+                )
+                raise RuntimeError("controlled planner API failure")
+
+            with self.assertRaisesRegex(RuntimeError, "controlled"):
+                revise_plan(
+                    manifest, "P1", scope="all", feedback="change all",
+                    planner=failing_planner,
+                )
+
+            self.assertEqual(state_path.read_bytes(), original_state)
+            self.assertFalse((manifest.parent / "plans" / "P2").exists())
+            failed_evidence = list(
+                (manifest.parent / "plans" / "_failed").glob("P2-*/evidence.json")
+            )
+            self.assertEqual(len(failed_evidence), 1)
+            self.assertEqual(_pipeline_api_call_count(manifest), original_count + 1)
 
     def test_revision_rejects_invalid_scope_blank_feedback_and_missing_current_success(self):
         with tempfile.TemporaryDirectory() as root:

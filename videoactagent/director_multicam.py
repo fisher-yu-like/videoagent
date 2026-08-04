@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from datetime import datetime, timezone
+from functools import wraps
 import hashlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
-from threading import Thread
+from threading import Lock, RLock, Thread
 from typing import Any
 from urllib.parse import unquote, urlsplit
 from uuid import uuid4
@@ -32,10 +33,31 @@ from videoactagent.trajectory import TrajectoryInstruction
 
 SCHEMA_VERSION = "multicam-director-1.0"
 _TIMES = (0.0, 0.2, 0.5, 0.8, 1.0)
+_WORKSPACE_LOCKS: dict[Path, RLock] = {}
+_WORKSPACE_LOCKS_LOCK = Lock()
 
 
 class DirectorMulticamError(ValueError):
     """Raised when multicamera state or evidence is invalid."""
+
+
+def _workspace_lock(manifest_path: Path | str) -> RLock:
+    manifest = Path(manifest_path).resolve(strict=True)
+    with _WORKSPACE_LOCKS_LOCK:
+        lock = _WORKSPACE_LOCKS.get(manifest)
+        if lock is None:
+            lock = RLock()
+            _WORKSPACE_LOCKS[manifest] = lock
+        return lock
+
+
+def _locked_workspace(function: Callable[..., Any]) -> Callable[..., Any]:
+    @wraps(function)
+    def locked(manifest_path: Path | str, *args: object, **kwargs: object) -> Any:
+        with _workspace_lock(manifest_path):
+            return function(manifest_path, *args, **kwargs)
+
+    return locked
 
 
 def _now() -> str:
@@ -424,6 +446,7 @@ def _trajectory_targets(trajectory: Mapping[str, Any]) -> list[str]:
     return [str(track["target"]["id"]) for track in trajectory["tracks"]]
 
 
+@_locked_workspace
 def save_staging(
     manifest_path: Path | str, trajectory: object, *, base_staging_id: str,
     locked_through_keyframe: str | None = None,
@@ -479,6 +502,7 @@ def save_staging(
     return record
 
 
+@_locked_workspace
 def approve_staging(
     manifest_path: Path | str, staging_id: str, *, author_id: str,
 ) -> Path:
@@ -525,6 +549,7 @@ def _scene_context(workspace: Mapping[str, Any], locked: str | None) -> dict[str
     }
 
 
+@_locked_workspace
 def create_plan(
     manifest_path: Path | str, *, locked_through_keyframe: str | None = None,
     planner: Callable[..., Mapping[str, Any]] = request_multicam_plan,
@@ -616,8 +641,12 @@ def revise_plan(
     directory = root / "plans" / revised_id
     if directory.exists():
         raise DirectorMulticamError(f"revision target already exists: {revised_id}")
-    staging = directory.parent / f".{revised_id}.{uuid4().hex}.staging"
+    revision_token = uuid4().hex
+    staging = directory.parent / f".{revised_id}.{revision_token}.staging"
+    failed = directory.parent / "_failed" / f"{revised_id}-{revision_token}"
     published = False
+    rollback_published = True
+    preserve_staging = False
     try:
         evidence = planner(
             scene_context=_scene_context(
@@ -717,24 +746,59 @@ def revise_plan(
                     f"staged revision {label} binding mismatch"
                 )
 
-        os.replace(staging, directory)
-        published = True
-        new_state = dict(state)
-        new_state.update({
-            "next_plan": state["next_plan"] + 1,
-            "current_plan": revised_id,
-            "approved_plan": None,
-        })
-        _write(root / "state.json", new_state)
-        return record
+        with _workspace_lock(manifest_path):
+            latest_state = _read(root / "state.json", "multicam state")
+            if (
+                latest_state.get("current_plan") != plan_id
+                or latest_state.get("approved_plan") != plan_id
+                or latest_state.get("current_iteration") != iteration_id
+                or latest_state.get("next_plan") != state.get("next_plan")
+            ):
+                raise DirectorMulticamError(
+                    "revision source changed while planning"
+                )
+            if directory.exists():
+                raise DirectorMulticamError(
+                    f"revision target already exists: {revised_id}"
+                )
+            os.replace(staging, directory)
+            published = True
+            new_state = dict(latest_state)
+            new_state.update({
+                "next_plan": latest_state["next_plan"] + 1,
+                "current_plan": revised_id,
+                "approved_plan": None,
+            })
+            try:
+                _write(root / "state.json", new_state)
+            except BaseException:
+                try:
+                    observed_state = _read(root / "state.json", "multicam state")
+                except BaseException:
+                    rollback_published = False
+                    raise
+                if observed_state == new_state:
+                    return record
+                if observed_state != latest_state:
+                    rollback_published = False
+                raise
+            return record
     except BaseException:
-        if published:
-            shutil.rmtree(directory, ignore_errors=True)
+        audit_source = directory if published and rollback_published else staging
+        if (not published or rollback_published) and audit_source.exists():
+            try:
+                failed.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(audit_source, failed)
+            except OSError:
+                if audit_source == staging:
+                    preserve_staging = True
         raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        if not preserve_staging:
+            shutil.rmtree(staging, ignore_errors=True)
 
 
+@_locked_workspace
 def approve_plan(
     manifest_path: Path | str, plan_id: str, *, author_id: str,
 ) -> Path:
@@ -858,6 +922,7 @@ def _bound_plan_camera_bundle(
     )
 
 
+@_locked_workspace
 def prepare_render(
     manifest_path: Path | str, plan_id: str, *, camera_bundle_override: object = None,
 ) -> Path:
@@ -936,6 +1001,7 @@ def prepare_render(
     return job
 
 
+@_locked_workspace
 def prepare_rerender(manifest_path: Path | str, iteration_id: str) -> Path:
     workspace = verify_workspace(manifest_path)
     root, state = workspace["root"], workspace["state"]
@@ -1057,10 +1123,11 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
             _update_job(job, status="failed_checks", outputs=outputs)
             return
         _update_job(job, status="succeeded", outputs=outputs)
-        state = _read(root / "state.json", "multicam state")
-        state["current_iteration"] = job_value["iteration_id"]
-        state["approved_iteration"] = None
-        _write(root / "state.json", state)
+        with _workspace_lock(manifest):
+            state = _read(root / "state.json", "multicam state")
+            state["current_iteration"] = job_value["iteration_id"]
+            state["approved_iteration"] = None
+            _write(root / "state.json", state)
     except BaseException as exc:
         try:
             _update_job(job, status="failed", error=f"{type(exc).__name__}: {exc}")
@@ -1068,6 +1135,7 @@ def run_render_job(manifest_path: Path | str, job_path: Path | str) -> None:
             pass
 
 
+@_locked_workspace
 def approve_iteration(
     manifest_path: Path | str, iteration_id: str, *, author_id: str,
 ) -> Path:
