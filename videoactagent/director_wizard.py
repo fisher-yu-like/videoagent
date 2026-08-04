@@ -298,6 +298,9 @@ def save_scene_plan(
         state.update(
             {
                 "current_scene_plan": scene_plan_id,
+                "approved_scene_plan": None,
+                "current_reference": None,
+                "approved_reference": None,
                 "next_scene_plan": state["next_scene_plan"] + 1,
             }
         )
@@ -318,6 +321,7 @@ def generate_scene_plan(
 ) -> dict[str, Any]:
     workspace = _workspace(manifest_path)
     state, root = workspace["state"], workspace["root"]
+    original_state = dict(state)
     parent = state.get("current_scene_plan")
     previous_draft = None
     if parent is not None:
@@ -334,25 +338,36 @@ def generate_scene_plan(
         feedback=feedback,
         previous_draft=previous_draft,
     )
-    draft_path = generation / "draft.json"
-    draft = _read(draft_path, "generated scene plan draft")
-    record = save_scene_plan(
-        manifest_path, draft, prompt=prompt, parent=str(parent) if parent else None
-    )
-    workspace = _workspace(manifest_path)
-    record_path = (
-        workspace["root"] / "scene_plans" / record["scene_plan_id"] / "record.json"
-    )
-    record = _read(record_path, f"{record['scene_plan_id']} record")
-    evidence_path = generation / "evidence.json"
-    if not evidence_path.is_file():
-        _write(evidence_path, evidence)
-    target = record_path.parent / "generation"
-    os.replace(generation, target)
-    record["source"] = "agent"
-    record["generation_evidence"] = _record(target / "evidence.json", workspace["root"])
-    _write(record_path, record)
-    return record
+    record_path: Path | None = None
+    target: Path | None = None
+    try:
+        draft_path = generation / "draft.json"
+        draft = _read(draft_path, "generated scene plan draft")
+        record = save_scene_plan(
+            manifest_path, draft, prompt=prompt, parent=str(parent) if parent else None
+        )
+        workspace = _workspace(manifest_path)
+        record_path = (
+            workspace["root"] / "scene_plans" / record["scene_plan_id"] / "record.json"
+        )
+        record = _read(record_path, f"{record['scene_plan_id']} record")
+        evidence_path = generation / "evidence.json"
+        if not evidence_path.is_file():
+            _write(evidence_path, evidence)
+        target = record_path.parent / "generation"
+        os.replace(generation, target)
+        record["source"] = "agent"
+        record["generation_evidence"] = _record(target / "evidence.json", workspace["root"])
+        _write(record_path, record)
+        return record
+    except BaseException:
+        if record_path is not None:
+            if target is not None and target.exists() and not generation.exists():
+                generation.parent.mkdir(parents=True, exist_ok=True)
+                os.replace(target, generation)
+            shutil.rmtree(record_path.parent, ignore_errors=True)
+            _write(root / "state.json", original_state)
+        raise
 
 
 @_locked_workspace
@@ -371,9 +386,10 @@ def approve_scene_plan(
     approval = root / "scene_plans" / scene_plan_id / "approval.json"
     if approval.exists():
         raise DirectorWizardError("scene plan is already approved")
-    _write(
-        approval,
-        {
+    original_state = dict(state)
+    changed_records: list[tuple[Path, dict[str, Any]]] = []
+    try:
+        _write(approval, {
             "schema_version": SCHEMA_VERSION,
             "scene_plan_id": scene_plan_id,
             "draft_sha256": _sha(draft),
@@ -381,25 +397,29 @@ def approve_scene_plan(
             "trajectory_sha256": _sha(trajectory),
             "author_id": author,
             "approved_at": _now(),
-        },
-    )
-    approved_number = int(scene_plan_id.removeprefix("SP"))
-    for path in (root / "scene_plans").glob("SP*/record.json"):
-        candidate = _read(path, "scene plan record")
-        candidate_id = str(candidate.get("scene_plan_id", ""))
-        if _SCENE_PLAN_ID.fullmatch(candidate_id) and int(candidate_id[2:]) > approved_number:
-            candidate["stale"] = True
-            _write(path, candidate)
-    state.update(
-        {
+        })
+        approved_number = int(scene_plan_id.removeprefix("SP"))
+        for path in (root / "scene_plans").glob("SP*/record.json"):
+            candidate = _read(path, "scene plan record")
+            candidate_id = str(candidate.get("scene_plan_id", ""))
+            if _SCENE_PLAN_ID.fullmatch(candidate_id) and int(candidate_id[2:]) > approved_number:
+                changed_records.append((path, dict(candidate)))
+                candidate["stale"] = True
+                _write(path, candidate)
+        state.update({
             "current_scene_plan": scene_plan_id,
             "approved_scene_plan": scene_plan_id,
             "current_reference": None,
             "approved_reference": None,
-        }
-    )
-    _write(root / "state.json", state)
-    return approval
+        })
+        _write(root / "state.json", state)
+        return approval
+    except BaseException:
+        approval.unlink(missing_ok=True)
+        for path, candidate in changed_records:
+            _write(path, candidate)
+        _write(root / "state.json", original_state)
+        raise
 
 
 def _approved_scene(
@@ -494,6 +514,8 @@ def render_reference(
     reference_id = f"R{state['next_reference']}"
     target = root / "references" / reference_id
     staging = target.parent / f".{reference_id}.{uuid4().hex}.staging"
+    original_state = dict(state)
+    published = False
     try:
         staging.mkdir(parents=True)
         pipeline_manifest = prepare_workspace(
@@ -521,6 +543,7 @@ def render_reference(
         }
         _write(staging / "record.json", record)
         os.replace(staging, target)
+        published = True
         state.update(
             {
                 "current_reference": reference_id,
@@ -531,7 +554,9 @@ def render_reference(
         _write(root / "state.json", state)
         return record
     except BaseException:
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(target if published else staging, ignore_errors=True)
+        if published:
+            _write(root / "state.json", original_state)
         raise
 
 
@@ -570,9 +595,9 @@ def approve_reference(
     approval = root / "references" / reference_id / "approval.json"
     if approval.exists():
         raise DirectorWizardError("reference is already approved")
-    _write(
-        approval,
-        {
+    original_state = dict(state)
+    try:
+        _write(approval, {
             "schema_version": SCHEMA_VERSION,
             "reference_id": reference_id,
             "scene_plan_id": scene_plan_id,
@@ -580,11 +605,14 @@ def approve_reference(
             "video_sha256": _sha(video),
             "author_id": author,
             "approved_at": _now(),
-        },
-    )
-    state["approved_reference"] = reference_id
-    _write(root / "state.json", state)
-    return approval
+        })
+        state["approved_reference"] = reference_id
+        _write(root / "state.json", state)
+        return approval
+    except BaseException:
+        approval.unlink(missing_ok=True)
+        _write(root / "state.json", original_state)
+        raise
 
 
 def _scene_document(workspace: Mapping[str, Any], scene_plan_id: str) -> dict[str, Any]:
@@ -621,6 +649,7 @@ def _evidence_api_call_count(path: Path, label: str) -> int:
 
 def _scene_api_call_count(workspace: Mapping[str, Any]) -> int:
     total = 0
+    counted: set[Path] = set()
     for path in (workspace["root"] / "scene_plans").glob("SP*/record.json"):
         scene_plan_id = path.parent.name
         record = _scene_record(workspace, scene_plan_id)
@@ -631,15 +660,21 @@ def _scene_api_call_count(workspace: Mapping[str, Any]) -> int:
             record["generation_evidence"],
             f"{scene_plan_id} generation evidence",
         )
+        counted.add(evidence.resolve())
         total += _evidence_api_call_count(
             evidence, f"{scene_plan_id} generation evidence"
         )
+    for evidence in (workspace["root"] / ".generations").glob("*/evidence.json"):
+        resolved = evidence.resolve()
+        if resolved not in counted:
+            total += _evidence_api_call_count(evidence, "unpublished generation evidence")
     return total
 
 
 def _pipeline_api_call_count(pipeline_manifest: Path) -> int:
     root = pipeline_manifest.parent
     total = 0
+    counted: set[Path] = set()
     for path in (root / "plans").glob("P*/record.json"):
         plan_id = path.parent.name
         if not re.fullmatch(r"P[1-9][0-9]*", plan_id):
@@ -650,9 +685,19 @@ def _pipeline_api_call_count(pipeline_manifest: Path) -> int:
         evidence = _verify_record(
             root, record.get("evidence"), f"{plan_id} camera plan evidence"
         )
+        counted.add(evidence.resolve())
         total += _evidence_api_call_count(
             evidence, f"{plan_id} camera plan evidence"
         )
+    for evidence in (root / "plans").glob("P*/evidence.json"):
+        plan_id = evidence.parent.name
+        if not re.fullmatch(r"P[1-9][0-9]*", plan_id):
+            raise DirectorWizardError("camera plan ID is invalid")
+        resolved = evidence.resolve()
+        if resolved not in counted:
+            total += _evidence_api_call_count(
+                evidence, f"{plan_id} unpublished camera plan evidence"
+            )
     return total
 
 

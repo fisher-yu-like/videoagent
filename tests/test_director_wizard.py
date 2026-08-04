@@ -133,6 +133,122 @@ class DirectorWizardTests(unittest.TestCase):
         self.assertEqual(seen["feedback"], "把行李箱放近一点")
         self.assertEqual(seen["previous_draft"], VALID_DRAFT)
 
+    def test_new_scene_plan_invalidates_old_reference_and_downstream_gate(self):
+        from videoactagent.director_wizard import (
+            DirectorWizardError,
+            _Handler,
+            approve_reference,
+            session_document,
+        )
+
+        _plan, reference = self._render_with_real_pipeline()
+        approve_reference(self.manifest, reference["reference_id"], author_id="human")
+        self.save(parent="SP1")
+
+        session = session_document(self.manifest)
+        self.assertIsNone(session["approved_scene_plan"])
+        self.assertIsNone(session["current_reference"])
+        self.assertIsNone(session["approved_reference"])
+        handler = object.__new__(_Handler)
+        handler.wizard_manifest = self.manifest
+        with self.assertRaisesRegex(DirectorWizardError, "reference must be approved"):
+            handler._downstream()
+
+    def test_failed_agent_record_binding_rolls_back_published_scene_plan(self):
+        from videoactagent import director_wizard
+
+        first = self.save()
+
+        def planner(**kwargs):
+            output = Path(kwargs["output_dir"])
+            output.mkdir(parents=True, exist_ok=False)
+            (output / "draft.json").write_text(json.dumps(VALID_DRAFT), encoding="utf-8")
+            evidence = {"status": "succeeded", "api_call_count": 1, "retry_count": 0}
+            (output / "evidence.json").write_text(json.dumps(evidence), encoding="utf-8")
+            return evidence
+
+        original_write = director_wizard._write
+
+        def fail_agent_record(path, value):
+            if Path(path).name == "record.json" and isinstance(value, dict) and value.get("source") == "agent":
+                raise OSError("injected agent record failure")
+            return original_write(path, value)
+
+        with patch("videoactagent.director_wizard.request_scene_plan", planner), patch(
+            "videoactagent.director_wizard._write", fail_agent_record
+        ):
+            with self.assertRaisesRegex(OSError, "injected agent record failure"):
+                director_wizard.generate_scene_plan(self.manifest, "new story", 5.0)
+
+        session = director_wizard.session_document(self.manifest)
+        self.assertEqual(session["current_scene_plan"], first["scene_plan_id"])
+        self.assertFalse((self.manifest.parent / "scene_plans" / "SP2").exists())
+        self.assertEqual(session["api_call_count"], 1)
+
+    def test_failed_reference_state_publish_cleans_target_and_reuses_id(self):
+        from videoactagent import director_wizard
+
+        plan = self.save()
+        director_wizard.approve_scene_plan(
+            self.manifest, plan["scene_plan_id"], author_id="human"
+        )
+        original_write = director_wizard._write
+        failed = False
+
+        def fail_state_once(path, value):
+            nonlocal failed
+            if Path(path).name == "state.json" and value.get("next_reference") == 2 and not failed:
+                failed = True
+                raise OSError("injected reference state failure")
+            return original_write(path, value)
+
+        with patch("videoactagent.director_wizard.prepare_workspace", self._prepare_without_blender), patch(
+            "videoactagent.director_wizard._write", fail_state_once
+        ):
+            with self.assertRaisesRegex(OSError, "injected reference state failure"):
+                director_wizard.render_reference(self.manifest, plan["scene_plan_id"])
+        self.assertFalse((self.manifest.parent / "references" / "R1").exists())
+        with patch("videoactagent.director_wizard.prepare_workspace", self._prepare_without_blender):
+            reference = director_wizard.render_reference(self.manifest, plan["scene_plan_id"])
+        self.assertEqual(reference["reference_id"], "R1")
+
+    def test_failed_approval_state_updates_are_retryable(self):
+        from videoactagent import director_wizard
+
+        plan = self.save()
+        original_write = director_wizard._write
+        failed = False
+
+        def fail_scene_state_once(path, value):
+            nonlocal failed
+            if Path(path).name == "state.json" and value.get("approved_scene_plan") == "SP1" and not failed:
+                failed = True
+                raise OSError("injected scene approval failure")
+            return original_write(path, value)
+
+        with patch("videoactagent.director_wizard._write", fail_scene_state_once):
+            with self.assertRaisesRegex(OSError, "injected scene approval failure"):
+                director_wizard.approve_scene_plan(self.manifest, "SP1", author_id="human")
+        self.assertFalse((self.manifest.parent / "scene_plans" / "SP1" / "approval.json").exists())
+        director_wizard.approve_scene_plan(self.manifest, "SP1", author_id="human")
+
+        with patch("videoactagent.director_wizard.prepare_workspace", self._prepare_without_blender):
+            reference = director_wizard.render_reference(self.manifest, "SP1")
+        failed = False
+
+        def fail_reference_state_once(path, value):
+            nonlocal failed
+            if Path(path).name == "state.json" and value.get("approved_reference") == "R1" and not failed:
+                failed = True
+                raise OSError("injected reference approval failure")
+            return original_write(path, value)
+
+        with patch("videoactagent.director_wizard._write", fail_reference_state_once):
+            with self.assertRaisesRegex(OSError, "injected reference approval failure"):
+                director_wizard.approve_reference(self.manifest, "R1", author_id="human")
+        self.assertFalse((self.manifest.parent / "references" / "R1" / "approval.json").exists())
+        director_wizard.approve_reference(self.manifest, "R1", author_id="human")
+
     def test_unapproved_scene_plan_cannot_render(self):
         from videoactagent.director_wizard import DirectorWizardError, render_reference
 
@@ -454,7 +570,25 @@ class DirectorWizardTests(unittest.TestCase):
 
         create_plan(pipeline, planner=camera_planner(5))
         create_plan(pipeline, planner=camera_planner(7))
-        self.assertEqual(session_document(self.manifest)["api_call_count"], 18)
+
+        def failed_camera_planner(*, scene_context, output_dir, environ=None):
+            del scene_context, environ
+            output = Path(output_dir)
+            output.mkdir(parents=True, exist_ok=False)
+            (output / "evidence.json").write_text(
+                json.dumps({
+                    "schema_version": "1.0",
+                    "status": "failed",
+                    "api_call_count": 11,
+                    "retry_count": 0,
+                }),
+                encoding="utf-8",
+            )
+            raise RuntimeError("camera planning failed after one call")
+
+        with self.assertRaisesRegex(RuntimeError, "camera planning failed"):
+            create_plan(pipeline, planner=failed_camera_planner)
+        self.assertEqual(session_document(self.manifest)["api_call_count"], 29)
 
 
 if __name__ == "__main__":
