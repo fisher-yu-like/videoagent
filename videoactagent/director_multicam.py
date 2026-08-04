@@ -33,6 +33,7 @@ from videoactagent.trajectory import TrajectoryInstruction
 
 SCHEMA_VERSION = "multicam-director-1.0"
 _TIMES = (0.0, 0.2, 0.5, 0.8, 1.0)
+_PREVIEW_ID = re.compile(r"PV[1-9][0-9]*")
 _WORKSPACE_LOCKS: dict[Path, RLock] = {}
 _WORKSPACE_LOCKS_LOCK = Lock()
 
@@ -406,6 +407,150 @@ def _validated_staging(value: object, document: Mapping[str, Any]) -> dict[str, 
     if set(actors) != set(document["actors"]) or len(actors) != len(document["actors"]):
         raise DirectorMulticamError("staging must contain exactly one track for every source actor")
     return instruction.to_dict()
+
+
+def _next_staging_preview_id(root: Path) -> str:
+    previews = root / "staging_previews"
+    numbers = []
+    for path in previews.glob("PV*"):
+        if _PREVIEW_ID.fullmatch(path.name):
+            numbers.append(int(path.name[2:]))
+    return f"PV{max(numbers, default=0) + 1}"
+
+
+def _staging_preview_job(root: Path, preview_id: str) -> tuple[Path, dict[str, Any]]:
+    if _PREVIEW_ID.fullmatch(preview_id) is None:
+        raise DirectorMulticamError("preview ID is invalid")
+    path = root / "staging_previews" / preview_id / "job.json"
+    return path, _read(path, "staging preview job")
+
+
+def _latest_staging_preview(
+    root: Path, staging_id: str,
+) -> tuple[Path, dict[str, Any]] | None:
+    previews = root / "staging_previews"
+    candidates = []
+    for path in previews.glob("PV*/job.json"):
+        preview_id = path.parent.name
+        if _PREVIEW_ID.fullmatch(preview_id) is None:
+            continue
+        value = _read(path, "staging preview job")
+        if value.get("staging_id") == staging_id:
+            candidates.append((int(preview_id[2:]), path, value))
+    if not candidates:
+        return None
+    _number, path, value = max(candidates, key=lambda item: item[0])
+    return path, value
+
+
+@_locked_workspace
+def prepare_staging_preview(
+    manifest_path: Path | str, staging_id: str,
+) -> Path:
+    workspace = verify_workspace(manifest_path)
+    root, document, state = workspace["root"], workspace["document"], workspace["state"]
+    if state.get("current_staging") != staging_id:
+        raise DirectorMulticamError("only the current staging can be previewed")
+    _record_value, staging_path, trajectory = _staging_record(root, staging_id)
+    clean = _validated_staging(trajectory, document)
+    active = _latest_staging_preview(root, staging_id)
+    if active and active[1].get("status") in {"queued", "rendering"}:
+        raise DirectorMulticamError("staging preview is already running")
+    shotscript = _verify_record(
+        root, document["source"]["shotscript"], "ShotScript"
+    )
+    preview_id = _next_staging_preview_id(root)
+    directory = root / "staging_previews" / preview_id
+    inputs = directory / "input"
+    inputs.mkdir(parents=True, exist_ok=False)
+    trajectory_input = inputs / "trajectory.json"
+    shotscript_input = inputs / "shotscript.json"
+    _write(trajectory_input, clean)
+    shutil.copyfile(shotscript, shotscript_input)
+    job = directory / "job.json"
+    _write(job, {
+        "schema_version": SCHEMA_VERSION,
+        "job_id": f"preview-{preview_id}",
+        "preview_id": preview_id,
+        "staging_id": staging_id,
+        "status": "queued",
+        "created_at": _now(),
+        "source_bindings": {
+            "staging": _record(staging_path, root),
+            "shotscript": _record(shotscript, root),
+        },
+        "inputs": {
+            "trajectory": _record(trajectory_input, root),
+            "shotscript": _record(shotscript_input, root),
+        },
+        "outputs": {},
+    })
+    return job
+
+
+def run_staging_preview_job(
+    manifest_path: Path | str, job_path: Path | str,
+) -> None:
+    manifest = Path(manifest_path).resolve(strict=True)
+    job = Path(job_path).resolve(strict=True)
+    try:
+        workspace = verify_workspace(manifest)
+        root, document, state = workspace["root"], workspace["document"], workspace["state"]
+        value = _read(job, "staging preview job")
+        if value.get("status") != "queued":
+            raise DirectorMulticamError("staging preview job is not queued")
+        if value.get("staging_id") != state.get("current_staging"):
+            _write(job, {**value, "status": "superseded", "updated_at": _now()})
+            return
+        inputs = job.parent / "input"
+        trajectory_path = _verify_record(
+            root, value.get("inputs", {}).get("trajectory"), "preview trajectory"
+        )
+        shotscript = _verify_record(
+            root, value.get("inputs", {}).get("shotscript"), "preview ShotScript"
+        )
+        _validated_staging(_read(trajectory_path, "preview trajectory"), document)
+        output = job.parent / "render"
+        command = [
+            sys.executable, "-m", "videoactagent.blender_runner",
+            "--blender", document["blender_path"],
+            "--shotscript", str(shotscript),
+            "--trajectory", str(trajectory_path),
+            "--output-dir", str(output),
+            "--render-style", "diagnostic",
+            "--fps", str(document["timeline"]["fps"]),
+            "--resolution", "x".join(str(item) for item in document["timeline"]["resolution"]),
+            "--timeout", "300",
+        ]
+        _write(job, {**value, "status": "rendering", "command": command, "started_at": _now()})
+        completed = subprocess.run(
+            command, cwd=Path(__file__).resolve().parents[1], capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=330,
+        )
+        log = job.parent / "render.log"
+        log.write_text(
+            "COMMAND\n" + json.dumps(command) + "\nSTDOUT\n" + completed.stdout
+            + "\nSTDERR\n" + completed.stderr, encoding="utf-8"
+        )
+        evidence = completed.stdout + completed.stderr
+        if completed.returncode != 0 or "TRAJECTORY_PROXY_OK" not in evidence:
+            raise DirectorMulticamError("real Blender staging preview failed; see render.log")
+        candidates = list(output.glob("*_proxy.mp4"))
+        if len(candidates) != 1 or candidates[0].stat().st_size == 0:
+            raise DirectorMulticamError("staging preview video is missing or ambiguous")
+        video = output / "preview.mp4"
+        candidates[0].replace(video)
+        outputs = {"video": _record(video, root), "log": _record(log, root)}
+        with _workspace_lock(manifest):
+            current = _read(root / "state.json", "multicam state")
+            status = "succeeded" if current.get("current_staging") == value.get("staging_id") else "superseded"
+            _write(job, {**_read(job, "staging preview job"), "status": status, "outputs": outputs, "finished_at": _now()})
+    except BaseException as exc:
+        try:
+            value = _read(job, "staging preview job")
+            _write(job, {**value, "status": "failed", "error": f"{type(exc).__name__}: {exc}", "finished_at": _now()})
+        except BaseException:
+            pass
 
 
 def _approved_staging(
@@ -1216,6 +1361,23 @@ def session_document(manifest_path: Path | str) -> dict[str, Any]:
         "workflow_step": workflow_step,
         "reference_url": "/reference/reference.mp4",
     }
+    preview = _latest_staging_preview(workspace["root"], staging_id)
+    if preview is not None:
+        _preview_path, preview_value = preview
+        preview_result = {
+            "preview_id": preview_value["preview_id"],
+            "job_id": preview_value["job_id"],
+            "staging_id": staging_id,
+            "status": preview_value["status"],
+            "trajectory_sha256": preview_value.get("source_bindings", {}).get("staging", {}).get("sha256"),
+            "video_url": f"/staging-media/{staging_id}/{preview_value['preview_id']}.mp4",
+        }
+        if preview_value.get("status") == "succeeded":
+            _verify_record(
+                workspace["root"], preview_value.get("outputs", {}).get("video"),
+                "staging preview video",
+            )
+        result["staging_preview"] = preview_result
     if state["current_plan"]:
         plan_value = _read(
             workspace["root"] / "plans" / state["current_plan"] / "plan.json", "current plan"
@@ -1316,12 +1478,32 @@ class _Handler(BaseHTTPRequestHandler):
                 ))
             elif path.startswith("/api/jobs/"):
                 job_id = unquote(path.removeprefix("/api/jobs/"))
-                if not re.fullmatch(r"render-M[1-9][0-9]*", job_id):
+                if re.fullmatch(r"render-M[1-9][0-9]*", job_id):
+                    self._json(_read(
+                        self.root / "iterations" / job_id.removeprefix("render-") / "job.json",
+                        "render job",
+                    ))
+                elif re.fullmatch(r"preview-PV[1-9][0-9]*", job_id):
+                    self._json(_read(
+                        self.root / "staging_previews" / job_id.removeprefix("preview-") / "job.json",
+                        "staging preview job",
+                    ))
+                else:
                     raise DirectorMulticamError("job ID is invalid")
-                self._json(_read(
-                    self.root / "iterations" / job_id.removeprefix("render-") / "job.json",
-                    "render job",
-                ))
+            elif path.startswith("/staging-media/"):
+                match = re.fullmatch(
+                    r"/staging-media/(S[1-9][0-9]*)/(PV[1-9][0-9]*)\.mp4", path
+                )
+                if match is None:
+                    raise DirectorMulticamError("staging preview media path is invalid")
+                job_path, value = _staging_preview_job(self.root, match.group(2))
+                if value.get("staging_id") != match.group(1):
+                    raise DirectorMulticamError("staging preview binding mismatch")
+                video = _verify_record(
+                    self.root, value.get("outputs", {}).get("video"),
+                    "staging preview video",
+                )
+                self._video(video)
             elif path.startswith("/media/"):
                 match = re.fullmatch(r"/media/(M[1-9][0-9]*)/(camera_[abc])\.mp4", path)
                 if match is None:
@@ -1368,6 +1550,22 @@ class _Handler(BaseHTTPRequestHandler):
                     locked_through_keyframe=payload.get("locked_through_keyframe"),
                 )
                 self._json(record, HTTPStatus.CREATED)
+                return
+            match = re.fullmatch(r"/api/staging/(S[1-9][0-9]*)/render", path)
+            if match and not payload:
+                job = prepare_staging_preview(self.manifest, match.group(1))
+                Thread(
+                    target=run_staging_preview_job, args=(self.manifest, job), daemon=True
+                ).start()
+                value = _read(job, "staging preview job")
+                self._json(
+                    {
+                        "job_id": value["job_id"],
+                        "preview_id": value["preview_id"],
+                        "status": "queued",
+                    },
+                    HTTPStatus.ACCEPTED,
+                )
                 return
             match = re.fullmatch(r"/api/staging/(S[1-9][0-9]*)/approve", path)
             if match and set(payload) == {"author_id"}:

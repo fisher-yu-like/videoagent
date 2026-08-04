@@ -870,6 +870,8 @@ class _Handler(_MulticamHandler):
             if (
                 path == "/reference/reference.mp4"
                 or re.fullmatch(r"/api/jobs/render-M[1-9][0-9]*", path)
+                or re.fullmatch(r"/api/jobs/preview-PV[1-9][0-9]*", path)
+                or re.fullmatch(r"/staging-media/S[1-9][0-9]*/PV[1-9][0-9]*\.mp4", path)
                 or path.startswith("/media/")
             ):
                 self._downstream()
@@ -973,6 +975,7 @@ class _Handler(_MulticamHandler):
             if (
                 path == "/api/plans"
                 or path == "/api/staging"
+                or re.fullmatch(r"/api/staging/S[1-9][0-9]*/render", path)
                 or re.fullmatch(r"/api/staging/S[1-9][0-9]*/approve", path)
                 or re.fullmatch(r"/api/plans/P[1-9][0-9]*/(?:approve|render|revise)", path)
                 or re.fullmatch(r"/api/iterations/M[1-9][0-9]*/(?:approve|rerender)", path)

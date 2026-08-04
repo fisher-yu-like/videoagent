@@ -233,6 +233,21 @@ process.stdout.write('viewport-safe');
         ):
             self.assertIn(javascript_contract, self.html)
 
+    def test_staging_stage_can_render_single_proxy_before_camera_plan(self):
+        for html_contract in (
+            'id="render-staging-preview"',
+            "按当前轨迹重渲染单 Proxy",
+        ):
+            self.assertIn(html_contract, self.html)
+        for javascript_contract in (
+            "`/api/staging/${session.current_staging}/render`",
+            "$('render-staging-preview').onclick",
+            "$('render-staging-preview').disabled",
+            "session.staging_preview?.status==='succeeded'",
+            "session.staging_preview?.video_url",
+        ):
+            self.assertIn(javascript_contract, self.html)
+
     def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
         for javascript_contract in (
             "`/api/plans/${session.approved_plan}/revise`",

@@ -128,12 +128,13 @@
       <div class="row">
         <button id="save-staging">保存为新轨迹版本</button>
         <button id="approve-staging" class="primary">批准人物/物体轨迹</button>
-        <button id="rerender-proxy-from-staging" type="button">用当前轨迹重新渲染 Proxy</button>
+        <button id="render-staging-preview" type="button">按当前轨迹重渲染单 Proxy</button>
+        <button id="rerender-proxy-from-staging" type="button">用当前轨迹重新渲染 Proxy（三机位）</button>
         <button id="undo-staging">撤销上一步</button>
         <button id="clear-staging-drawing">清除所选目标的本次绘制</button>
         <span id="staging-dirty" class="hint">本次编辑：无未保存修改</span>
       </div>
-      <p class="hint">彩色折线是人物或物体的完整路径，实心点是当前 K 帧。保存会生成不可变的 S 版本；保存新轨迹会使旧机位方案失效，需重新批准轨迹并批准新的机位方案后，这里的 Proxy 按钮才会启用。</p>
+      <p class="hint">彩色折线是人物或物体的完整路径，实心点是当前 K 帧。保存后可以先用“单 Proxy”检查最新轨迹；保存新轨迹会使旧机位方案失效，需重新批准轨迹并批准新的机位方案后，三机位按钮才会启用。</p>
     </div>
   </details>
 
@@ -269,6 +270,7 @@ function updateStagingEditState(){
   const current=currentTrack(),saved=savedTrajectory?.tracks.find(track=>track.target.id===$('target-select').value),dirty=isDirty();
   $('undo-staging').disabled=editHistory.length===0;
   $('clear-staging-drawing').disabled=!current||!!saved&&JSON.stringify(current)===JSON.stringify(saved);
+  $('render-staging-preview').disabled=!session?.current_staging||dirty;
   $('staging-dirty').textContent=dirty?'本次编辑：有未保存修改':'本次编辑：无未保存修改';
   if(session)$('approve-staging').disabled=session.approved_staging===session.current_staging||dirty;
 }
@@ -347,7 +349,7 @@ function setButtons(){
 }
 function initializeTrajectoryStages(){
   if(!session.approved_reference||!session.staging)return false;
-  savedTrajectory=clone(session.staging.trajectory);trajectory=clone(savedTrajectory);editHistory=[];bundle=session.camera_bundle?clone(session.camera_bundle):null;$('reference').src=session.reference_url||referenceRecord()?.video_url||'';
+  savedTrajectory=clone(session.staging.trajectory);trajectory=clone(savedTrajectory);editHistory=[];bundle=session.camera_bundle?clone(session.camera_bundle):null;const previewUrl=session.staging_preview?.status==='succeeded'?session.staging_preview?.video_url:null;$('reference').src=previewUrl||session.reference_url||referenceRecord()?.video_url||'';
   fillTargets();drawStaging();renderPlan();tabs();syncFields();drawCamera();setButtons();setStageAccess();trajectoryInitialized=true;return true
 }
 function lockTrajectoryStages(){
@@ -385,6 +387,7 @@ $('save-staging').onclick=async()=>{try{setStatus('正在保存不可变轨迹�
 $('approve-staging').onclick=async()=>{try{await postJSON('/api/staging/'+session.current_staging+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
 $('create-plan').onclick=async()=>{try{setStatus('正在调用一次 DeepSeek，不自动重试……');await postJSON('/api/plans',{locked_through_keyframe:boundary()});await refresh(false)}catch(e){setStatus(e.message,true)}};
 $('approve-plan').onclick=async()=>{try{await postJSON('/api/plans/'+session.current_plan+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
+$('render-staging-preview').onclick=async()=>{try{const j=await postJSON(`/api/staging/${session.current_staging}/render`,{});setStatus('Blender 正在按当前轨迹渲染单 Proxy '+j.job_id);await poll(j.job_id)}catch(e){setStatus(e.message,true)}};
 $('rerender-proxy-from-staging').onclick=()=>{$('stage-camera').open=true;$('stage-camera').scrollIntoView({behavior:'smooth',block:'start'});$('render-proxy').click()};
 $('camera-edit-position').onclick=()=>{cameraEditMode='position';$('camera-edit-position').classList.add('primary');$('camera-edit-look-at').classList.remove('primary');drawCamera()};
 $('camera-edit-look-at').onclick=()=>{cameraEditMode='look_at';$('camera-edit-look-at').classList.add('primary');$('camera-edit-position').classList.remove('primary');drawCamera()};

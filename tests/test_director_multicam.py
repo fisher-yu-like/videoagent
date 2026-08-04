@@ -19,6 +19,8 @@ from videoactagent.director_multicam import (
     prepare_render,
     prepare_workspace,
     revise_plan,
+    prepare_staging_preview,
+    run_staging_preview_job,
     run_render_job,
     save_staging,
     session_document,
@@ -154,6 +156,36 @@ class DirectorMulticamTests(unittest.TestCase):
             self.assertEqual(len(session["staging"]["trajectory"]["tracks"]), 2)
             self.assertEqual(len(session["actor_keyframes"]), 5)
             self.assertTrue((manifest.parent / "reference" / "reference.mp4").is_file())
+
+    def test_staging_preview_renders_current_saved_trajectory_without_camera_plan(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            trajectory = session_document(manifest)["staging"]["trajectory"]
+            trajectory["tracks"][0]["points"][0]["x"] = 0.31
+            saved = save_staging(manifest, trajectory, base_staging_id="S1")
+            job = prepare_staging_preview(manifest, saved["staging_id"])
+            job_value = json.loads(job.read_text(encoding="utf-8"))
+            self.assertEqual(job_value["status"], "queued")
+            self.assertEqual(job_value["staging_id"], "S2")
+            self.assertEqual(job_value["source_bindings"]["staging"]["path"], "staging/S2/trajectory.json")
+            self.assertTrue((job.parent / "input" / "trajectory.json").is_file())
+
+            def blender(command, **kwargs):
+                del kwargs
+                output = Path(command[command.index("--output-dir") + 1])
+                output.mkdir(parents=True, exist_ok=False)
+                (output / "station_reunion_proxy.mp4").write_bytes(b"real-staging-preview")
+                return SimpleNamespace(returncode=0, stdout="TRAJECTORY_PROXY_OK", stderr="")
+
+            with patch("videoactagent.director_multicam.subprocess.run", blender):
+                run_staging_preview_job(manifest, job)
+            finished = json.loads(job.read_text(encoding="utf-8"))
+            self.assertEqual(finished["status"], "succeeded")
+            self.assertTrue(finished["outputs"]["video"]["sha256"])
+            session = session_document(manifest)
+            self.assertEqual(session["staging_preview"]["status"], "succeeded")
+            self.assertEqual(session["staging_preview"]["staging_id"], "S2")
+            self.assertTrue(session["staging_preview"]["video_url"].endswith("/staging-media/S2/PV1.mp4"))
 
     def test_plan_requires_human_approval_before_render(self):
         with tempfile.TemporaryDirectory() as root:

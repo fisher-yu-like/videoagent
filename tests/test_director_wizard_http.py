@@ -160,6 +160,26 @@ class DirectorWizardHttpTests(unittest.TestCase):
             {"error": "route not found"},
         )
 
+    def test_http_delegates_single_staging_preview_before_camera_plan(self):
+        from videoactagent import director_multicam
+
+        self.approve_reference_pipeline()
+        fake_job = self.root / "preview-job.json"
+        fake_job.write_text(
+            json.dumps({"job_id": "preview-PV1", "preview_id": "PV1", "status": "queued"}),
+            encoding="utf-8",
+        )
+        with (
+            patch("videoactagent.director_multicam.prepare_staging_preview", return_value=fake_job) as prepare,
+            patch("videoactagent.director_multicam.Thread") as thread,
+        ):
+            status, body = self.request("POST", "/api/staging/S1/render", {})
+        self.assertEqual(status, 202)
+        self.assertEqual(body["job_id"], "preview-PV1")
+        prepare.assert_called_once()
+        self.assertEqual(prepare.call_args.args[1], "S1")
+        thread.return_value.start.assert_called_once_with()
+
     def test_null_duration_returns_json_error_without_dropping_connection(self):
         with self.assertRaises(HTTPError) as caught:
             self.request(
