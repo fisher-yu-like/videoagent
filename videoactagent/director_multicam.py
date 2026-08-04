@@ -603,87 +603,136 @@ def revise_plan(
     if approval.get("plan_sha256") != _sha(source_plan_path):
         raise DirectorMulticamError("approved plan binding mismatch")
     _staging_id, _staging_record_value, _trajectory_path, trajectory = _approved_staging(workspace)
-    load_multicam_plan(
-        source_plan, scene_id=document["story_id"], actors=_trajectory_targets(trajectory),
-        locked_through_keyframe=approval.get("locked_through_keyframe"),
-    )
-
-    revised_id = f"P{state['next_plan']}"
-    directory = root / "plans" / revised_id
-    state["next_plan"] += 1
-    _write(root / "state.json", state)
-    evidence = planner(
-        scene_context=_scene_context(workspace, source_plan.get("locked_through_keyframe")),
-        output_dir=directory,
-        environ=os.environ,
-        previous_plan=source_plan,
-        previous_camera_bundle=source_bundle,
-        revision_scope=scope,
-        feedback=clean_feedback,
-    )
-    plan_path = directory / "plan.json"
-    revised_plan = _read(plan_path, f"{revised_id} plan")
     try:
-        parsed_plan = load_multicam_plan(
-            revised_plan, scene_id=document["story_id"],
+        parsed_source_plan = load_multicam_plan(
+            source_plan, scene_id=document["story_id"],
             actors=_trajectory_targets(trajectory),
-            locked_through_keyframe=source_plan.get("locked_through_keyframe"),
+            locked_through_keyframe=approval.get("locked_through_keyframe"),
         )
     except MulticamPlanError as exc:
         raise DirectorMulticamError(str(exc)) from exc
-    if scope != "all":
-        previous_assignments = {
-            assignment["camera_id"]: assignment for assignment in source_plan["cameras"]
-        }
-        revised_assignments = {
-            assignment["camera_id"]: assignment for assignment in revised_plan["cameras"]
-        }
-        if any(
-            revised_assignments[camera_id] != previous_assignments[camera_id]
-            for camera_id in ("camera_a", "camera_b", "camera_c")
-            if camera_id != scope
-        ):
-            raise DirectorMulticamError("revision changed an unselected camera assignment")
-    compiled = compile_camera_rig(
-        plan=parsed_plan, world_bounds=tuple(document["world_bounds"]),
-        actor_keyframes=_trajectory_keyframes(trajectory),
-    )
-    revised_cameras = {
-        camera_id: (
-            {"states": [camera_state.to_dict() for camera_state in compiled[camera_id]]}
-            if scope == "all" or camera_id == scope
-            else deepcopy(source_bundle["cameras"][camera_id])
+
+    revised_id = f"P{state['next_plan']}"
+    directory = root / "plans" / revised_id
+    if directory.exists():
+        raise DirectorMulticamError(f"revision target already exists: {revised_id}")
+    staging = directory.parent / f".{revised_id}.{uuid4().hex}.staging"
+    published = False
+    try:
+        evidence = planner(
+            scene_context=_scene_context(
+                workspace, source_plan.get("locked_through_keyframe")
+            ),
+            output_dir=staging,
+            environ=os.environ,
+            previous_plan=source_plan,
+            previous_camera_bundle=source_bundle,
+            revision_scope=scope,
+            feedback=clean_feedback,
         )
-        for camera_id in ("camera_a", "camera_b", "camera_c")
-    }
-    bundle = _validated_camera_bundle(
-        {
-            "schema_version": "1.0", "scene_id": document["story_id"],
-            "shot_id": document["shot_id"],
-            "duration_seconds": document["timeline"]["duration_seconds"],
-            "cameras": revised_cameras,
-        },
-        scene_id=document["story_id"], shot_id=document["shot_id"],
-        duration=float(document["timeline"]["duration_seconds"]),
-    )
-    bundle_path = directory / "camera_bundle.json"
-    _write(bundle_path, bundle)
-    record = {
-        "plan_id": revised_id,
-        "parent_plan_id": plan_id,
-        "revision_scope": scope,
-        "feedback": clean_feedback,
-        "plan": _record(plan_path, root),
-        "evidence": _record(directory / "evidence.json", root),
-        "camera_bundle": _record(bundle_path, root),
-        "status": evidence.get("status"),
-    }
-    _write(directory / "record.json", record)
-    state = _read(root / "state.json", "multicam state")
-    state["current_plan"] = revised_id
-    state["approved_plan"] = None
-    _write(root / "state.json", state)
-    return record
+        plan_path = staging / "plan.json"
+        revised_plan = _read(plan_path, f"{revised_id} plan")
+        try:
+            parsed_plan = load_multicam_plan(
+                revised_plan, scene_id=document["story_id"],
+                actors=_trajectory_targets(trajectory),
+                locked_through_keyframe=source_plan.get("locked_through_keyframe"),
+            )
+        except MulticamPlanError as exc:
+            raise DirectorMulticamError(str(exc)) from exc
+        if scope != "all":
+            previous_assignments = {
+                assignment.camera_id: assignment.to_dict()
+                for assignment in parsed_source_plan.cameras
+            }
+            revised_assignments = {
+                assignment.camera_id: assignment.to_dict()
+                for assignment in parsed_plan.cameras
+            }
+            if any(
+                revised_assignments[camera_id] != previous_assignments[camera_id]
+                for camera_id in ("camera_a", "camera_b", "camera_c")
+                if camera_id != scope
+            ):
+                raise DirectorMulticamError(
+                    "revision changed an unselected camera assignment"
+                )
+        compiled = compile_camera_rig(
+            plan=parsed_plan, world_bounds=tuple(document["world_bounds"]),
+            actor_keyframes=_trajectory_keyframes(trajectory),
+        )
+        revised_cameras = {
+            camera_id: (
+                {"states": [
+                    camera_state.to_dict() for camera_state in compiled[camera_id]
+                ]}
+                if scope == "all" or camera_id == scope
+                else deepcopy(source_bundle["cameras"][camera_id])
+            )
+            for camera_id in ("camera_a", "camera_b", "camera_c")
+        }
+        bundle = _validated_camera_bundle(
+            {
+                "schema_version": "1.0", "scene_id": document["story_id"],
+                "shot_id": document["shot_id"],
+                "duration_seconds": document["timeline"]["duration_seconds"],
+                "cameras": revised_cameras,
+            },
+            scene_id=document["story_id"], shot_id=document["shot_id"],
+            duration=float(document["timeline"]["duration_seconds"]),
+        )
+        bundle_path = staging / "camera_bundle.json"
+        _write(bundle_path, bundle)
+
+        def future_record(path: Path) -> dict[str, object]:
+            value = _record(path, root)
+            value["path"] = (directory / path.name).relative_to(root).as_posix()
+            return value
+
+        evidence_path = staging / "evidence.json"
+        record = {
+            "plan_id": revised_id,
+            "parent_plan_id": plan_id,
+            "revision_scope": scope,
+            "feedback": clean_feedback,
+            "plan": future_record(plan_path),
+            "evidence": future_record(evidence_path),
+            "camera_bundle": future_record(bundle_path),
+            "status": evidence.get("status"),
+        }
+        record_path = staging / "record.json"
+        _write(record_path, record)
+        if _read(record_path, f"{revised_id} staged record") != record:
+            raise DirectorMulticamError("staged revision record mismatch")
+        for label, path in (
+            ("plan", plan_path), ("evidence", evidence_path),
+            ("camera_bundle", bundle_path),
+        ):
+            binding = record[label]
+            if (
+                binding["bytes"] != path.stat().st_size
+                or binding["sha256"] != _sha(path)
+            ):
+                raise DirectorMulticamError(
+                    f"staged revision {label} binding mismatch"
+                )
+
+        os.replace(staging, directory)
+        published = True
+        new_state = dict(state)
+        new_state.update({
+            "next_plan": state["next_plan"] + 1,
+            "current_plan": revised_id,
+            "approved_plan": None,
+        })
+        _write(root / "state.json", new_state)
+        return record
+    except BaseException:
+        if published:
+            shutil.rmtree(directory, ignore_errors=True)
+        raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 def approve_plan(

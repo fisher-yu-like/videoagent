@@ -341,6 +341,8 @@ class DirectorMulticamTests(unittest.TestCase):
             manifest = self.prepare(root)
             self.prepare_approved_plan(manifest)
             self.successful_iteration(manifest)
+            state_path = manifest.parent / "state.json"
+            original_state = state_path.read_bytes()
 
             with self.assertRaisesRegex(DirectorMulticamError, "unselected"):
                 revise_plan(
@@ -349,9 +351,38 @@ class DirectorMulticamTests(unittest.TestCase):
                 )
 
             session = session_document(manifest)
+            self.assertEqual(state_path.read_bytes(), original_state)
+            self.assertFalse((manifest.parent / "plans" / "P2").exists())
             self.assertEqual(session["current_plan"], "P1")
             self.assertEqual(session["approved_plan"], "P1")
             self.assertEqual(session["current_iteration"], "M1")
+
+    def test_scoped_revision_allows_canonical_equivalent_unselected_assignment(self):
+        with tempfile.TemporaryDirectory() as root:
+            manifest = self.prepare(root)
+            self.prepare_approved_plan(manifest)
+            self.successful_iteration(manifest)
+            calls = []
+            base_planner = self.revision_planner(calls)
+
+            def whitespace_planner(**kwargs):
+                evidence = base_planner(**kwargs)
+                plan_path = Path(kwargs["output_dir"]) / "plan.json"
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                plan["cameras"][0]["rationale"] = (
+                    "  " + plan["cameras"][0]["rationale"] + "  "
+                )
+                plan_path.write_text(json.dumps(plan), encoding="utf-8")
+                return evidence
+
+            record = revise_plan(
+                manifest, "P1", scope="camera_b", feedback="make B static",
+                planner=whitespace_planner,
+            )
+
+            self.assertEqual(record["plan_id"], "P2")
+            self.assertEqual(len(calls), 1)
+            self.assertTrue((manifest.parent / "plans" / "P2" / "record.json").is_file())
 
     def test_revision_rejects_invalid_scope_blank_feedback_and_missing_current_success(self):
         with tempfile.TemporaryDirectory() as root:
