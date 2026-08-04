@@ -74,10 +74,18 @@ def evaluate_multicam_iteration(
         if not isinstance(frame, Mapping):
             raise ValueError("world frame is invalid")
         actors = frame.get("actors")
+        objects = frame.get("objects", {})
         frame_cameras = frame.get("cameras")
         if not isinstance(actors, Mapping) or not isinstance(frame_cameras, Mapping):
             raise ValueError("world frame actors/cameras are invalid")
+        if (
+            not isinstance(objects, Mapping)
+            or not all(isinstance(object_id, str) and object_id for object_id in objects)
+        ):
+            raise ValueError("world frame objects are invalid")
         all_actor_positions.extend(_vector(value, "actor position") for value in actors.values())
+        for value in objects.values():
+            _vector(value, "object position")
 
     frame_total = len(frames)
     for assignment in plan.cameras:
@@ -102,7 +110,12 @@ def evaluate_multicam_iteration(
                 targets = (
                     list(frame["actors"].values())
                     if assignment.target == "all_actors"
-                    else [frame["actors"].get(assignment.target)]
+                    else [
+                        frame["actors"].get(
+                            assignment.target,
+                            frame.get("objects", {}).get(assignment.target),
+                        )
+                    ]
                 )
                 total += len(targets)
                 hits += sum(target is not None and _visible(target, camera) for target in targets)

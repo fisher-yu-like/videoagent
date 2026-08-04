@@ -341,6 +341,39 @@ def create_warehouse_environment(profile: RenderProfile):
     create_action_axis(profile)
 
 
+def create_generic_environment(profile: RenderProfile):
+    """Build the deterministic neutral fallback set without free-form assets."""
+
+    floor = create_material(
+        profile, "generic_floor_mat", (0.30, 0.31, 0.33, 1.0), roughness=0.9
+    )
+    wall = create_material(
+        profile, "generic_wall_mat", (0.48, 0.49, 0.51, 1.0), roughness=0.86
+    )
+    post = create_material(
+        profile, "generic_post_mat", (0.20, 0.21, 0.23, 1.0), roughness=0.72
+    )
+    add_cube("generic_ground", (0, 0, -0.14), (6.0, 4.2, 0.14), floor)
+    add_cube("generic_back_wall", (0, 4.05, 2.7), (6.0, 0.12, 2.8), wall)
+    for index, (x, y) in enumerate(
+        ((-5.5, -3.5), (-5.5, 3.5), (5.5, -3.5), (5.5, 3.5))
+    ):
+        add_cube(
+            f"generic_boundary_post_{index}",
+            (x, y, 1.5),
+            (0.12, 0.12, 1.5),
+            post,
+        )
+    bpy.ops.object.light_add(type="AREA", location=(0, 0, 6))
+    fill = bpy.context.object
+    fill.name = "GenericNeutralFill"
+    fill.data.color = (1.0, 1.0, 1.0)
+    fill.data.energy = 500
+    fill.data.shape = "DISK"
+    fill.data.size = 5.0
+    create_action_axis(profile)
+
+
 ENVIRONMENT_BUILDERS = {
     "station": create_station_environment,
     "city_crosswalk": create_city_crosswalk_environment,
@@ -348,6 +381,7 @@ ENVIRONMENT_BUILDERS = {
     "studio_room": create_studio_room_environment,
     "cafe": create_cafe_environment,
     "warehouse": create_warehouse_environment,
+    "generic": create_generic_environment,
 }
 
 

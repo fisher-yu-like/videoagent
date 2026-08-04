@@ -227,6 +227,38 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
             with self.subTest(function=name):
                 self.assertIn("profile", inspect.signature(getattr(self.proxy, name)).parameters)
 
+    def test_generic_environment_builds_fixed_neutral_scene(self):
+        profile = self.proxy.RenderProfile("diagnostic", 3, (160, 90))
+        fill = types.SimpleNamespace(data=types.SimpleNamespace())
+        fake_bpy = types.SimpleNamespace(
+            ops=types.SimpleNamespace(
+                object=types.SimpleNamespace(light_add=mock.Mock())
+            ),
+            context=types.SimpleNamespace(object=fill),
+        )
+        cubes = []
+        with mock.patch.object(self.proxy, "bpy", fake_bpy), mock.patch.object(
+            self.proxy, "create_material", side_effect=("floor", "wall", "post")
+        ), mock.patch.object(
+            self.proxy, "add_cube", side_effect=lambda name, *args: cubes.append(name)
+        ), mock.patch.object(self.proxy, "create_action_axis") as action_axis:
+            self.proxy.ENVIRONMENT_BUILDERS["generic"](profile)
+
+        self.assertEqual(cubes, [
+            "generic_ground",
+            "generic_back_wall",
+            "generic_boundary_post_0",
+            "generic_boundary_post_1",
+            "generic_boundary_post_2",
+            "generic_boundary_post_3",
+        ])
+        fake_bpy.ops.object.light_add.assert_called_once_with(
+            type="AREA", location=(0, 0, 6)
+        )
+        self.assertEqual(fill.name, "GenericNeutralFill")
+        self.assertEqual(fill.data.color, (1.0, 1.0, 1.0))
+        action_axis.assert_called_once_with(profile)
+
     def test_every_shot_must_round_to_at_least_one_effective_frame(self):
         profile = self.proxy.RenderProfile("diagnostic", 6, (160, 90))
         script = types.SimpleNamespace(
@@ -241,6 +273,12 @@ class BlenderProxyRenderProfileTests(unittest.TestCase):
             r"s02.*0\.01.*6 fps.*0 frames",
         ):
             self.proxy.validate_shot_frame_counts(script, profile)
+
+    def test_top_left_trajectory_y_decodes_back_to_original_world_direction(self):
+        point = types.SimpleNamespace(x=0.2, y=0.75)
+        with mock.patch.object(self.proxy, "Vector", side_effect=lambda value: value):
+            world = self.proxy._actor_world(point, (-5.0, 5.0, -4.0, 4.0))
+        self.assertEqual(world, (-3.0, -2.0, 0.0))
 
 
 @unittest.skipUnless(BLENDER.is_file(), f"Blender missing at {BLENDER}")

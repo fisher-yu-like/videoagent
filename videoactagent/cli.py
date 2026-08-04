@@ -14,6 +14,7 @@ COMMANDS = {
     "control-bridge": "videoactagent.control_bridge",
     "director-loop": "videoactagent.director_loop",
     "director-multicam": "videoactagent.director_multicam",
+    "director-wizard": "videoactagent.director_wizard",
     "jd-smoke": "videoactagent.jd_smoke",
     "module-io": "videoactagent.module_io",
     "annotate": "videoactagent.manual_annotation",

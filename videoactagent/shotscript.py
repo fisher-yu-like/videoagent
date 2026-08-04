@@ -197,6 +197,7 @@ class ShotScript:
             "studio_room",
             "cafe",
             "warehouse",
+            "generic",
         }
         if environment_preset not in allowed_environment_presets:
             raise ShotScriptError(

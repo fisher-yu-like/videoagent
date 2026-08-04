@@ -132,7 +132,20 @@ def _configure_structure_outputs(scene, camera_dir: Path, actor_ids: list[str]) 
     return passes
 
 
-def _world_frames(scene, actor_roots, camera_objects):
+def _object_roots(instruction: TrajectoryInstruction):
+    roots = {}
+    for track in instruction.tracks:
+        if track.target_type != "object":
+            continue
+        object_name = f"prop__{track.target_id}"
+        root = bpy.data.objects.get(object_name)
+        if root is None:
+            raise RuntimeError(f"object trajectory target is missing from Blender: {object_name}")
+        roots[track.target_id] = root
+    return roots
+
+
+def _world_frames(scene, actor_roots, object_roots, camera_objects):
     records = []
     for frame in range(scene.frame_start, scene.frame_end + 1):
         scene.frame_set(frame)
@@ -149,6 +162,10 @@ def _world_frames(scene, actor_roots, camera_objects):
             "actors": {
                 actor_id: [round(float(value), 8) for value in root.matrix_world.translation]
                 for actor_id, root in actor_roots.items()
+            },
+            "objects": {
+                object_id: [round(float(value), 8) for value in root.matrix_world.translation]
+                for object_id, root in object_roots.items()
             },
             "cameras": cameras,
         })
@@ -179,7 +196,8 @@ def render(args: argparse.Namespace) -> None:
         )
         for camera_id, camera in cameras.items()
     }
-    shared_frames = _world_frames(scene, actor_roots, cameras)
+    object_roots = _object_roots(instruction)
+    shared_frames = _world_frames(scene, actor_roots, object_roots, cameras)
     blend = output / "multicam_proxy.blend"
     bpy.ops.wm.save_as_mainfile(filepath=str(blend))
 

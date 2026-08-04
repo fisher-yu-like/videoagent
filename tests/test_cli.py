@@ -6,6 +6,15 @@ import unittest
 
 
 class ConsoleDispatcherTests(unittest.TestCase):
+    def test_help_lists_new_wizard_without_removing_old_directors(self):
+        from videoactagent.cli import COMMANDS
+
+        self.assertEqual(
+            COMMANDS["director-wizard"], "videoactagent.director_wizard"
+        )
+        self.assertIn("director-loop", COMMANDS)
+        self.assertIn("director-multicam", COMMANDS)
+
     def test_help_lists_commands_and_returns_zero(self):
         from videoactagent.cli import main
 

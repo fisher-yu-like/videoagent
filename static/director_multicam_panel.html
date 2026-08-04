@@ -9,18 +9,111 @@
     body{max-width:1180px;margin:auto;padding:18px}h1,h2,h3{margin:.35em 0}.top,.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
     .card{background:#19212d;border:1px solid #344156;border-radius:12px;margin:14px 0;overflow:hidden}.card>summary{cursor:pointer;padding:16px;font-size:1.2rem;font-weight:700}.inside{padding:0 16px 16px}
     .hint{color:#aebbd0;font-size:.86rem;margin:.5em 0 1em}.status{position:sticky;bottom:8px;background:#202c3c;border:1px solid #40516b;border-radius:9px;padding:10px;z-index:4}
-    button,select,input{font:inherit;color:#fff;background:#28364a;border:1px solid #50627e;border-radius:7px;padding:8px 10px}button{cursor:pointer}button.primary{background:#2865c7}button:disabled{opacity:.42;cursor:not-allowed}
+    button,select,input,textarea{font:inherit;color:#fff;background:#28364a;border:1px solid #50627e;border-radius:7px;padding:8px 10px}button{cursor:pointer}button.primary{background:#2865c7}button:disabled{opacity:.42;cursor:not-allowed}textarea{width:100%;min-height:90px;resize:vertical}
     video{width:100%;background:#05070a;border-radius:8px}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}canvas{width:100%;height:auto;background:#0d141e;border:1px solid #43516a;border-radius:8px;cursor:crosshair}
     .lane{background:#26364d;border-radius:6px;padding:7px;margin:5px 0}.ok{color:#77d99d}.bad{color:#ff9393}pre{white-space:pre-wrap;max-height:250px;overflow:auto;color:#cbd7ea}
-    @media(max-width:800px){.grid{grid-template-columns:1fr}}
+    #wizard-progress{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px;margin:14px 0}.wizard-step{border:1px solid #40516b;border-radius:8px;padding:8px 5px;text-align:center;color:#aebbd0;font-size:.78rem}.wizard-step.active{background:#2865c7;color:#fff;border-color:#75a7ff}.wizard-step.done{color:#77d99d;border-color:#3b7654}.wizard-step.locked{opacity:.38}.card[data-locked="true"]>summary{cursor:not-allowed;color:#758196}
+    .editor-list{display:grid;gap:8px;margin:8px 0}.editor-row{display:grid;grid-template-columns:repeat(6,minmax(90px,1fr));gap:7px;padding:10px;background:#202c3c;border-radius:8px}.editor-row label{display:grid;gap:4px;font-size:.78rem;color:#aebbd0}.editor-row .remove-row{align-self:end}.form-grid{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:9px}.form-grid label{display:grid;gap:4px}.audit-log{margin-top:12px;border-top:1px solid #344156;padding-top:8px}.audit-log summary{cursor:pointer;color:#aebbd0;font-size:.86rem}
+    @media(max-width:800px){.grid,.form-grid{grid-template-columns:1fr}.editor-row{grid-template-columns:repeat(2,minmax(0,1fr))}#wizard-progress{grid-template-columns:repeat(2,minmax(0,1fr))}}
   </style>
 </head>
 <body>
-  <div class="top"><h1>多机位导演向导</h1><label>批准人 <input id="author" value="human-director"></label></div>
-  <p class="hint">只需从上到下完成三步。每次批准后会自动展开并跳到下一步；旧版本和旧实验保留，但不会继续作为当前输入。</p>
+  <div class="top"><h1>多机位导演向导</h1><label>批准人 <input id="author" value="human-director"></label><span id="api-call-count" class="hint">Agent API 累计调用：0</span></div>
+  <p class="hint">从故事提示开始，按七步完成场景、Reference、轨迹与三机位审批。每次批准后会自动展开当前步骤；旧版本和来源证据会保留。</p>
 
-  <details id="stage-staging" class="card" open>
-    <summary>1　规划人物与物体轨迹</summary>
+  <nav id="wizard-progress" aria-label="七步向导进度">
+    <span class="wizard-step" data-step="prompt">1 故事</span>
+    <span class="wizard-step" data-step="scene_plan">2 场景参数</span>
+    <span class="wizard-step" data-step="reference_review">3 Reference</span>
+    <span class="wizard-step" data-step="staging">4 轨迹</span>
+    <span class="wizard-step" data-step="camera_plan">5 相机规划</span>
+    <span class="wizard-step" data-step="multicam_review">6 多机位审看</span>
+    <span class="wizard-step" data-step="complete">7 完成</span>
+  </nav>
+
+  <details id="stage-prompt" class="card" open>
+    <summary>1　输入故事与时长</summary>
+    <div class="inside">
+      <label for="story-prompt">故事提示</label>
+      <textarea id="story-prompt" placeholder="例如：一名旅客拖着行李走向站台上的朋友，两人见面后挥手。"></textarea>
+      <div class="row">
+        <label>完整视频时长（秒） <input id="story-duration" type="number" min="1" max="60" step="0.5" value="5"></label>
+        <button id="generate-scene" class="primary">生成场景草案</button>
+      </div>
+      <p class="hint">Agent 只生成一次受约束草案，不自动重试。故事和时长会贯穿 Reference 与全部机位视频。</p>
+    </div>
+  </details>
+
+  <details id="stage-scene-plan" class="card">
+    <summary>2　检查并批准场景参数</summary>
+    <div class="inside">
+      <div class="form-grid">
+        <label>场景模板
+          <select id="scene-template"><option value="generic">通用空场</option><option value="station">车站</option><option value="city_crosswalk">城市路口</option><option value="forest_path">林间小路</option><option value="studio_room">室内影棚</option><option value="cafe">咖啡馆</option><option value="warehouse">仓库</option></select>
+        </label>
+        <label>场景 ID <input id="scene-id" value="prompt_scene"></label>
+        <label>帧率 <input id="scene-fps" type="number" min="1" max="60" step="1" value="3"></label>
+        <label>方案说明 <input id="scene-explanation" placeholder="这版安排的核心理由"></label>
+      </div>
+      <h3>世界边界</h3>
+      <div class="form-grid">
+        <label>最小 X <input id="world-min-x" type="number" step="0.1" value="-5"></label>
+        <label>最大 X <input id="world-max-x" type="number" step="0.1" value="5"></label>
+        <label>最小 Y <input id="world-min-y" type="number" step="0.1" value="-4"></label>
+        <label>最大 Y <input id="world-max-y" type="number" step="0.1" value="4"></label>
+      </div>
+      <h3>人物</h3>
+      <div id="actor-editor" class="editor-list"></div>
+      <button id="add-scene-actor" type="button">增加人物</button>
+      <h3>物体</h3>
+      <div id="object-editor" class="editor-list"></div>
+      <button id="add-scene-object" type="button">增加物体</button>
+      <h3>初始相机</h3>
+      <div id="initial-camera-editor" class="form-grid">
+        <label>景别 <select id="camera-shot-size"><option value="extreme_wide">大远景</option><option value="wide">全景</option><option value="medium">中景</option><option value="close">近景</option><option value="extreme_close">特写</option></select></label>
+        <label>焦距 mm <input id="camera-focal-length" type="number" min="12" max="200" step="1" value="35"></label>
+        <label>运动 <select id="camera-motion"><option value="static">固定</option><option value="follow">跟随</option><option value="arc">环绕</option><option value="dolly">轨道移动</option><option value="truck">横移</option><option value="dolly_in">推进</option><option value="dolly_out">拉远</option><option value="truck_left">向左横移</option><option value="truck_right">向右横移</option><option value="pan_left">向左摇摄</option><option value="pan_right">向右摇摄</option></select></label>
+        <label>注视目标 <input id="camera-look-at" value="actors_midpoint"></label>
+        <label>起点 X <input id="camera-start-x" type="number" step="0.1" value="0"></label>
+        <label>起点 Y <input id="camera-start-y" type="number" step="0.1" value="-10"></label>
+        <label>起点 Z <input id="camera-start-z" type="number" step="0.1" value="6"></label>
+        <label>终点 X <input id="camera-end-x" type="number" step="0.1" value="0"></label>
+        <label>终点 Y <input id="camera-end-y" type="number" step="0.1" value="-10"></label>
+        <label>终点 Z <input id="camera-end-z" type="number" step="0.1" value="6"></label>
+      </div>
+      <p class="hint">人物和物体用可重复表单编辑，不需要修改 JSON。保存只生成本地新版本；批准后才允许渲染。</p>
+      <div class="row">
+        <button id="save-scene-plan">保存参数为新版本</button>
+        <button id="approve-scene-plan" class="primary">批准场景与 ShotScript</button>
+        <span id="scene-plan-dirty" class="hint">场景参数：无未保存修改</span>
+      </div>
+      <label for="scene-feedback">给 Agent 的修改意见</label>
+      <textarea id="scene-feedback" placeholder="说明要保留什么、改动什么；提交后会生成新的 SP 版本。"></textarea>
+      <button id="rewrite-scene-plan">按反馈重写草案</button>
+      <details id="scene-audit-log" class="audit-log"><summary>JSON / 来源哈希日志</summary><pre id="scene-audit-content">尚无场景版本。</pre></details>
+    </div>
+  </details>
+
+  <details id="stage-reference-review" class="card">
+    <summary>3　检查并批准完整 Reference</summary>
+    <div class="inside">
+      <video id="reference-review-video" controls preload="metadata"></video>
+      <p id="reference-parameters" class="hint">尚未渲染。这里会播放完整时长的 Blender Reference，并列出对应 SP、时长与来源哈希。</p>
+      <div class="row">
+        <button id="return-to-scene-plan">返回参数修改</button>
+        <button id="render-reference">渲染完整 Reference</button>
+        <button id="approve-reference" class="primary">批准 Reference，进入轨迹阶段</button>
+      </div>
+      <label for="reference-feedback">观看后的修改意见</label>
+      <textarea id="reference-feedback" placeholder="例如：人物距离太近；保留动作，但把初始相机改为全景。"></textarea>
+      <button id="rewrite-reference">按反馈重写场景参数</button>
+      <p class="hint">返回或反馈重写都会产生新的场景版本；批准新版本后需重新渲染 Reference。只有批准这里的视频，才会初始化后面的轨迹画布。</p>
+      <details id="reference-audit-log" class="audit-log"><summary>JSON / 来源哈希日志</summary><pre id="reference-audit-content">尚无 Reference 版本。</pre></details>
+    </div>
+  </details>
+
+  <details id="stage-staging" class="card" hidden>
+    <summary>4　规划人物与物体轨迹</summary>
     <div class="inside">
       <video id="reference" controls></video>
       <p class="hint">先看完整参考视频，再选择人物或物体和 K0–K4。在平面图点击即可改该帧位置；“从 K2 开始”表示 K0–K1 被锁定。</p>
@@ -44,7 +137,7 @@
   </details>
 
   <details id="stage-camera" class="card">
-    <summary>2　规划并微调三台摄像机</summary>
+    <summary>5–6　规划并微调三台摄像机</summary>
     <div class="inside">
       <div class="row">
         <button id="create-plan" class="primary">让 DeepSeek 规划一次</button>
@@ -53,7 +146,7 @@
       </div>
       <p class="hint">DeepSeek 只分配三台摄像机各自负责的人物/物体、景别和时间段，调用一次且不自动重试。批准职责后才允许真实渲染。</p>
       <div id="coverage-timeline"></div>
-      <pre id="agent-plan">尚未生成摄像机规划。</pre>
+      <details id="camera-technical-details" class="audit-log"><summary>技术详情（Camera Agent JSON）</summary><pre id="agent-plan">尚未生成摄像机规划。</pre></details>
       <div id="camera-tabs"></div>
       <div class="row">
         <label>关键帧 <select id="keyframe"><option>K0</option><option>K1</option><option selected>K2</option><option>K3</option><option>K4</option></select></label>
@@ -67,7 +160,7 @@
   </details>
 
   <details id="stage-result" class="card">
-    <summary>3　检查并批准三机位 Proxy</summary>
+    <summary>6　检查并批准三机位 Proxy</summary>
     <div class="inside">
       <h3>三台摄像机同步播放</h3>
       <div class="grid">
@@ -83,7 +176,7 @@
   <div class="status"><b>状态：</b><span id="status">正在读取工作区……</span></div>
 
 <script>
-const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a';
+const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a',loadedScenePlanId=null,scenePlanDraft=null,trajectoryInitialized=false;
 const videos=[$('proxy-camera-a'),$('proxy-camera-b'),$('proxy-camera-c')];
 async function postJSON(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||r.statusText);return v}
 function author(){return $('author').value.trim()||'human-director'}
@@ -91,6 +184,70 @@ function boundary(){const n=Number($('edit-start').value.slice(1));return n===0?
 function setStatus(text,bad=false){$('status').textContent=text;$('status').className=bad?'bad':'ok'}
 function clone(value){return JSON.parse(JSON.stringify(value))}
 function safeId(value){return value.trim().replace(/[^A-Za-z0-9_.-]+/g,'_').replace(/^[_\-.]+/,'').slice(0,128)}
+function numberValue(row,selector,fallback=0){const value=Number(row.querySelector(selector)?.value);return Number.isFinite(value)?value:fallback}
+function field(label,className,value,type='text'){
+  const wrapper=document.createElement('label'),input=document.createElement('input');wrapper.textContent=label;input.className=className;input.type=type;input.value=value??'';if(type==='number')input.step='0.1';wrapper.append(input);return wrapper
+}
+function removeButton(row){const button=document.createElement('button');button.type='button';button.className='remove-row';button.textContent='移除';button.onclick=()=>{row.remove();updateSceneEditState()};return button}
+function addActorRow(actor={}){
+  const row=document.createElement('div');row.className='editor-row actor-row';
+  row.append(field('ID','actor-id',actor.id||`actor_${$('actor-editor').children.length+1}`),field('颜色','actor-color',actor.color||'#4E79A7','color'),field('动作','actor-action',actor.action||'walk'),field('起点 X','actor-start-x',actor.start?.[0]??0,'number'),field('起点 Y','actor-start-y',actor.start?.[1]??0,'number'),field('终点 X','actor-end-x',actor.end?.[0]??0,'number'),field('终点 Y','actor-end-y',actor.end?.[1]??0,'number'),field('面向','actor-facing',actor.facing||'camera'),removeButton(row));
+  $('actor-editor').append(row)
+}
+function addObjectRow(object={}){
+  const row=document.createElement('div');row.className='editor-row object-row';
+  row.append(field('ID','object-id-field',object.id||`object_${$('object-editor').children.length+1}`),field('几何体','object-primitive',object.primitive||'cube'),field('语义','object-semantic',object.semantic||'move'),field('起点 X','object-start-x',object.start?.[0]??0,'number'),field('起点 Y','object-start-y',object.start?.[1]??0,'number'),field('终点 X','object-end-x',object.end?.[0]??0,'number'),field('终点 Y','object-end-y',object.end?.[1]??0,'number'),removeButton(row));
+  $('object-editor').append(row)
+}
+function scenePlanRecord(){return session?.scene_plan||null}
+function scenePlanValue(){const record=scenePlanRecord();return record?.draft||record?.scene_plan||record}
+function referenceRecord(){return session?.reference||null}
+function setSelect(id,value){if([...$(id).options].some(option=>option.value===value))$(id).value=value}
+function fillScenePlanForm(draft){
+  scenePlanDraft=clone(draft);setSelect('scene-template',draft.environment_preset||'generic');$('scene-id').value=draft.scene_id||'prompt_scene';$('scene-fps').value=draft.fps||3;$('scene-explanation').value=draft.explanation||'';if(draft.duration_seconds)$('story-duration').value=draft.duration_seconds;
+  const bounds=draft.world_bounds||[-5,5,-4,4];['world-min-x','world-max-x','world-min-y','world-max-y'].forEach((id,index)=>$(id).value=bounds[index]);
+  $('actor-editor').replaceChildren();(draft.actors||[]).forEach(addActorRow);if(!$('actor-editor').children.length)addActorRow();
+  $('object-editor').replaceChildren();(draft.objects||[]).forEach(addObjectRow);
+  const camera=draft.initial_camera||{},start=camera.start||[0,-10,6],end=camera.end||start;setSelect('camera-shot-size',camera.shot_size||'wide');$('camera-focal-length').value=camera.focal_length_mm||35;setSelect('camera-motion',camera.motion||'static');$('camera-look-at').value=camera.look_at||'actors_midpoint';['camera-start-x','camera-start-y','camera-start-z'].forEach((id,index)=>$(id).value=start[index]);['camera-end-x','camera-end-y','camera-end-z'].forEach((id,index)=>$(id).value=end[index])
+}
+function readScenePlanForm(){
+  const actors=[...$('actor-editor').children].map(row=>({id:safeId(row.querySelector('.actor-id').value),color:row.querySelector('.actor-color').value,action:row.querySelector('.actor-action').value.trim(),start:[numberValue(row,'.actor-start-x'),numberValue(row,'.actor-start-y'),0],end:[numberValue(row,'.actor-end-x'),numberValue(row,'.actor-end-y'),0],facing:row.querySelector('.actor-facing').value.trim()}));
+  const objects=[...$('object-editor').children].map(row=>({id:safeId(row.querySelector('.object-id-field').value),primitive:row.querySelector('.object-primitive').value.trim(),semantic:row.querySelector('.object-semantic').value.trim(),start:[numberValue(row,'.object-start-x'),numberValue(row,'.object-start-y')],end:[numberValue(row,'.object-end-x'),numberValue(row,'.object-end-y')]}));
+  const world_bounds=['world-min-x','world-max-x','world-min-y','world-max-y'].map(id=>Number($(id).value)),start=['camera-start-x','camera-start-y','camera-start-z'].map(id=>Number($(id).value)),end=['camera-end-x','camera-end-y','camera-end-z'].map(id=>Number($(id).value));
+  return {schema_version:scenePlanDraft?.schema_version||'scene-plan-1.0',scene_id:safeId($('scene-id').value)||'prompt_scene',environment_preset:$('scene-template').value,duration_seconds:Number($('story-duration').value),fps:Number($('scene-fps').value),world_bounds,actors,objects,initial_camera:{shot_size:$('camera-shot-size').value,focal_length_mm:Number($('camera-focal-length').value),motion:$('camera-motion').value,start,end,look_at:$('camera-look-at').value.trim()||'actors_midpoint'},explanation:$('scene-explanation').value.trim()}
+}
+function canonicalScenePlan(value){const canonical=clone(value);(canonical.actors||[]).forEach(actor=>{if(typeof actor.color==='string')actor.color=actor.color.toUpperCase()});return stableCanonicalValue(canonical)}
+function stableCanonicalValue(value){if(Array.isArray(value))return value.map(stableCanonicalValue);if(value&&typeof value==='object'){const sorted={};Object.keys(value).sort().forEach(key=>sorted[key]=stableCanonicalValue(value[key]));return sorted}return value}
+function sceneFormDirty(){const saved=scenePlanValue();if(!saved)return false;return JSON.stringify(canonicalScenePlan(readScenePlanForm()))!==JSON.stringify(canonicalScenePlan(saved))||$('story-prompt').value.trim()!==(scenePlanRecord()?.prompt||session.story_prompt||'')}
+function updateSceneEditState(){const planId=session?.current_scene_plan,dirty=sceneFormDirty();$('scene-plan-dirty').textContent=dirty?'场景参数：有未保存修改':'场景参数：无未保存修改';$('save-scene-plan').disabled=!planId||!dirty;$('approve-scene-plan').disabled=!planId||session.approved_scene_plan===planId||dirty;return dirty}
+function workflowCard(){
+  const step=session.workflow_step;if(step==='prompt'||step==='prompt_entry')return 'stage-prompt';if(step==='scene_plan'||step==='scene_plan_review')return 'stage-scene-plan';if(step==='reference_review')return 'stage-reference-review';if(step==='staging'||step==='trajectory')return 'stage-staging';if(step==='camera'||step==='camera_plan'||step==='camera_tune')return 'stage-camera';if(step==='result'||step==='proxy_review'||step==='complete')return 'stage-result';
+  if(!session.current_scene_plan)return 'stage-prompt';if(!session.approved_scene_plan)return 'stage-scene-plan';if(!session.approved_reference)return 'stage-reference-review';if(!session.approved_staging)return 'stage-staging';if(!session.current_iteration)return 'stage-camera';return 'stage-result'
+}
+function wizardStepNumber(){if(session.workflow_step==='complete')return 7;if(session.current_iteration)return 6;if(session.workflow_step==='camera'||session.approved_staging)return 5;if(session.workflow_step==='staging'||session.approved_reference)return 4;if(session.workflow_step==='reference_review'||session.approved_scene_plan)return 3;if(session.current_scene_plan)return 2;return 1}
+function unlockedWizardStep(){if(session.workflow_step==='complete')return 7;if(session.approved_plan&&session.current_iteration)return 6;if(session.approved_staging)return 5;if(session.approved_reference)return 4;if(session.approved_scene_plan)return 3;if(session.current_scene_plan)return 2;return 1}
+function updateWizardProgress(){
+  const current=wizardStepNumber(),unlocked=unlockedWizardStep();
+  [...$('wizard-progress').children].forEach((node,index)=>{const step=index+1,locked=step>unlocked;node.classList.toggle('active',step===current);node.classList.toggle('done',step<current);node.classList.toggle('locked',locked);node.setAttribute('aria-disabled',String(locked))})
+}
+function setStageAccess(){const access={'stage-prompt':true,'stage-scene-plan':!!session.current_scene_plan,'stage-reference-review':!!session.approved_scene_plan,'stage-staging':!!session.approved_reference,'stage-camera':!!session.approved_staging,'stage-result':!!session.approved_plan&&!!session.current_iteration};Object.entries(access).forEach(([id,allowed])=>{const card=$(id);card.dataset.locked=String(!allowed);if(!allowed)card.open=false;if(['stage-staging','stage-camera','stage-result'].includes(id))card.hidden=!allowed})}
+function setWizardButtons(){
+  const planId=session.current_scene_plan,referenceId=session.current_reference;
+  $('rewrite-scene-plan').disabled=!planId;
+  $('render-reference').disabled=!session.approved_scene_plan;$('approve-reference').disabled=!referenceId||session.approved_reference===referenceId;$('rewrite-reference').disabled=!planId
+  updateSceneEditState()
+}
+function addSourceHash(audit,record){if(record?.source_hash)audit.source_hash=record.source_hash;return audit}
+function renderWizardPrelude(){
+  const plan=scenePlanValue(),planId=session.current_scene_plan,reference=referenceRecord();
+  const prompt=session.story_prompt||scenePlanRecord()?.prompt;if(prompt&&!$('story-prompt').value)$('story-prompt').value=prompt;if(session.duration_seconds)$('story-duration').value=session.duration_seconds;
+  if(plan&&loadedScenePlanId!==planId){fillScenePlanForm(plan);loadedScenePlanId=planId}
+  const sceneAudit=addSourceHash({scene_plan_id:planId,approved:session.approved_scene_plan===planId,draft:plan},scenePlanRecord());if(scenePlanRecord()?.evidence)sceneAudit.evidence=scenePlanRecord().evidence;$('scene-audit-content').textContent=plan?JSON.stringify(sceneAudit,null,2):'尚无场景版本。';
+  const referenceUrl=reference?.video_url||reference?.reference_url||reference?.url||(!session.approved_reference?session.reference_url:null);$('reference-review-video').src=referenceUrl||'';
+  $('reference-parameters').textContent=reference?`Reference ${session.current_reference}；来源 SP ${reference.scene_plan_id||session.approved_scene_plan||'未知'}；时长 ${reference.duration_seconds||plan?.duration_seconds||session.duration_seconds||'未知'} 秒。`:'尚未渲染。批准场景参数后，点击“渲染完整 Reference”。';
+  $('reference-audit-content').textContent=reference?JSON.stringify(addSourceHash({reference_id:session.current_reference,approved:session.approved_reference===session.current_reference,reference},reference),null,2):'尚无 Reference 版本。';
+  $('api-call-count').textContent='Agent API 累计调用：'+(session.api_call_count??0);setWizardButtons();updateWizardProgress();setStageAccess()
+}
 function currentTrack(){return trajectory?.tracks.find(track=>track.target.id===$('target-select').value)}
 function isDirty(){return !!savedTrajectory&&JSON.stringify(trajectory)!==JSON.stringify(savedTrajectory)}
 function pushHistory(){editHistory.push(clone(trajectory))}
@@ -143,14 +300,36 @@ function setButtons(){
   $('approve-proxy').disabled=!session.current_iteration||session.approved_iteration===session.current_iteration;
   updateStagingEditState();
 }
-function advanceToCurrent(){let id='stage-staging';if(session.approved_staging)id='stage-camera';if(session.current_iteration)id='stage-result';['stage-staging','stage-camera','stage-result'].forEach(x=>$(x).open=x===id);$(id).scrollIntoView({behavior:'smooth',block:'start'})}
+function initializeTrajectoryStages(){
+  if(!session.approved_reference||!session.staging)return false;
+  savedTrajectory=clone(session.staging.trajectory);trajectory=clone(savedTrajectory);editHistory=[];bundle=session.camera_bundle?clone(session.camera_bundle):null;$('reference').src=session.reference_url||referenceRecord()?.video_url||'';
+  fillTargets();drawStaging();renderPlan();tabs();syncFields();drawCamera();setButtons();setStageAccess();trajectoryInitialized=true;return true
+}
+function lockTrajectoryStages(){
+  ['stage-staging','stage-camera','stage-result'].forEach(id=>{$(id).hidden=true;$(id).open=false});trajectory=null;savedTrajectory=null;editHistory=[];bundle=null;trajectoryInitialized=false
+}
+function advanceToCurrent(){const id=workflowCard(),cards=['stage-prompt','stage-scene-plan','stage-reference-review','stage-staging','stage-camera','stage-result'];cards.forEach(x=>$(x).open=x===id);$(id).scrollIntoView({behavior:'smooth',block:'start'})}
 async function refresh(advance=false){
   const response=await fetch('/api/session');session=await response.json();if(!response.ok||session.error)throw Error(session.error||response.statusText);
-  savedTrajectory=clone(session.staging.trajectory);trajectory=clone(savedTrajectory);editHistory=[];bundle=session.camera_bundle?clone(session.camera_bundle):null;$('reference').src=session.reference_url;
-  fillTargets();drawStaging();renderPlan();tabs();syncFields();drawCamera();setButtons();
-  if(session.iteration){Object.entries(session.iteration.videos).forEach(([id,url])=>$('proxy-'+id.replaceAll('_','-')).src=url);$('result-summary').textContent=`${session.iteration.iteration_id}：真实渲染状态 ${session.iteration.status}，自动几何检查 ${session.iteration.evaluation.automatic_passed?'通过':'未通过'}。`}
-  setStatus(`场景 ${session.story_id}；轨迹 ${session.current_staging}${session.approved_staging?'（已批准）':''}；规划 ${session.current_plan||'无'}；Proxy ${session.current_iteration||'无'}`);if(advance)advanceToCurrent()
+  renderWizardPrelude();if(session.approved_reference)initializeTrajectoryStages();else lockTrajectoryStages();
+  if(session.iteration){Object.entries(session.iteration.videos).forEach(([id,url])=>$('proxy-'+id.replaceAll('_','-')).src=url);$('result-summary').textContent=`${session.workflow_step==='complete'?'全部七步已完成；':''}${session.iteration.iteration_id}：真实渲染状态 ${session.iteration.status}，自动几何检查 ${session.iteration.evaluation.automatic_passed?'通过':'未通过'}。`}
+  const parts=[`步骤 ${session.workflow_step||'prompt'}`,`场景方案 ${session.current_scene_plan||'无'}`,`Reference ${session.current_reference||'无'}`];if(trajectoryInitialized)parts.push(`轨迹 ${session.current_staging||'无'}`,`机位方案 ${session.current_plan||'无'}`);setStatus(parts.join('；'));if(advance)advanceToCurrent()
 }
+
+$('add-scene-actor').onclick=()=>{addActorRow();updateSceneEditState()};$('add-scene-object').onclick=()=>{addObjectRow();updateSceneEditState()};
+$('stage-scene-plan').addEventListener('input',updateSceneEditState);$('stage-scene-plan').addEventListener('change',updateSceneEditState);['story-prompt','story-duration'].forEach(id=>$(id).addEventListener('input',updateSceneEditState));document.querySelectorAll('.card').forEach(card=>card.addEventListener('toggle',()=>{if(card.dataset.locked==='true'&&card.open)card.open=false}));
+$('generate-scene').onclick=async()=>{try{const story_prompt=$('story-prompt').value.trim(),duration_seconds=Number($('story-duration').value);if(!story_prompt)throw Error('请先输入故事提示。');if(!Number.isFinite(duration_seconds)||duration_seconds<=0)throw Error('请输入有效的完整视频时长。');setStatus('正在调用一次 Agent 生成场景草案……');await postJSON('/api/scene-plans',{story_prompt,duration_seconds});await refresh(true)}catch(e){setStatus(e.message,true)}};
+$('save-scene-plan').onclick=async()=>{try{const id=session.current_scene_plan;if(!id)throw Error('当前没有可保存的场景方案。');setStatus('正在保存本地场景参数新版本……');await postJSON(`/api/scene-plans/${id}/save`,{draft:readScenePlanForm(),story_prompt:$('story-prompt').value.trim(),parent_scene_plan_id:id});await refresh(true)}catch(e){setStatus(e.message,true)}};
+$('approve-scene-plan').onclick=async()=>{try{const id=session.current_scene_plan;if(!id)throw Error('当前没有可批准的场景方案。');if(sceneFormDirty())throw Error('场景参数有未保存修改，请先保存为新 SP。');await postJSON(`/api/scene-plans/${id}/approve`,{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
+async function requestSceneRewrite(feedback){
+  const text=feedback.trim();if(!text)throw Error('请先填写明确的修改意见。');setStatus('正在按反馈生成新的场景版本……');await postJSON('/api/scene-plans',{story_prompt:$('story-prompt').value.trim(),duration_seconds:Number($('story-duration').value),feedback:text,previous_draft:readScenePlanForm()});await refresh(true)
+}
+$('rewrite-scene-plan').onclick=async()=>{try{await requestSceneRewrite($('scene-feedback').value)}catch(e){setStatus(e.message,true)}};
+$('return-to-scene-plan').onclick=()=>{$('stage-reference-review').open=false;$('stage-scene-plan').open=true;$('stage-scene-plan').scrollIntoView({behavior:'smooth',block:'start'});setStatus('已返回场景参数；保存或重写后会生成新的 SP 版本。')};
+$('rewrite-reference').onclick=async()=>{try{await requestSceneRewrite($('reference-feedback').value)}catch(e){setStatus(e.message,true)}};
+$('render-reference').onclick=async()=>{try{const id=session.approved_scene_plan;if(!id)throw Error('请先批准场景方案。');setStatus('Blender 正在渲染完整 Reference……');const result=await postJSON(`/api/scene-plans/${id}/render`,{}),referenceId=result.reference_id||result.job_id?.replace(/^reference-/,'')||session.current_reference;if(!referenceId)throw Error('渲染任务没有返回 Reference ID。');pollReference(referenceId)}catch(e){setStatus(e.message,true)}};
+async function pollReference(referenceId){const response=await fetch('/api/jobs/reference-'+referenceId),job=await response.json();if(!response.ok||job.error){setStatus(job.error||response.statusText,true);return}if(['queued','rendering'].includes(job.status)){setTimeout(()=>pollReference(referenceId),1000);return}await refresh(true);setStatus('Reference 渲染状态：'+job.status,job.status!=='succeeded')}
+$('approve-reference').onclick=async()=>{try{const id=session.current_reference;if(!id)throw Error('当前没有可批准的 Reference。');await postJSON(`/api/references/${id}/approve`,{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
 
 $('trajectory-plane').onclick=e=>{const track=currentTrack();if(!track)return;const k=Number($('staging-keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('该关键帧位于冻结前缀，不能修改。',true);return}pushHistory();const r=e.currentTarget.getBoundingClientRect();track.points[k].x=Math.max(0,Math.min(1,(e.clientX-r.left)/r.width));track.points[k].y=Math.max(0,Math.min(1,(e.clientY-r.top)/r.height));advanceStagingKeyframe();drawStaging();updateStagingEditState();setStatus(`${track.target.id} K${k} 已移动，已自动进入下一个 K，尚未保存。`)};
 $('target-select').onchange=()=>{drawStaging();updateStagingEditState()};$('staging-keyframe').onchange=drawStaging;

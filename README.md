@@ -5,12 +5,14 @@ VideoActAgent 把“文字故事 → 可执行 Blender Proxy → 人工导演确
 ## 当前架构
 
 ```text
-故事 Prompt + 单段 ShotScript
-        ↓
-完整 5 秒 Blender 参考 Proxy
-        ↓
-DeepSeek 分配 Master / Follow / Reverse 三机位职责
-        ↓  人工批准规划
+故事 Prompt
+        ↓  DeepSeek-v4-flash 生成受约束场景草案
+人工表单修改并批准 ShotScript
+        ↓  固定 Blender 编译器
+完整参考 Proxy + 人工修改人物/物体轨迹
+        ↓  人工批准轨迹
+DeepSeek-v4-flash 分配 Master / Follow / Reverse 三机位职责
+        ↓  人工批准职责
 确定性编译三套 K0–K4 摄像机轨迹
         ↓  人工可编辑摄像机点
 Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject EXR
@@ -21,18 +23,18 @@ Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject
 仓库保留两个互不替换的界面：
 
 - `director-loop`：原单摄像机人工标注器，端口 8769。
-- `director-multicam`：单页三阶段向导；先人工批准人物/物体轨迹，再由 Agent 规划三机位，端口 8770。
+- `director-multicam`：打开已有 ShotScript 工作区的原多机位页面，端口 8770。
+- `director-wizard`：从 Prompt 开始的单页七阶段向导，复用上述多机位后半程，端口 8770。
 
-日常只需启动对应页面：
+新项目日常只需一条命令：
 
 ```powershell
-python -m videoactagent.cli director-loop serve --manifest runs/work/director_loop_v1/station_reunion/director_loop_manifest.json
-python -m videoactagent.cli director-multicam serve --manifest runs/work/agent_multicam_suite_20260801/station_reunion/multicam_manifest.json
+.\.venv\Scripts\python.exe -m videoactagent.cli director-wizard start --blender D:\blender\blender.exe --workspace runs\work\my_story --port 8770
 ```
 
-浏览器打开 `http://127.0.0.1:8770`。操作顺序是：看完整参考视频 → 看 Agent 三机位职责 → 批准规划 → 修改摄像机 K0–K4 → 渲染三机位 Proxy → 批准 Proxy。只有“生成 / 重规划职责”会调用 DeepSeek，每次一次、零自动重试。
+浏览器打开 `http://127.0.0.1:8770`，依次完成：输入 Prompt → 审批场景表单 → 审批完整 Reference Proxy → 审批人物/物体轨迹 → 审批三机位职责 → 审批三视角 Proxy。每次批准后页面自动进入下一步；可以返回旧版本重新分叉，旧证据不会覆盖。
 
-DeepSeek 只读取环境变量名 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`，可选 `DEEPSEEK_MODEL`；密钥不会写入请求证据。详细说明见 [docs/USAGE.md](docs/USAGE.md)，本次真实结果见 [docs/MULTICAM_EXPERIMENT.md](docs/MULTICAM_EXPERIMENT.md)。
+DeepSeek 只读取 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，模型固定为 `deepseek-v4-flash`。只有用户点击生成或重规划才调用 API，每次一次、零自动重试；密钥不会写入证据。DeepSeek 只生成受约束 JSON，本地 [Blender 编译器](videoactagent/blender_proxy.py) 负责生成真实 `.blend` 和 MP4，不执行 LLM 代码。详细说明见 [docs/USAGE.md](docs/USAGE.md)。
 
 ## 已完成与限制
 
