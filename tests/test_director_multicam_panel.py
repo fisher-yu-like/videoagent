@@ -196,6 +196,43 @@ process.stdout.write(String(
         ):
             self.assertIn(javascript_contract, self.html)
 
+    def test_camera_canvas_viewport_includes_camera_positions_outside_scene_bounds(self):
+        self.assertIn("function cameraViewportBounds", self.html)
+        helper = self.html.split("function cameraViewportBounds", 1)[1].split(
+            "function worldToCanvas", 1
+        )[0]
+        javascript = """
+function cameraViewportBounds%s
+const base=[-5,5,-4,4];
+const bundle={cameras:{camera_a:{states:[
+  {position:[0.33,-7.61,3],look_at:[0,0,1]},
+  {position:[0.33,-7.61,3],look_at:[1,0,1]}
+]},camera_b:{states:[{position:[-6.62,-3.62,2],look_at:[0,0,1]}]}}};
+const bounds=cameraViewportBounds(bundle,base);
+if(!(bounds[0] < -6.62 && bounds[1] > 5 && bounds[2] < -7.61 && bounds[3] > 4))process.exit(1);
+process.stdout.write('viewport-safe');
+""" % helper
+        result = subprocess.run(
+            ["node", "-e", javascript], capture_output=True, text=True,
+            encoding="utf-8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "viewport-safe")
+
+    def test_staging_stage_exposes_proxy_rerender_entrypoint_after_new_trajectory(self):
+        for html_contract in (
+            'id="rerender-proxy-from-staging"',
+            "用当前轨迹重新渲染 Proxy",
+            "保存新轨迹会使旧机位方案失效",
+        ):
+            self.assertIn(html_contract, self.html)
+        for javascript_contract in (
+            "$('rerender-proxy-from-staging').disabled",
+            "$('rerender-proxy-from-staging').onclick",
+            "$('render-proxy').click()",
+        ):
+            self.assertIn(javascript_contract, self.html)
+
     def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
         for javascript_contract in (
             "`/api/plans/${session.approved_plan}/revise`",

@@ -128,11 +128,12 @@
       <div class="row">
         <button id="save-staging">保存为新轨迹版本</button>
         <button id="approve-staging" class="primary">批准人物/物体轨迹</button>
+        <button id="rerender-proxy-from-staging" type="button">用当前轨迹重新渲染 Proxy</button>
         <button id="undo-staging">撤销上一步</button>
         <button id="clear-staging-drawing">清除所选目标的本次绘制</button>
         <span id="staging-dirty" class="hint">本次编辑：无未保存修改</span>
       </div>
-      <p class="hint">彩色折线是人物或物体的完整路径，实心点是当前 K 帧。保存会生成不可变的 S 版本；只有批准后，DeepSeek 才能规划摄像机。</p>
+      <p class="hint">彩色折线是人物或物体的完整路径，实心点是当前 K 帧。保存会生成不可变的 S 版本；保存新轨迹会使旧机位方案失效，需重新批准轨迹并批准新的机位方案后，这里的 Proxy 按钮才会启用。</p>
     </div>
   </details>
 
@@ -158,7 +159,7 @@
         <label>画面倾斜角 <input id="roll" type="number" step="0.5"></label>
       </div>
       <canvas id="camera-plane" width="1000" height="430"></canvas>
-      <p id="camera-trajectory-context-hint" class="hint">人物参考轨迹用橙色、物体参考轨迹用紫色显示，包含名称和 K0–K4 点；它们只作构图参考，不能在此处编辑。青色实线方点是摄像机位置，绿色虚线圆点是摄像机注视点。先选 Camera A/B/C、K0–K4 和编辑模式，再点击平面；数值框可分别调整位置高度、注视高度、焦距与 Roll。</p>
+      <p id="camera-trajectory-context-hint" class="hint">人物参考轨迹用橙色、物体参考轨迹用紫色显示，包含名称和 K0–K4 点；它们只作构图参考，不能在此处编辑。画布会自动包含所有机位的位置和注视点，因此场景边界外的 K0 也可以看到并修改。青色实线方点是摄像机位置，绿色虚线圆点是摄像机注视点。先选 Camera A/B/C、K0–K4 和编辑模式，再点击平面；数值框可分别调整位置高度、注视高度、焦距与 Roll。</p>
     </div>
   </details>
 
@@ -189,7 +190,7 @@
   <div class="status"><b>状态：</b><span id="status">正在读取工作区……</span></div>
 
 <script>
-const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,currentCamera='camera_a',cameraEditMode='position',resultMutationBusy=false,loadedScenePlanId=null,scenePlanDraft=null,trajectoryInitialized=false;
+const $=id=>document.getElementById(id);let session=null,trajectory=null,savedTrajectory=null,editHistory=[],bundle=null,cameraViewport=null,currentCamera='camera_a',cameraEditMode='position',resultMutationBusy=false,loadedScenePlanId=null,scenePlanDraft=null,trajectoryInitialized=false;
 const videos=[$('proxy-camera-a'),$('proxy-camera-b'),$('proxy-camera-c')];
 async function postJSON(url,data){const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});const v=await r.json();if(!r.ok||v.error)throw Error(v.error||r.statusText);return v}
 function author(){return $('author').value.trim()||'human-director'}
@@ -291,8 +292,14 @@ function advanceStagingKeyframe(){const current=Number($('staging-keyframe').val
 function fillTargets(){const selected=$('target-select').value;$('target-select').replaceChildren();trajectory.tracks.forEach(track=>{const option=document.createElement('option');option.value=track.target.id;option.textContent=(track.target.type==='actor'?'人物 ':'物体 ')+track.target.id;$('target-select').append(option)});if([...$('target-select').options].some(x=>x.value===selected))$('target-select').value=selected}
 function drawGrid(canvas){const ctx=canvas.getContext('2d');ctx.clearRect(0,0,canvas.width,canvas.height);ctx.strokeStyle='#26354a';for(let i=0;i<=10;i++){ctx.beginPath();ctx.moveTo(i*100,0);ctx.lineTo(i*100,430);ctx.stroke()}for(let i=0;i<=5;i++){ctx.beginPath();ctx.moveTo(0,i*86);ctx.lineTo(1000,i*86);ctx.stroke()}return ctx}
 function drawStaging(){const ctx=drawGrid($('trajectory-plane'));if(!trajectory)return;const colors=['#ffca62','#69d6ff','#e48cff','#71df91','#ff7f91'];const chosen=$('target-select').value,k=Number($('staging-keyframe').value.slice(1));trajectory.tracks.forEach((track,i)=>{ctx.strokeStyle=colors[i%colors.length];ctx.lineWidth=track.target.id===chosen?4:2;ctx.beginPath();track.points.forEach((p,j)=>{const x=p.x*1000,y=p.y*430;j?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();track.points.forEach((p,j)=>{ctx.fillStyle=colors[i%colors.length];ctx.beginPath();ctx.arc(p.x*1000,p.y*430,track.target.id===chosen&&j===k?9:5,0,7);ctx.fill();if(j===k)ctx.fillText(track.target.id+' K'+j,p.x*1000+10,p.y*430)})})}
-function worldToCanvas(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[(x-minX)/(maxX-minX)*1000,(maxY-y)/(maxY-minY)*430]}
-function canvasToWorld(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[minX+x/1000*(maxX-minX),maxY-y/430*(maxY-minY)]}
+function cameraViewportBounds(value,baseBounds){
+  const points=[[baseBounds[0],baseBounds[2]],[baseBounds[1],baseBounds[3]]];
+  Object.values(value?.cameras||{}).forEach(camera=>camera.states.forEach(state=>['position','look_at'].forEach(field=>points.push([state[field][0],state[field][1]]))));
+  const xs=points.map(point=>point[0]),ys=points.map(point=>point[1]),minX=Math.min(...xs),maxX=Math.max(...xs),minY=Math.min(...ys),maxY=Math.max(...ys),padX=Math.max((maxX-minX)*.08,.5),padY=Math.max((maxY-minY)*.08,.5);
+  return [minX-padX,maxX+padX,minY-padY,maxY+padY]
+}
+function worldToCanvas(x,y){const [minX,maxX,minY,maxY]=cameraViewport||session.world_bounds;return[(x-minX)/(maxX-minX)*1000,(maxY-y)/(maxY-minY)*430]}
+function canvasToWorld(x,y){const [minX,maxX,minY,maxY]=cameraViewport||session.world_bounds;return[minX+x/1000*(maxX-minX),maxY-y/430*(maxY-minY)]}
 function editCameraPoint(state,mode,point){const field=mode==='look_at'?'look_at':'position';state[field][0]=point[0];state[field][1]=point[1]}
 function drawTrajectoryContext(ctx){
   if(!trajectory||!session?.world_bounds)return;
@@ -306,7 +313,7 @@ function drawTrajectoryContext(ctx){
   ctx.restore()
 }
 function drawCamera(){
-  const ctx=drawGrid($('camera-plane'));drawTrajectoryContext(ctx);if(!bundle)return;const states=bundle.cameras[currentCamera].states,current=Number($('keyframe').value.slice(1));
+  cameraViewport=cameraViewportBounds(bundle,session.world_bounds);const ctx=drawGrid($('camera-plane'));drawTrajectoryContext(ctx);if(!bundle)return;const states=bundle.cameras[currentCamera].states,current=Number($('keyframe').value.slice(1));
   const drawPath=(field,color,dashed)=>{ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=3;if(dashed)ctx.setLineDash([8,6]);else ctx.setLineDash([]);ctx.beginPath();states.forEach((state,k)=>{const q=worldToCanvas(state[field][0],state[field][1]);k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])});ctx.stroke();states.forEach((state,k)=>{const q=worldToCanvas(state[field][0],state[field][1]),selected=k===current&&cameraEditMode===field;ctx.beginPath();if(field==='position')ctx.rect(q[0]-(selected?8:5),q[1]-(selected?8:5),selected?16:10,selected?16:10);else ctx.arc(q[0],q[1],selected?8:5,0,Math.PI*2);ctx.fill();ctx.fillText((field==='position'?'位置 ':'注视 ')+'K'+k,q[0]+10,q[1]+(field==='position'?-8:14))})};
   drawPath('position','#00d8ff',false);drawPath('look_at','#58d68d',true);ctx.setLineDash([])
 }
@@ -331,6 +338,7 @@ function setButtons(){
   $('create-plan').disabled=!session.approved_staging;
   $('approve-plan').disabled=!session.current_plan||session.approved_plan===session.current_plan;
   $('render-proxy').disabled=!session.approved_plan;
+  $('rerender-proxy-from-staging').disabled=!session.approved_plan||!bundle;
   $('approve-proxy').disabled=!session.current_iteration||session.approved_iteration===session.current_iteration;
   const resultReady=canMutateResult(session,resultMutationBusy);
   $('revise-camera-plan').disabled=!resultReady;
@@ -343,7 +351,7 @@ function initializeTrajectoryStages(){
   fillTargets();drawStaging();renderPlan();tabs();syncFields();drawCamera();setButtons();setStageAccess();trajectoryInitialized=true;return true
 }
 function lockTrajectoryStages(){
-  ['stage-staging','stage-camera','stage-result'].forEach(id=>{$(id).hidden=true;$(id).open=false});trajectory=null;savedTrajectory=null;editHistory=[];bundle=null;trajectoryInitialized=false
+  ['stage-staging','stage-camera','stage-result'].forEach(id=>{$(id).hidden=true;$(id).open=false});trajectory=null;savedTrajectory=null;editHistory=[];bundle=null;cameraViewport=null;trajectoryInitialized=false
 }
 function advanceToCurrent(){const id=workflowCard(),cards=['stage-prompt','stage-scene-plan','stage-reference-review','stage-staging','stage-camera','stage-result'];cards.forEach(x=>$(x).open=x===id);$(id).scrollIntoView({behavior:'smooth',block:'start'})}
 async function refresh(advance=false){
@@ -377,6 +385,7 @@ $('save-staging').onclick=async()=>{try{setStatus('正在保存不可变轨迹�
 $('approve-staging').onclick=async()=>{try{await postJSON('/api/staging/'+session.current_staging+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
 $('create-plan').onclick=async()=>{try{setStatus('正在调用一次 DeepSeek，不自动重试……');await postJSON('/api/plans',{locked_through_keyframe:boundary()});await refresh(false)}catch(e){setStatus(e.message,true)}};
 $('approve-plan').onclick=async()=>{try{await postJSON('/api/plans/'+session.current_plan+'/approve',{author_id:author()});await refresh(true)}catch(e){setStatus(e.message,true)}};
+$('rerender-proxy-from-staging').onclick=()=>{$('stage-camera').open=true;$('stage-camera').scrollIntoView({behavior:'smooth',block:'start'});$('render-proxy').click()};
 $('camera-edit-position').onclick=()=>{cameraEditMode='position';$('camera-edit-position').classList.add('primary');$('camera-edit-look-at').classList.remove('primary');drawCamera()};
 $('camera-edit-look-at').onclick=()=>{cameraEditMode='look_at';$('camera-edit-look-at').classList.add('primary');$('camera-edit-position').classList.remove('primary');drawCamera()};
 $('camera-plane').onclick=e=>{if(!bundle)return;const k=Number($('keyframe').value.slice(1)),start=Number($('edit-start').value.slice(1));if(k<start){setStatus('该摄像机关键帧位于冻结前缀，不能修改。',true);return}const r=e.currentTarget.getBoundingClientRect(),p=canvasToWorld((e.clientX-r.left)/r.width*1000,(e.clientY-r.top)/r.height*430);editCameraPoint(bundle.cameras[currentCamera].states[k],cameraEditMode,p);drawCamera();setStatus(`${currentCamera} K${k} 的${cameraEditMode==='look_at'?'注视点':'位置'}已移动，渲染时会提交。`)};
