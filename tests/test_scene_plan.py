@@ -112,6 +112,32 @@ class ScenePlanTests(unittest.TestCase):
                     preset,
                 )
 
+    def test_static_objects_compile_to_stationary_existing_trajectory_contract(self):
+        value = deepcopy(VALID_DRAFT)
+        value["objects"][0].update({
+            "semantic": "static",
+            "start": [0.0, 0.0],
+            "end": [0.0, 0.0],
+        })
+
+        draft = ScenePlanDraft.from_dict(value)
+        trajectory = TrajectoryInstruction.from_dict(draft.to_trajectory())
+        object_track = trajectory.tracks[-1]
+
+        self.assertEqual(draft.objects[0].semantic, "static")
+        self.assertEqual(object_track.semantic, "move")
+        self.assertEqual(
+            [(point.x, point.y) for point in object_track.points],
+            [(0.5, 0.5)] * 5,
+        )
+
+    def test_static_objects_must_not_change_position(self):
+        value = deepcopy(VALID_DRAFT)
+        value["objects"][0]["semantic"] = "static"
+
+        with self.assertRaisesRegex(ScenePlanError, "static.*same start and end"):
+            ScenePlanDraft.from_dict(value)
+
     def test_scene_plan_requires_exact_fields_and_one_to_three_actors(self):
         for field in (
             "schema_version",

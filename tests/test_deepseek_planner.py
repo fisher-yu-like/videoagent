@@ -241,6 +241,7 @@ class DeepSeekPlannerTests(unittest.TestCase):
             user_payload["allowed_actor_actions"],
             ["walk", "wait", "stand", "approach", "cross", "follow", "carry"],
         )
+        self.assertEqual(user_payload["allowed_object_semantics"], ["move", "static"])
         system_prompt = request_payload["messages"][0]["content"]
         for action in user_payload["allowed_actor_actions"]:
             self.assertIn(action, system_prompt)

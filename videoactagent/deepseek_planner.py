@@ -14,7 +14,12 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 from videoactagent.multicam_plan import MulticamPlanError, load_multicam_plan
-from videoactagent.scene_plan import ACTOR_ACTIONS, ScenePlanDraft, ScenePlanError
+from videoactagent.scene_plan import (
+    ACTOR_ACTIONS,
+    OBJECT_SEMANTICS,
+    ScenePlanDraft,
+    ScenePlanError,
+)
 
 
 MODEL = "deepseek-v4-flash"
@@ -31,6 +36,8 @@ Choose only the listed environment, camera, and object enum values. Use one to t
 Actor action is only a deterministic moving/static label and must be exactly one of:
 {', '.join(ACTOR_ACTIONS)}. Do not imply articulated or complex action generation.
 All actor/object start and end XY coordinates must stay inside world_bounds. IDs must be unique.
+Object semantic must be one of: {', '.join(OBJECT_SEMANTICS)}. A static object must use
+identical start and end coordinates.
 Do not return Markdown, Blender code, extra fields, NaN, Infinity, or invented defaults."""
 
 
@@ -385,6 +392,7 @@ def request_scene_plan(
                 "dolly_out", "truck_left", "truck_right", "pan_left", "pan_right",
             ],
             "allowed_object_primitives": ["cube", "sphere", "cylinder"],
+            "allowed_object_semantics": list(OBJECT_SEMANTICS),
             "allowed_actor_actions": list(ACTOR_ACTIONS),
             "required_json_schema_example": schema_example,
         }

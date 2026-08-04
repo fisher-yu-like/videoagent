@@ -11,6 +11,7 @@ from typing import Any
 
 SCHEMA_VERSION = "scene-plan-1.0"
 ACTOR_ACTIONS = ("walk", "wait", "stand", "approach", "cross", "follow", "carry")
+OBJECT_SEMANTICS = ("move", "static")
 ENVIRONMENT_PRESETS = frozenset({
     "station",
     "city_crosswalk",
@@ -259,10 +260,20 @@ class ScenePlanDraft:
                 raise ScenePlanError(f"{label}.start must be inside world_bounds")
             if not _inside(end, bounds):
                 raise ScenePlanError(f"{label}.end must be inside world_bounds")
+            semantic = _enum(
+                data["semantic"], frozenset(OBJECT_SEMANTICS), f"{label}.semantic"
+            )
+            if semantic == "static" and any(
+                not math.isclose(start_value, end_value, rel_tol=0.0, abs_tol=1e-9)
+                for start_value, end_value in zip(start, end)
+            ):
+                raise ScenePlanError(
+                    f"{label} static object must use the same start and end"
+                )
             objects.append(SceneObject(
                 object_id=_identifier(data["id"], f"{label}.id"),
                 primitive=_enum(data["primitive"], _OBJECT_PRIMITIVES, f"{label}.primitive"),
-                semantic=_enum(data["semantic"], frozenset({"move"}), f"{label}.semantic"),
+                semantic=semantic,
                 start=start,
                 end=end,
             ))
