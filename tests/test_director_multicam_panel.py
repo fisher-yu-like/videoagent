@@ -181,6 +181,21 @@ process.stdout.write(String(
         ):
             self.assertIn(javascript_contract, self.html)
 
+    def test_camera_canvas_shows_readonly_actor_and_object_trajectory_context(self):
+        for html_contract in (
+            'id="camera-trajectory-context-hint"',
+            "人物参考轨迹",
+            "物体参考轨迹",
+        ):
+            self.assertIn(html_contract, self.html)
+        for javascript_contract in (
+            "function drawTrajectoryContext",
+            "trajectory.tracks",
+            "track.target.type==='object'",
+            "drawTrajectoryContext(ctx)",
+        ):
+            self.assertIn(javascript_contract, self.html)
+
     def test_result_feedback_calls_versioned_revision_and_rerender_apis(self):
         for javascript_contract in (
             "`/api/plans/${session.approved_plan}/revise`",

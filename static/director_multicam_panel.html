@@ -158,7 +158,7 @@
         <label>画面倾斜角 <input id="roll" type="number" step="0.5"></label>
       </div>
       <canvas id="camera-plane" width="1000" height="430"></canvas>
-      <p class="hint">青色实线方点是位置，绿色虚线圆点是注视点。先选 Camera A/B/C、K0–K4 和编辑模式，再点击平面；数值框可分别调整位置高度、注视高度、焦距与 Roll。</p>
+      <p id="camera-trajectory-context-hint" class="hint">人物参考轨迹用橙色、物体参考轨迹用紫色显示，包含名称和 K0–K4 点；它们只作构图参考，不能在此处编辑。青色实线方点是摄像机位置，绿色虚线圆点是摄像机注视点。先选 Camera A/B/C、K0–K4 和编辑模式，再点击平面；数值框可分别调整位置高度、注视高度、焦距与 Roll。</p>
     </div>
   </details>
 
@@ -294,8 +294,19 @@ function drawStaging(){const ctx=drawGrid($('trajectory-plane'));if(!trajectory)
 function worldToCanvas(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[(x-minX)/(maxX-minX)*1000,(maxY-y)/(maxY-minY)*430]}
 function canvasToWorld(x,y){const [minX,maxX,minY,maxY]=session.world_bounds;return[minX+x/1000*(maxX-minX),maxY-y/430*(maxY-minY)]}
 function editCameraPoint(state,mode,point){const field=mode==='look_at'?'look_at':'position';state[field][0]=point[0];state[field][1]=point[1]}
+function drawTrajectoryContext(ctx){
+  if(!trajectory||!session?.world_bounds)return;
+  ctx.save();ctx.globalAlpha=.78;ctx.lineWidth=2;ctx.font='12px system-ui';
+  trajectory.tracks.forEach(track=>{
+    const isObject=track.target.type==='object',color=isObject?'#b294ff':'#f2a65a';
+    ctx.strokeStyle=color;ctx.fillStyle=color;ctx.setLineDash(isObject?[7,5]:[3,5]);ctx.beginPath();
+    track.points.forEach((point,index)=>{const q=worldToCanvas(session.world_bounds[0]+point.x*(session.world_bounds[1]-session.world_bounds[0]),session.world_bounds[3]-point.y*(session.world_bounds[3]-session.world_bounds[2]));index?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])});ctx.stroke();
+    ctx.setLineDash([]);track.points.forEach((point,index)=>{const q=worldToCanvas(session.world_bounds[0]+point.x*(session.world_bounds[1]-session.world_bounds[0]),session.world_bounds[3]-point.y*(session.world_bounds[3]-session.world_bounds[2]));ctx.beginPath();ctx.arc(q[0],q[1],4,0,Math.PI*2);ctx.fill();ctx.fillText((isObject?'物体 ':'人物 ')+track.target.id+' K'+index,q[0]+7,q[1]-7)})
+  });
+  ctx.restore()
+}
 function drawCamera(){
-  const ctx=drawGrid($('camera-plane'));if(!bundle)return;const states=bundle.cameras[currentCamera].states,current=Number($('keyframe').value.slice(1));
+  const ctx=drawGrid($('camera-plane'));drawTrajectoryContext(ctx);if(!bundle)return;const states=bundle.cameras[currentCamera].states,current=Number($('keyframe').value.slice(1));
   const drawPath=(field,color,dashed)=>{ctx.strokeStyle=color;ctx.fillStyle=color;ctx.lineWidth=3;if(dashed)ctx.setLineDash([8,6]);else ctx.setLineDash([]);ctx.beginPath();states.forEach((state,k)=>{const q=worldToCanvas(state[field][0],state[field][1]);k?ctx.lineTo(q[0],q[1]):ctx.moveTo(q[0],q[1])});ctx.stroke();states.forEach((state,k)=>{const q=worldToCanvas(state[field][0],state[field][1]),selected=k===current&&cameraEditMode===field;ctx.beginPath();if(field==='position')ctx.rect(q[0]-(selected?8:5),q[1]-(selected?8:5),selected?16:10,selected?16:10);else ctx.arc(q[0],q[1],selected?8:5,0,Math.PI*2);ctx.fill();ctx.fillText((field==='position'?'位置 ':'注视 ')+'K'+k,q[0]+10,q[1]+(field==='position'?-8:14))})};
   drawPath('position','#00d8ff',false);drawPath('look_at','#58d68d',true);ctx.setLineDash([])
 }
