@@ -38,7 +38,9 @@ def _write(path: Path, value: object) -> None:
 def _write_text(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(value, encoding="utf-8")
+    # Write bytes explicitly so Windows newline translation cannot change the
+    # hash that is recorded for the model's raw Python response.
+    temporary.write_bytes(value.encode("utf-8"))
     os.replace(temporary, path)
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 import tempfile
 import unittest
@@ -53,6 +54,7 @@ class DeepSeekCodegenTests(unittest.TestCase):
         self.assertEqual(evidence["api_call_count"], 1)
         self.assertEqual(evidence["retry_count"], 0)
         self.assertTrue((self.output / "generated_scene.py").is_file())
+        self.assertEqual(evidence["code_sha256"], hashlib.sha256((self.output / "generated_scene.py").read_bytes()).hexdigest())
         saved = "".join(p.read_text(encoding="utf-8", errors="ignore") for p in self.output.rglob("*"))
         self.assertNotIn("secret", saved)
         self.assertNotIn("credential=hidden", saved)
