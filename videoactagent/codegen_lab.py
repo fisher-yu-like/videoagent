@@ -11,6 +11,8 @@ from pathlib import Path
 from threading import Condition, Lock, Thread
 from typing import Any, Callable, Mapping
 from urllib.parse import parse_qs, quote, urlsplit
+import argparse
+import sys
 from uuid import uuid4
 
 from videoactagent.codegen_job import generate_codegen_job, prepare_codegen_job, render_codegen_job
@@ -388,3 +390,30 @@ def create_server(config: CodegenLabConfig, *, application: CodegenLabApplicatio
     """Create (but do not start) the independent Codegen Lab HTTP server."""
 
     return _CodegenLabServer(("127.0.0.1", config.port), config, application or CodegenLabApplication(config))
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Independent Codegen Lab browser service")
+    sub = parser.add_subparsers(dest="command", required=True)
+    serve = sub.add_parser("serve", help="serve the Codegen Lab page")
+    serve.add_argument("--workspace", type=Path, required=True)
+    serve.add_argument("--blender", type=Path, required=True)
+    serve.add_argument("--port", type=int, default=8781)
+    args = parser.parse_args(argv)
+    if args.command != "serve":
+        return 2
+    config = CodegenLabConfig(workspace=args.workspace, blender=args.blender, port=args.port)
+    server = create_server(config)
+    print(f"Codegen Lab: http://127.0.0.1:{server.server_port}", flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        server.shutdown()
+        server.server_close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

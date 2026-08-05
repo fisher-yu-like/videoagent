@@ -14,6 +14,7 @@ class ConsoleDispatcherTests(unittest.TestCase):
         )
         self.assertIn("director-loop", COMMANDS)
         self.assertIn("director-multicam", COMMANDS)
+        self.assertEqual(COMMANDS["codegen-lab"], "videoactagent.codegen_lab")
 
     def test_help_lists_commands_and_returns_zero(self):
         from videoactagent.cli import main

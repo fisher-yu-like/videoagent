@@ -12,6 +12,7 @@ COMMANDS = {
     "camera-eval": "videoactagent.camera_eval",
     "closed-loop": "videoactagent.closed_loop",
     "codegen-blender": "videoactagent.codegen_job",
+    "codegen-lab": "videoactagent.codegen_lab",
     "control-bridge": "videoactagent.control_bridge",
     "director-loop": "videoactagent.director_loop",
     "director-multicam": "videoactagent.director_multicam",

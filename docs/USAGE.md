@@ -4,8 +4,29 @@
 
 - `director-loop` 是原来的单摄像机人工循环，界面和数据格式不变。
 - `director-multicam` 是新的多机位向导。人物/物体轨迹先由人批准，再让 Agent 规划三台摄像机。
+- `codegen-lab` 是独立的 DeepSeek Blender 代码生成实验页，不改变前两个页面。
 
 日常操作都在一个网页完成，默认地址是 `http://127.0.0.1:8770`。
+
+## 三个界面的启动方法
+
+从仓库根目录分别启动即可；8769、8770、8781 可以同时运行。8770 的两个命令是二选一。
+
+```powershell
+# 原单机位标注器
+.\.venv\Scripts\python.exe -m videoactagent.cli director-loop serve --manifest runs\work\director_loop_humanoid_v1\station_reunion\director_loop_manifest.json --port 8769
+
+# 已有三机位工作区
+.\.venv\Scripts\python.exe -m videoactagent.cli director-multicam serve --manifest <multicam_manifest.json> --port 8770
+
+# 或：从 Prompt 开始的三机位向导
+.\.venv\Scripts\python.exe -m videoactagent.cli director-wizard start --blender D:\blender\blender.exe --workspace runs\work\my_story --port 8770
+
+# 独立 Codegen Lab
+.\.venv\Scripts\python.exe -m videoactagent.cli codegen-lab serve --workspace C:\Users\sy\Desktop\videoactagent --blender D:\blender\blender.exe --port 8781
+```
+
+Codegen Lab 页面需要填写 Prompt、ShotScript、轨迹 JSON 和受保护工作区。点击“准备作业”只做哈希快照；“真实生成”只调用一次 DeepSeek-v4-pro，失败不会自动重试；随后先 Smoke，再 Full。页面显示的是实际 `job.json`、日志、哈希和 MP4，不把 HTTP 受理状态当成成功。
 
 ## 新页面只做三步
 

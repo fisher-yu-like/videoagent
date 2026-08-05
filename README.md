@@ -25,6 +25,7 @@ Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject
 - `director-loop`：原单摄像机人工标注器，端口 8769。
 - `director-multicam`：打开已有 ShotScript 工作区的原多机位页面，端口 8770。
 - `director-wizard`：从 Prompt 开始的单页七阶段向导，复用上述多机位后半程，端口 8770。
+- `codegen-lab`：独立的 DeepSeek Blender 代码生成与真实本地渲染页面，端口 8781。
 
 新项目日常只需一条命令：
 
@@ -33,6 +34,8 @@ Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject
 ```
 
 浏览器打开 `http://127.0.0.1:8770`，依次完成：输入 Prompt → 审批场景表单 → 审批完整 Reference Proxy → 审批人物/物体轨迹 → 审批三机位职责 → 审批三视角 Proxy。每次批准后页面自动进入下一步；可以返回旧版本重新分叉，旧证据不会覆盖。
+
+Codegen Lab 浏览器打开 `http://127.0.0.1:8781`。它与 8769/8770 独立，可以同时运行；Prepare 不调用 API，点击真实生成才会进行一次 DeepSeek-v4-pro 调用，Smoke 通过后才可 Full。
 
 DeepSeek 只读取 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，模型固定为 `deepseek-v4-flash`。只有用户点击生成或重规划才调用 API，每次一次、零自动重试；密钥不会写入证据。DeepSeek 只生成受约束 JSON，本地 [Blender 编译器](videoactagent/blender_proxy.py) 负责生成真实 `.blend` 和 MP4，不执行 LLM 代码。详细说明见 [docs/USAGE.md](docs/USAGE.md)。
 
