@@ -51,6 +51,8 @@ AST 安全检查 → 本地 Blender 真实渲染 → MP4
 
 新页面只展示 Prompt 输入和最终视频。作业保存在 `runs/work/codegen_blender_v1/PF<n>/`，包含规划尝试、代码尝试、输入快照、日志、视频和 `job.json`；失败作业不返回视频 URL。可以直接使用 `prompts/` 中的示例，例如 `station_reunion.txt`、`city_crosswalk.txt`、`forest_path.txt`、`studio_room.txt`。
 
+一次真实全链路结果见 [Prompt-only Blender Codegen 真实验证](docs/reports/2026-08-05-prompt-codegen-real-verification.md)。
+
 ## 已完成与限制
 
 - 已完成 6 个不同 prompt、不同 ShotScript、不同 Blender 环境的完整 5 秒参考 Proxy，不再复用同一 Proxy。
