@@ -159,7 +159,7 @@ class CodegenLabApplication:
         prepare_fn: Callable[..., Path] = prepare_codegen_job,
         generate_fn: Callable[..., dict[str, Any]] = generate_codegen_job,
         render_fn: Callable[..., dict[str, Any]] = render_codegen_job,
-        prompt_runner: Callable[[str], dict[str, Any]] | None = None,
+        prompt_runner: Callable[[str], dict[str, Any]] | PromptCodegenRunner | None = None,
     ) -> None:
         self.config = config
         self.prepare_fn = prepare_fn
@@ -277,7 +277,7 @@ class CodegenLabApplication:
             operation.stage = "prompt_pipeline"
             operation._condition.notify_all()
         try:
-            operation.result = self.prompt_runner(prompt)
+            operation.result = self.prompt_runner(prompt) if callable(self.prompt_runner) else self.prompt_runner.run(prompt)
             if isinstance(operation.result, Mapping) and isinstance(operation.result.get("job"), str):
                 operation.job_path = operation.result["job"]
             operation.state = "done"
