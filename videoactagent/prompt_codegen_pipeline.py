@@ -129,6 +129,18 @@ def _error_text(exc: BaseException, *, job_root: Path | None = None) -> str:
     return message[-6000:]
 
 
+def _planner_feedback(exc: BaseException) -> str:
+    """Turn a planner validation failure into actionable repair guidance."""
+
+    message = _error_text(exc)
+    if "facing must identify another actor" in message:
+        message += (
+            '\nRepair instruction: when the scene has one actor, set its facing field '
+            'to exactly "movement_direction" or "camera"; never use the actor\'s own id.'
+        )
+    return message[-6000:]
+
+
 def _probe_default(config: PromptPipelineConfig) -> dict[str, Any]:
     protected = _tree_digest(config.protected_workspace)
     guard = _guard_get(config.protected_url)
@@ -246,7 +258,7 @@ class PromptCodegenRunner:
                 _write(job_path, document)
                 break
             except Exception as exc:
-                feedback = _error_text(exc)
+                feedback = _planner_feedback(exc)
                 _write(attempt_dir / "error.json", {"error": feedback})
                 document.update({"planner_attempts": attempt, "planner_evidence": planner_evidence, "updated_at": _now()})
                 _write(job_path, document)

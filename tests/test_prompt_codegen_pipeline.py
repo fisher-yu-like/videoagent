@@ -88,12 +88,13 @@ class PromptCodegenRunnerTests(unittest.TestCase):
         def planner(**kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
-                raise ValueError("scene plan schema is invalid: actors")
+                raise ValueError("DeepSeek scene plan schema is invalid: actors[0].facing must identify another actor")
             return self.planner(**kwargs)
         result = self.make_runner(planner=planner).run("repair the scene")
         self.assertEqual(result["status"], "succeeded")
         self.assertEqual(calls["count"], 2)
         self.assertIn("scene plan schema is invalid", self.planner_feedback[0])
+        self.assertIn("movement_direction", self.planner_feedback[0])
 
     def test_blender_failure_retries_codegen_with_render_log_feedback(self):
         calls = {"count": 0}

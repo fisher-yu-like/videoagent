@@ -38,6 +38,9 @@ Actor action is only a deterministic moving/static label and must be exactly one
 All actor/object start and end XY coordinates must stay inside world_bounds. IDs must be unique.
 Object semantic must be one of: {', '.join(OBJECT_SEMANTICS)}. A static object must use
 identical start and end coordinates.
+For an actor's facing field, use another actor id when there are multiple actors. For a
+single actor, use exactly "movement_direction" or "camera"; never use the actor's own id,
+"start", "end", or an invented direction word.
 Do not return Markdown, Blender code, extra fields, NaN, Infinity, or invented defaults."""
 
 

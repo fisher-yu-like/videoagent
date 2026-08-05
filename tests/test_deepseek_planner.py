@@ -458,6 +458,30 @@ class DeepSeekPlannerTests(unittest.TestCase):
         payload = json.loads(calls[0].data.decode("utf-8"))
         self.assertEqual(payload["model"], "deepseek-v4-flash")
 
+    def test_scene_prompt_explains_single_actor_facing_value(self):
+        calls = []
+        response = json.dumps({
+            "id": "scene-single-actor",
+            "model": "deepseek-v4-pro",
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(VALID_DRAFT)}}],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append(request)
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            request_scene_plan(
+                story_prompt="One actor crosses a station.", duration_seconds=5,
+                output_dir=Path(root) / "SP1", model="deepseek-v4-pro",
+                environ={"DEEPSEEK_API_KEY": "secret", "DEEPSEEK_BASE_URL": "https://example.test/v1"},
+                transport=transport,
+            )
+        system_prompt = json.loads(calls[0].data.decode("utf-8"))["messages"][0]["content"]
+        self.assertIn('single actor', system_prompt.lower())
+        self.assertIn('movement_direction', system_prompt)
+        self.assertIn('never use the actor\'s own id', system_prompt.lower())
+
     def test_scene_plan_rejects_finish_reason_and_schema_without_retry(self):
         bodies = (
             {
