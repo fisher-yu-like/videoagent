@@ -45,8 +45,8 @@ Codegen Lab 浏览器打开 `http://127.0.0.1:8781`。它与 8769/8770 独立，
 用户 Prompt
     ↓ DeepSeek-v4-pro Planner（严格 scene-plan JSON）
 ShotScript + 人物 K0–K4 轨迹
-    ↓ DeepSeek-v4-pro Blender Codegen（受限 build_scene(context)）
-AST 安全检查 → 本地 Blender 真实渲染 → MP4
+    ↓ DeepSeek-v4-pro Blender Codegen（受限 build_scene(context)，只负责场景与相机）
+AST 安全检查 → 可信 Runner 注入输入轨迹关键帧 → 本地 Blender 真实渲染 → MP4
 ```
 
 新页面只展示 Prompt 输入和最终视频。作业保存在 `runs/work/codegen_blender_v1/PF<n>/`，包含规划尝试、代码尝试、输入快照、日志、视频和 `job.json`；失败作业不返回视频 URL。可以直接使用 `prompts/` 中的示例，例如 `station_reunion.txt`、`city_crosswalk.txt`、`forest_path.txt`、`studio_room.txt`。

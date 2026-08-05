@@ -26,7 +26,7 @@
 .\.venv\Scripts\python.exe -m videoactagent.cli codegen-lab serve --workspace C:\Users\sy\Desktop\videoactagent --blender D:\blender\blender.exe --port 8781
 ```
 
-Codegen Lab 现在默认打开 Prompt-only 页面：只需输入一段完整场景 Prompt，页面会自动执行 DeepSeek-v4-pro Planner → ShotScript/人物 K0–K4 轨迹 → DeepSeek-v4-pro Blender Codegen → AST 安全检查 → 本地 Blender 真实渲染。固定默认时长 5 秒、8 FPS、640×360。每个阶段最多三次尝试；只有把上一轮的 schema/安全/Blender 日志错误反馈给下一轮才允许重试。最终页面只显示 MP4，不显示内部代码或路径。
+Codegen Lab 现在默认打开 Prompt-only 页面：只需输入一段完整场景 Prompt，页面会自动执行 DeepSeek-v4-pro Planner → ShotScript/人物 K0–K4 轨迹 → DeepSeek-v4-pro Blender Codegen → AST 安全检查 → 本地 Blender 真实渲染。Codegen 只负责场景和相机，可信 Runner 会在 `build_scene` 返回后按输入轨迹的真实帧范围注入人物位置关键帧，再做轨迹验收。固定默认时长 5 秒、8 FPS、640×360。每个阶段最多三次尝试；只有把上一轮的 schema/安全/Blender 日志错误反馈给下一轮才允许重试。最终页面只显示 MP4，不显示内部代码或路径。
 
 作业证据保存在 `runs/work/codegen_blender_v1/PF<n>/`：`prompt.txt`、`plan/attempt-*`、`source/input.json`、`api/attempt-*`、`renders/smoke/video.mp4`、`render.log` 和 `job.json`。失败作业不返回 `video_url`。旧版 Prepare/Generate/Smoke/Full API 仍保留，供需要手工 ShotScript/轨迹的实验使用。
 
@@ -53,7 +53,7 @@ K0–K4 是整段视频的五个控制点，分别位于 0%、20%、50%、80%、
 每次保存都会建立不可变的 `S` 轨迹目录；轨迹批准、Agent 规划、摄像机批准和 Blender 作业通过 SHA-256 串联。修改轨迹只会取消当前下游选择，不会删除旧计划、旧视频或失败记录。系统不会把自动检查冒充人工批准，也不会自动调用 Seedance、Kling 或 VACE。
 ## 隔离的 DeepSeek Blender Codegen 实验
 
-这是独立于现有 8770 向导的实验后端，不会修改人工标注器或现有 `runs`。它把完整 ShotScript、K0–K4 轨迹和 prompt 快照到 `CG<n>` 作业，然后只允许 DeepSeek-v4-pro 调用一次生成 `build_scene(context)`。代码先经过 AST 安全门，再由本地 Blender 渲染；宿主 runner 会移除 `DEEPSEEK_*` 环境变量，Blender 只接收哈希绑定的输入。
+这是独立于现有 8770 向导的实验后端，不会修改人工标注器或现有 `runs`。它把完整 ShotScript、K0–K4 轨迹和 prompt 快照到 `CG<n>` 作业，然后只允许 DeepSeek-v4-pro 调用一次生成 `build_scene(context)`。代码先经过 AST 安全门，再由本地 Blender 渲染；宿主 runner 会移除 `DEEPSEEK_*` 环境变量，并在场景代码完成后清除模型侧位置曲线、注入哈希绑定输入中的人物轨迹关键帧，Blender 只接收哈希绑定的输入。
 
 ### 五个命令
 
