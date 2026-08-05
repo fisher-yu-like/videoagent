@@ -335,7 +335,6 @@ class CodegenLabApplication:
             except ValueError:
                 relative = ""
             if relative:
-                status["job"] = str(job_path)
                 status["video_url"] = f"/api/artifact?job={quote(str(job_path))}&path={quote(relative)}"
         return status
 

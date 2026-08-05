@@ -107,6 +107,7 @@ class CodegenLabTests(unittest.TestCase):
         self.assertEqual(calls, ["a station meeting"])
         status = app.prompt_status(operation["operation_id"])
         self.assertEqual(status["status"], "succeeded")
+        self.assertNotIn("job", status)
         self.assertTrue(status["video_url"].endswith("renders/smoke/video.mp4"))
 
     def test_prompt_status_hides_video_until_operation_succeeds(self):
