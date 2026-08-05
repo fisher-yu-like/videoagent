@@ -28,6 +28,87 @@ def world_xy(bounds: list[float], x: float, y: float) -> tuple[float, float]:
     return min_x + float(x) * (max_x - min_x), max_y - float(y) * (max_y - min_y)
 
 
+def _clear_location_animation(actor: Any) -> None:
+    """Remove model-authored location curves before applying the input contract."""
+
+    animation_data = getattr(actor, "animation_data", None)
+    action = getattr(animation_data, "action", None)
+    fcurves = getattr(action, "fcurves", None)
+    if fcurves is None:
+        return
+    for fcurve in list(fcurves):
+        if getattr(fcurve, "data_path", None) == "location":
+            fcurves.remove(fcurve)
+
+
+def _actor_z(actor: Any) -> float:
+    """Keep the generated actor's existing height while enforcing world X/Y."""
+
+    matrix = getattr(actor, "matrix_world", None)
+    translation = getattr(matrix, "translation", None)
+    if translation is not None:
+        try:
+            return float(translation.z)
+        except AttributeError:
+            return float(translation[2])
+    location = getattr(actor, "location")
+    try:
+        return float(location.z)
+    except AttributeError:
+        return float(location[2])
+
+
+def _set_actor_world_xy(actor: Any, x: float, y: float, z: float) -> None:
+    """Set an actor's world position, including scenes that parent the actor."""
+
+    if getattr(actor, "parent", None) is None:
+        actor.location = (x, y, z)
+        return
+    # Blender's matrix_world accepts a Vector-like value. Keep this import local
+    # so the module remains importable by ordinary host-Python unit tests.
+    try:
+        from mathutils import Vector  # type: ignore
+
+        actor.matrix_world.translation = Vector((x, y, z))
+    except (ImportError, AttributeError, TypeError):
+        # The fallback keeps simple test doubles and legacy Blender objects usable.
+        actor.location = (x, y, z)
+
+
+def apply_actor_trajectory(
+    actor_objects: dict[str, Any],
+    trajectory_by_actor: dict[str, Any],
+    *,
+    frame_start: int,
+    frame_end: int,
+) -> None:
+    """Apply the input trajectory after model code has built the scene.
+
+    The model is responsible for scene layout and appearance, but the trusted
+    runner owns the actor path. This prevents malformed model-side calls to the
+    frame helper from silently moving keyframes to the wrong part of the clip.
+    """
+
+    for actor_id, actor in actor_objects.items():
+        track = trajectory_by_actor[actor_id]
+        _clear_location_animation(actor)
+        z = _actor_z(actor)
+        for point in track["points"]:
+            world = point["world"]
+            frame = frame_for_time(frame_start, frame_end, point["t"])
+            _set_actor_world_xy(actor, float(world[0]), float(world[1]), z)
+            actor.keyframe_insert(data_path="location", frame=frame)
+
+        animation_data = getattr(actor, "animation_data", None)
+        action = getattr(animation_data, "action", None)
+        fcurves = getattr(action, "fcurves", None)
+        if fcurves is not None:
+            for fcurve in fcurves:
+                if getattr(fcurve, "data_path", None) == "location":
+                    for keyframe in fcurve.keyframe_points:
+                        keyframe.interpolation = "LINEAR"
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -123,6 +204,12 @@ def main(argv: list[str] | None = None) -> int:
         for actor_id in actor_ids:
             if bpy.data.objects.get(actor_id) is None:
                 raise ValueError(f"generated scene is missing actor object: {actor_id}")
+        apply_actor_trajectory(
+            {actor_id: bpy.data.objects[actor_id] for actor_id in actor_ids},
+            trajectory_by_actor,
+            frame_start=frame_start,
+            frame_end=frame_end,
+        )
         camera = bpy.data.objects.get("DirectorCamera")
         if camera is None or camera.type != "CAMERA":
             raise ValueError("generated scene is missing camera DirectorCamera")

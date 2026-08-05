@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 from unittest.mock import patch
 
-from videoactagent.codegen_blender_entry import frame_for_time, world_xy
+from videoactagent.codegen_blender_entry import apply_actor_trajectory, frame_for_time, world_xy
 from videoactagent.codegen_blender_runner import CodegenBlenderRunnerError, run_codegen_blender
 from videoactagent.codegen_safety import validate_generated_code
 
@@ -18,6 +18,40 @@ class CodegenBlenderEntryTests(unittest.TestCase):
         self.assertEqual(frame_for_time(1, 40, 0.0), 1)
         self.assertEqual(frame_for_time(1, 40, 1.0), 40)
         self.assertEqual(world_xy([-0.5, 0.5, -1.0, 1.0], 0.25, 0.25), (-0.25, 0.5))
+
+    def test_host_trajectory_enforcement_uses_render_contract_frames(self):
+        class FakeActor:
+            def __init__(self):
+                self.location = [99.0, 99.0, 1.25]
+                self.animation_data = None
+                self.keyframes = []
+
+            def keyframe_insert(self, *, data_path, frame):
+                self.keyframes.append((data_path, frame, tuple(self.location)))
+
+        actor = FakeActor()
+        track = {
+            "target": {"id": "traveler"},
+            "points": [
+                {"keyframe_id": "K0", "t": 0.0, "world": [-4.0, 0.0]},
+                {"keyframe_id": "K1", "t": 0.2, "world": [-2.4, 0.0]},
+                {"keyframe_id": "K2", "t": 0.5, "world": [0.0, 0.0]},
+                {"keyframe_id": "K3", "t": 0.8, "world": [2.4, 0.0]},
+                {"keyframe_id": "K4", "t": 1.0, "world": [4.0, 0.0]},
+            ],
+        }
+
+        apply_actor_trajectory(
+            {"traveler": actor},
+            {"traveler": track},
+            frame_start=1,
+            frame_end=40,
+        )
+
+        self.assertEqual([item[1] for item in actor.keyframes], [1, 9, 21, 32, 40])
+        self.assertEqual(actor.keyframes[0][2], (-4.0, 0.0, 1.25))
+        self.assertEqual(actor.keyframes[2][2], (0.0, 0.0, 1.25))
+        self.assertEqual(actor.keyframes[-1][2], (4.0, 0.0, 1.25))
 
     def test_handwritten_fixture_passes_same_gate_as_model_code(self):
         path = Path(__file__).parent / "fixtures" / "codegen" / "safe_station_scene.py"

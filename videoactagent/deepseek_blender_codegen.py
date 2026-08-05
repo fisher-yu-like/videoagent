@@ -127,7 +127,8 @@ def request_blender_code(
             "context['input'], context['world_xy'] and context['frame_for_time'], never "
             "context.scene. Use only bpy, math and mathutils; every used module must have "
             "an explicit import (especially import math). Do not import files, render, "
-            "network, processes or environment APIs. The trusted runner owns all rendering."
+            "network, processes or environment APIs. The trusted runner owns all rendering "
+            "and actor trajectory keyframes."
         )
         user_payload = {
             "task": "Build one complete unbroken station scene from the immutable input.",
@@ -135,7 +136,8 @@ def request_blender_code(
             "requirements": [
                 "Create one Blender object per actor using the exact actor IDs.",
                 "Create a camera named DirectorCamera and a visible environment.",
-                "Insert actor K0-K4 location keyframes from the normalized trajectory.",
+                "Do not insert actor location keyframes; the trusted runner applies the "
+                "immutable normalized trajectory after build_scene returns.",
                 "Do not read or write files and do not call render operators.",
             ],
         }
