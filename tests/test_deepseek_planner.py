@@ -406,6 +406,58 @@ class DeepSeekPlannerTests(unittest.TestCase):
         self.assertEqual(user_payload["previous_draft"], VALID_DRAFT)
         self.assertEqual(payload["model"], "deepseek-v4-flash")
 
+    def test_scene_plan_accepts_model_override_and_repair_feedback(self):
+        calls = []
+        response = json.dumps({
+            "id": "scene-pro",
+            "model": "deepseek-v4-pro",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": json.dumps(VALID_DRAFT)},
+            }],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append(request)
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            output = Path(root) / "PF1"
+            result = request_scene_plan(
+                story_prompt="A station meeting.", duration_seconds=5,
+                output_dir=output, model="deepseek-v4-pro",
+                feedback="Previous response used an invalid environment_preset.",
+                environ={"DEEPSEEK_API_KEY": "secret", "DEEPSEEK_BASE_URL": "https://example.test/v1"},
+                transport=transport,
+            )
+            payload = json.loads(calls[0].data.decode("utf-8"))
+            user_payload = json.loads(payload["messages"][1]["content"])
+        self.assertEqual(payload["model"], "deepseek-v4-pro")
+        self.assertEqual(user_payload["feedback"], "Previous response used an invalid environment_preset.")
+        self.assertEqual(result["model"], "deepseek-v4-pro")
+
+    def test_scene_plan_default_model_remains_flash(self):
+        calls = []
+        response = json.dumps({
+            "id": "scene-default",
+            "model": "deepseek-v4-flash",
+            "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(VALID_DRAFT)}}],
+        }).encode()
+
+        def transport(request, timeout):
+            calls.append(request)
+            return FakeResponse(response)
+
+        with tempfile.TemporaryDirectory() as root:
+            request_scene_plan(
+                story_prompt="A station meeting.", duration_seconds=5,
+                output_dir=Path(root) / "SP1",
+                environ={"DEEPSEEK_API_KEY": "secret", "DEEPSEEK_BASE_URL": "https://example.test/v1"},
+                transport=transport,
+            )
+        payload = json.loads(calls[0].data.decode("utf-8"))
+        self.assertEqual(payload["model"], "deepseek-v4-flash")
+
     def test_scene_plan_rejects_finish_reason_and_schema_without_retry(self):
         bodies = (
             {

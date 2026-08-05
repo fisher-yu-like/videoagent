@@ -348,6 +348,7 @@ def request_multicam_plan(
 def request_scene_plan(
     *, story_prompt: str, duration_seconds: float, output_dir: Path | str,
     feedback: str | None = None, previous_draft: Mapping[str, Any] | None = None,
+    model: str = MODEL,
     environ: Mapping[str, str] | None = None,
     transport: Callable[..., Any] = urlopen,
 ) -> dict[str, Any]:
@@ -358,13 +359,15 @@ def request_scene_plan(
     started_at = _now()
     started = time.monotonic()
     environment = os.environ if environ is None else environ
+    if model not in {"deepseek-v4-flash", "deepseek-v4-pro"}:
+        raise DeepSeekPlannerError("model must be deepseek-v4-flash or deepseek-v4-pro")
     key = environment.get("DEEPSEEK_API_KEY", "").strip()
     raw_base = environment.get("DEEPSEEK_BASE_URL", "").strip()
     if not key or not raw_base:
         evidence = _failure_evidence(
             status="environment_blocked", started_at=started_at,
             elapsed=time.monotonic() - started, api_calls=0, base_url=None,
-            model=MODEL, error="DeepSeek environment variables are unavailable",
+            model=model, error="DeepSeek environment variables are unavailable",
         )
         _write(output / "evidence.json", evidence)
         raise DeepSeekPlannerError(evidence["error"])
@@ -382,6 +385,10 @@ def request_scene_plan(
             raise DeepSeekPlannerError("duration_seconds must be a finite positive number")
         if feedback is not None and (not isinstance(feedback, str) or not feedback.strip()):
             raise DeepSeekPlannerError("feedback must be a non-empty string when supplied")
+        if feedback is not None and len(feedback.strip()) > 2000:
+            raise DeepSeekPlannerError("feedback must be at most 2000 characters")
+        if feedback is not None:
+            feedback = feedback.strip()
         if previous_draft is not None and not isinstance(previous_draft, Mapping):
             raise DeepSeekPlannerError("previous_draft must be an object when supplied")
 
@@ -439,7 +446,7 @@ def request_scene_plan(
         if previous_draft is not None:
             user_payload["previous_draft"] = dict(previous_draft)
         request_payload = {
-            "model": MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": SCENE_JSON_PROMPT},
                 {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
@@ -508,7 +515,7 @@ def request_scene_plan(
             "api_call_count": 1,
             "retry_count": 0,
             "base_url": redacted_base,
-            "model": MODEL,
+            "model": model,
             "response_artifact": "response.json",
             "response_id": response.get("id"),
             "usage": response.get("usage"),
@@ -527,7 +534,7 @@ def request_scene_plan(
         evidence = _failure_evidence(
             status="failed", started_at=started_at, elapsed=time.monotonic() - started,
             api_calls=1 if (output / "request.json").is_file() else 0,
-            base_url=base_url, model=MODEL, error=str(exc),
+            base_url=base_url, model=model, error=str(exc),
             response_artifact=_response_artifact(output),
         )
         _write(output / "evidence.json", evidence)
@@ -540,7 +547,7 @@ def request_scene_plan(
         evidence = _failure_evidence(
             status="failed", started_at=started_at, elapsed=time.monotonic() - started,
             api_calls=1 if (output / "request.json").is_file() else 0,
-            base_url=redacted_base, model=MODEL,
+            base_url=redacted_base, model=model,
             error=f"{type(exc).__name__}: {exc}",
             response_artifact=_response_artifact(output),
         )
