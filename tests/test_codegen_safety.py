@@ -50,6 +50,14 @@ class CodegenSafetyTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(CodegenSafetyError):
                 validate_generated_code(code)
 
+    def test_rejects_unimported_math_reference(self):
+        with self.assertRaisesRegex(CodegenSafetyError, "math.*import"):
+            validate_generated_code("import bpy\ndef build_scene(context):\n    return math.radians(90)\n")
+
+    def test_rejects_attribute_access_on_dict_context(self):
+        with self.assertRaisesRegex(CodegenSafetyError, "context.*dict"):
+            validate_generated_code("import bpy\ndef build_scene(context):\n    return context.scene\n")
+
     def test_rejects_large_code(self):
         code = "def build_scene(context):\n    x = '" + ("a" * 40960) + "'\n"
         with self.assertRaisesRegex(CodegenSafetyError, "40 KiB"):

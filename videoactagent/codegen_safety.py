@@ -17,6 +17,10 @@ BLOCKED_BPY_PREFIXES = {
     "bpy.data.libraries.load", "bpy.context.preferences",
 }
 MAX_CODE_BYTES = 40 * 1024
+if hasattr(ast, "Constant"):
+    _CONSTANT_TYPES = (ast.Constant,)
+else:
+    _CONSTANT_TYPES = (ast.Num, ast.Str, ast.Bytes, ast.NameConstant)
 
 
 class CodegenSafetyError(ValueError):
@@ -87,15 +91,22 @@ def validate_generated_code(code: str) -> dict[str, Any]:
             if dotted and any(dotted == prefix or dotted.startswith(prefix + ".") for prefix in BLOCKED_BPY_PREFIXES):
                 raise _error(f"blocked {dotted}", node)
 
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            if node.value.id == "context":
+                raise _error("context is a dict; use context['scene'] or context['input']", node)
+            if node.value.id in {"math", "mathutils"} and node.value.id not in imports:
+                raise _error(f"module {node.value.id} is used without an explicit import", node)
+
     allowed_top_level = (ast.Import, ast.ImportFrom, ast.FunctionDef, ast.Assign, ast.AnnAssign, ast.Expr)
     for node in tree.body:
         if isinstance(node, (ast.Import, ast.ImportFrom, ast.FunctionDef)):
             continue
-        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+        if isinstance(node, ast.Expr) and isinstance(node.value, _CONSTANT_TYPES) and isinstance(getattr(node.value, "value", None), str):
             continue
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
-            if not isinstance(value, (ast.Constant, ast.List, ast.Tuple, ast.Dict, ast.Set)):
+            if not isinstance(value, _CONSTANT_TYPES + (ast.List, ast.Tuple, ast.Dict, ast.Set)):
                 raise _error("top-level assignments must be constants", node)
             continue
         raise _error("top-level executable statements are not allowed", node)

@@ -59,6 +59,18 @@ class DeepSeekCodegenTests(unittest.TestCase):
         self.assertNotIn("secret", saved)
         self.assertNotIn("credential=hidden", saved)
 
+    def test_codegen_prompt_requires_explicit_imports_and_dict_context(self):
+        request_blender_code(
+            codegen_input=VALID_INPUT,
+            output_dir=self.output,
+            environ={"DEEPSEEK_API_KEY": "secret", "DEEPSEEK_BASE_URL": "https://example.test/v1"},
+            transport=self.transport,
+        )
+        payload = json.loads(self.calls[0][0].data.decode())
+        system_prompt = payload["messages"][0]["content"].lower()
+        self.assertIn("context is a dict", system_prompt)
+        self.assertIn("import math", system_prompt)
+
     def test_missing_environment_makes_zero_calls(self):
         with self.assertRaises(DeepSeekCodegenError):
             request_blender_code(codegen_input=VALID_INPUT, output_dir=self.output, environ={}, transport=self.transport)

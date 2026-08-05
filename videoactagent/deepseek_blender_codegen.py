@@ -123,7 +123,10 @@ def request_blender_code(
             "You are a constrained Blender Python scene builder. Return one JSON object only "
             "with exactly schema_version, summary, python_code. Set schema_version to "
             f"{RESPONSE_SCHEMA}. python_code must define exactly one build_scene(context) "
-            "function. Use only bpy, math and mathutils; do not import files, render, "
+            "function. The context is a dict; use context['scene'], "
+            "context['input'], context['world_xy'] and context['frame_for_time'], never "
+            "context.scene. Use only bpy, math and mathutils; every used module must have "
+            "an explicit import (especially import math). Do not import files, render, "
             "network, processes or environment APIs. The trusted runner owns all rendering."
         )
         user_payload = {
