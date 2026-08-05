@@ -53,6 +53,21 @@ class CodegenBlenderEntryTests(unittest.TestCase):
         self.assertEqual(actor.keyframes[2][2], (0.0, 0.0, 1.25))
         self.assertEqual(actor.keyframes[-1][2], (4.0, 0.0, 1.25))
 
+    def test_host_trajectory_lifts_zero_origin_actor_above_floor(self):
+        class FakeActor:
+            def __init__(self):
+                self.location = [0.0, 0.0, 0.0]
+                self.animation_data = None
+                self.keyframes = []
+
+            def keyframe_insert(self, *, data_path, frame):
+                self.keyframes.append((data_path, frame, tuple(self.location)))
+
+        actor = FakeActor()
+        track = {"target": {"id": "traveler"}, "points": [{"keyframe_id": "K0", "t": 0.0, "world": [-1.0, 0.0]}]}
+        apply_actor_trajectory({"traveler": actor}, {"traveler": track}, frame_start=1, frame_end=40)
+        self.assertEqual(actor.keyframes[0][2], (-1.0, 0.0, 0.5))
+
     def test_handwritten_fixture_passes_same_gate_as_model_code(self):
         path = Path(__file__).parent / "fixtures" / "codegen" / "safe_station_scene.py"
         evidence = validate_generated_code(path.read_text(encoding="utf-8"))

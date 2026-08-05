@@ -68,6 +68,20 @@ class CodegenVerifyTests(unittest.TestCase):
         with self.assertRaisesRegex(CodegenVerifyError, "trajectory"):
             verify_codegen_render(job_root=self.root, input_path=self.input, render_dir=self.render)
 
+    def test_rejects_uniform_dark_video(self):
+        video = self.render / "video.mp4"
+        writer = imageio_ffmpeg.write_frames(str(video), (32, 24), fps=4, codec="libx264", pix_fmt_in="rgb24", macro_block_size=1)
+        writer.send(None)
+        for index in range(4):
+            value = 50 + (index % 2)
+            writer.send(bytes([value, value, value]) * (32 * 24))
+        writer.close()
+        manifest = json.loads((self.render / "codegen_manifest.json").read_text())
+        manifest["video"] = {"path": "video.mp4", "sha256": hashlib.sha256(video.read_bytes()).hexdigest(), "bytes": video.stat().st_size}
+        (self.render / "codegen_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(CodegenVerifyError, "visual"):
+            verify_codegen_render(job_root=self.root, input_path=self.input, render_dir=self.render)
+
 
 if __name__ == "__main__":
     unittest.main()

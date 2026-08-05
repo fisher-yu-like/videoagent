@@ -48,14 +48,14 @@ def _actor_z(actor: Any) -> float:
     translation = getattr(matrix, "translation", None)
     if translation is not None:
         try:
-            return float(translation.z)
+            return max(0.5, float(translation.z))
         except AttributeError:
-            return float(translation[2])
+            return max(0.5, float(translation[2]))
     location = getattr(actor, "location")
     try:
-        return float(location.z)
+        return max(0.5, float(location.z))
     except AttributeError:
-        return float(location[2])
+        return max(0.5, float(location[2]))
 
 
 def _set_actor_world_xy(actor: Any, x: float, y: float, z: float) -> None:
@@ -107,6 +107,35 @@ def apply_actor_trajectory(
                 if getattr(fcurve, "data_path", None) == "location":
                     for keyframe in fcurve.keyframe_points:
                         keyframe.interpolation = "LINEAR"
+
+
+def ensure_render_visibility(scene: Any, actor_objects: dict[str, Any]) -> None:
+    """Add a neutral fill light and world strength when generated code omitted them."""
+
+    import bpy  # type: ignore
+    from mathutils import Vector  # type: ignore
+
+    if not any(obj.type == "LIGHT" for obj in scene.objects):
+        bpy.ops.object.light_add(type="AREA", location=(0.0, -4.0, 8.0))
+        light = bpy.context.object
+        light.name = "CodegenFillLight"
+        light.data.energy = 900.0
+        light.data.shape = "DISK"
+        light.data.size = 6.0
+        target = Vector((0.0, 0.0, 0.8))
+        if actor_objects:
+            target = sum((Vector(obj.matrix_world.translation) for obj in actor_objects.values()), Vector()) / len(actor_objects)
+            target.z = max(0.5, float(target.z))
+        light.rotation_euler = (target - light.location).to_track_quat("-Z", "Y").to_euler()
+
+    world = scene.world
+    if world is None:
+        world = bpy.data.worlds.new("CodegenWorld")
+        scene.world = world
+    world.use_nodes = True
+    background = world.node_tree.nodes.get("Background")
+    if background is not None and background.inputs["Strength"].default_value < 0.2:
+        background.inputs["Strength"].default_value = 0.35
 
 
 def _sha256(path: Path) -> str:
@@ -210,6 +239,7 @@ def main(argv: list[str] | None = None) -> int:
             frame_start=frame_start,
             frame_end=frame_end,
         )
+        ensure_render_visibility(scene, {actor_id: bpy.data.objects[actor_id] for actor_id in actor_ids})
         camera = bpy.data.objects.get("DirectorCamera")
         if camera is None or camera.type != "CAMERA":
             raise ValueError("generated scene is missing camera DirectorCamera")

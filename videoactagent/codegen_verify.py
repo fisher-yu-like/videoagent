@@ -70,6 +70,7 @@ def _decode(path: Path, *, expected_frames: int, expected_fps: int, expected_res
         expected_bytes = resolution[0] * resolution[1] * 3
         selected_indices = {0, expected_frames // 2, expected_frames - 1}
         selected: dict[int, str] = {}
+        visual_values: list[int] = []
         frame_count = 0
         digest = hashlib.sha256()
         for frame in reader:
@@ -78,6 +79,7 @@ def _decode(path: Path, *, expected_frames: int, expected_fps: int, expected_res
             digest.update(frame)
             if frame_count in selected_indices:
                 selected[frame_count] = hashlib.sha256(frame).hexdigest()
+                visual_values.extend(frame)
             frame_count += 1
         if frame_count != expected_frames:
             raise CodegenVerifyError(f"video decoded {frame_count} frames, expected {expected_frames}")
@@ -90,7 +92,24 @@ def _decode(path: Path, *, expected_frames: int, expected_fps: int, expected_res
             raise CodegenVerifyError("video duration does not match render contract")
         if len(set(selected.values())) < 2:
             raise CodegenVerifyError("sampled video frames are pixel-identical")
-        return {"frame_count": frame_count, "fps": actual_fps, "resolution": [resolution[0], resolution[1]], "duration_seconds": decoded_duration, "stream_duration_seconds": float(stream_duration), "decoded_pixel_sha256": digest.hexdigest(), "sampled_pixel_sha256": [selected[index] for index in sorted(selected)]}
+        visual_min = min(visual_values) if visual_values else 0
+        visual_max = max(visual_values) if visual_values else 0
+        visual_mean = sum(visual_values) / len(visual_values) if visual_values else 0.0
+        return {
+            "frame_count": frame_count,
+            "fps": actual_fps,
+            "resolution": [resolution[0], resolution[1]],
+            "duration_seconds": decoded_duration,
+            "stream_duration_seconds": float(stream_duration),
+            "decoded_pixel_sha256": digest.hexdigest(),
+            "sampled_pixel_sha256": [selected[index] for index in sorted(selected)],
+            "visual": {
+                "sampled_min": visual_min,
+                "sampled_max": visual_max,
+                "sampled_mean": round(visual_mean, 6),
+                "sampled_dynamic_range": visual_max - visual_min,
+            },
+        }
     except CodegenVerifyError:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
@@ -143,6 +162,9 @@ def verify_codegen_render(*, job_root: Path, input_path: Path, render_dir: Path,
     for name in ("first", "middle", "last"):
         _artifact_record(render, {"path": f"frames/{name}.png", "sha256": _sha256(render / "frames" / f"{name}.png")}, f"{name} frame")
     video = _decode(video_path, expected_frames=expected_frames, expected_fps=fps, expected_resolution=resolution, expected_duration=expected_duration)
+    visual = video.get("visual")
+    if not isinstance(visual, Mapping) or int(visual.get("sampled_dynamic_range", 0)) < 20:
+        raise CodegenVerifyError("video visual signal is too dark or uniform")
 
     actors = document.get("shotscript", {}).get("shots", [{}])[0].get("actors", [])
     actor_transforms = manifest.get("actor_transforms")

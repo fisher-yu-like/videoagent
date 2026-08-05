@@ -70,6 +70,8 @@ class DeepSeekCodegenTests(unittest.TestCase):
         system_prompt = payload["messages"][0]["content"].lower()
         self.assertIn("context is a dict", system_prompt)
         self.assertIn("import math", system_prompt)
+        self.assertIn("light", system_prompt)
+        self.assertIn("visible", system_prompt)
 
     def test_missing_environment_makes_zero_calls(self):
         with self.assertRaises(DeepSeekCodegenError):
