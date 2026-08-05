@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import mimetypes
 from pathlib import Path
 from threading import Condition, Lock, Thread
 from typing import Any, Callable, Mapping
+from urllib.parse import parse_qs, quote, urlsplit
 from uuid import uuid4
 
 from videoactagent.codegen_job import generate_codegen_job, prepare_codegen_job, render_codegen_job
@@ -21,10 +25,13 @@ class CodegenLabConfig:
     workspace: Path
     blender: Path
     port: int = 8781
+    static_root_path: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace", Path(self.workspace).resolve())
         object.__setattr__(self, "blender", Path(self.blender).resolve())
+        if self.static_root_path is not None:
+            object.__setattr__(self, "static_root_path", Path(self.static_root_path).resolve())
 
     @property
     def experiments_root(self) -> Path:
@@ -32,7 +39,7 @@ class CodegenLabConfig:
 
     @property
     def static_root(self) -> Path:
-        return Path(__file__).resolve().parent.parent / "static"
+        return self.static_root_path or Path(__file__).resolve().parent.parent / "static"
 
 
 @dataclass
@@ -246,3 +253,136 @@ def _resolution(value: object) -> tuple[int, int]:
     if width <= 0 or height <= 0:
         raise CodegenLabError("resolution must be positive")
     return width, height
+
+
+class _CodegenLabHandler(BaseHTTPRequestHandler):
+    server: "_CodegenLabServer"
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    @property
+    def application(self) -> CodegenLabApplication:
+        return self.server.application
+
+    @property
+    def config(self) -> CodegenLabConfig:
+        return self.server.config
+
+    def _send_json(self, status: int, value: object) -> None:
+        body = (json.dumps(value, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _error(self, status: int, message: str, error_type: str = "CodegenLabError") -> None:
+        self._send_json(status, {"ok": False, "error": {"type": error_type, "message": message}})
+
+    def _body(self) -> dict[str, Any]:
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > 2 * 1024 * 1024:
+                raise CodegenLabError("request body is too large")
+            value = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise CodegenLabError("request body must be JSON") from exc
+        if not isinstance(value, dict):
+            raise CodegenLabError("request body must be a JSON object")
+        return value
+
+    def do_GET(self) -> None:
+        parsed = urlsplit(self.path)
+        try:
+            if parsed.path == "/":
+                path = self.config.static_root / "codegen_lab.html"
+                body = path.read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            if parsed.path == "/api/health":
+                self._send_json(200, {"ok": True, "service": "codegen-lab", "port": self.config.port, "workspace": str(self.config.workspace), "experiments_root": str(self.config.experiments_root), "blender": str(self.config.blender), "blender_exists": self.config.blender.is_file()})
+                return
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            if parsed.path == "/api/status":
+                job = query.get("job", [""])[0]
+                operation = query.get("operation", [None])[0]
+                self._send_json(200, {"ok": True, **self.application.status(job, operation)})
+                return
+            if parsed.path == "/api/artifact":
+                job = self.application.resolve_job(query.get("job", [""])[0])
+                artifact = self.application.resolve_artifact(job, query.get("path", [""])[0])
+                self._send_file(artifact)
+                return
+            self._error(404, "route not found", "NotFound")
+        except CodegenLabError as exc:
+            self._error(400, str(exc))
+        except FileNotFoundError:
+            self._error(404, "artifact or page not found", "NotFound")
+        except Exception as exc:
+            self._error(500, f"server error: {type(exc).__name__}", "ServerError")
+
+    def do_POST(self) -> None:
+        try:
+            payload = self._body()
+            if self.path == "/api/prepare":
+                self._send_json(200, {"ok": True, **self.application.prepare(payload)})
+                return
+            if self.path == "/api/generate":
+                operation = self.application.start_generate(payload.get("job"))
+                self._send_json(202, {"ok": True, **operation})
+                return
+            if self.path == "/api/render":
+                operation = self.application.start_render(payload.get("job"), str(payload.get("profile", "")), payload.get("blender"))
+                self._send_json(202, {"ok": True, **operation})
+                return
+            self._error(404, "route not found", "NotFound")
+        except CodegenLabError as exc:
+            self._error(400, str(exc))
+        except FileNotFoundError:
+            self._error(404, "file not found", "NotFound")
+        except Exception as exc:
+            self._error(500, f"server error: {type(exc).__name__}", "ServerError")
+
+    def _send_file(self, path: Path) -> None:
+        data = path.read_bytes()
+        start, end = 0, len(data) - 1
+        range_header = self.headers.get("Range")
+        if range_header:
+            try:
+                value = range_header.removeprefix("bytes=").split(",", 1)[0]
+                left, right = value.split("-", 1)
+                start = int(left) if left else max(0, len(data) - int(right))
+                end = int(right) if right else len(data) - 1
+                if start < 0 or end < start or end >= len(data):
+                    raise ValueError
+            except ValueError:
+                self._error(416, "invalid byte range", "RangeNotSatisfiable")
+                return
+        body = data[start : end + 1]
+        self.send_response(206 if range_header else 200)
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        if range_header:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{len(data)}")
+            self.send_header("Accept-Ranges", "bytes")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _CodegenLabServer(ThreadingHTTPServer):
+    def __init__(self, address: tuple[str, int], config: CodegenLabConfig, application: CodegenLabApplication):
+        super().__init__(address, _CodegenLabHandler)
+        self.config = config
+        self.application = application
+
+
+def create_server(config: CodegenLabConfig, *, application: CodegenLabApplication | None = None) -> ThreadingHTTPServer:
+    """Create (but do not start) the independent Codegen Lab HTTP server."""
+
+    return _CodegenLabServer(("127.0.0.1", config.port), config, application or CodegenLabApplication(config))
