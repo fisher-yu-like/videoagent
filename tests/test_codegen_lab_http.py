@@ -46,7 +46,7 @@ class CodegenLabHTTPTests(unittest.TestCase):
             video.parent.mkdir(parents=True, exist_ok=True)
             video.write_bytes(b"video")
             job = job_root / "job.json"
-            job.write_text(json.dumps({"job_id": "PF1", "status": "succeeded", "api_call_count": 2}), encoding="utf-8")
+            job.write_text(json.dumps({"job_id": "PF1", "status": "succeeded", "api_call_count": 2, "updated_at": "2026-08-05T01:00:00Z", "video": str(video)}), encoding="utf-8")
             return {"status": "succeeded", "job": str(job), "video": str(video), "document": {"job_id": "PF1", "api_call_count": 2}}
 
         config = CodegenLabConfig(self.root, self.blender, port=0, static_root_path=self.static)
@@ -112,6 +112,20 @@ class CodegenLabHTTPTests(unittest.TestCase):
         self.assertEqual(result["status"], "succeeded")
         self.assertIn("video_url", result)
         self.assertNotIn("generated_scene.py", result)
+
+    def test_latest_prompt_endpoint_returns_completed_video(self):
+        status, _, body = self.request("/api/prompt-run", method="POST", payload={"prompt": "a station meeting"})
+        operation = json.loads(body)
+        for _ in range(20):
+            status, _, body = self.request(f"/api/prompt-status?operation={operation['operation_id']}")
+            if json.loads(body).get("state") == "done":
+                break
+            time.sleep(0.05)
+        status, _, body = self.request("/api/prompt-latest")
+        result = json.loads(body)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["status"], "succeeded")
+        self.assertTrue(result["video_url"].endswith("renders/smoke/video.mp4"))
 
     def test_render_accepts_only_smoke_or_full(self):
         with self.assertRaises(HTTPError) as raised:

@@ -23,6 +23,35 @@ class CodegenLabTests(unittest.TestCase):
         self.assertEqual(config.experiments_root, self.root / "runs" / "work" / "codegen_blender_v1")
         self.assertEqual(config.port, 8781)
 
+    def test_latest_prompt_status_returns_only_latest_succeeded_video(self):
+        experiments = self.root / "runs" / "work" / "codegen_blender_v1"
+        failed_root = experiments / "PF2"
+        failed_root.mkdir(parents=True)
+        failed_video = failed_root / "renders" / "smoke" / "video.mp4"
+        failed_video.parent.mkdir(parents=True)
+        failed_video.write_bytes(b"failed-video")
+        (failed_root / "job.json").write_text(json.dumps({
+            "job_id": "PF2", "status": "failed", "updated_at": "2026-08-05T02:00:00Z",
+            "video": str(failed_video),
+        }), encoding="utf-8")
+
+        success_root = experiments / "PF1"
+        success_root.mkdir(parents=True)
+        success_video = success_root / "renders" / "smoke" / "video.mp4"
+        success_video.parent.mkdir(parents=True)
+        success_video.write_bytes(b"real-video")
+        (success_root / "job.json").write_text(json.dumps({
+            "job_id": "PF1", "status": "succeeded", "updated_at": "2026-08-05T01:00:00Z",
+            "video": str(success_video),
+        }), encoding="utf-8")
+
+        app = CodegenLabApplication(CodegenLabConfig(self.root, self.blender))
+        result = app.latest_prompt_status()
+
+        self.assertEqual(result["status"], "succeeded")
+        self.assertEqual(result["job_id"], "PF1")
+        self.assertTrue(result["video_url"].endswith("renders/smoke/video.mp4"))
+
     def test_prepare_calls_job_preparer_only(self):
         def preparer(**kwargs):
             self.calls.append("prepare")

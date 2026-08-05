@@ -119,6 +119,24 @@ def _artifact_urls(job_path: Path, root: Path) -> list[dict[str, str]]:
     return result
 
 
+def _video_url(job_path: Path, video_value: object) -> str | None:
+    """Build an artifact URL only for a real MP4 inside the job directory."""
+
+    if not isinstance(video_value, str) or not video_value:
+        return None
+    try:
+        job_file = Path(job_path).resolve()
+        video = Path(video_value).resolve()
+        relative = video.relative_to(job_file.parent).as_posix()
+    except (OSError, ValueError):
+        return None
+    if video.suffix.lower() != ".mp4" or not _inside(job_file.parent, video):
+        return None
+    if not video.is_file() or video.stat().st_size <= 0:
+        return None
+    return f"/api/artifact?job={quote(str(job_file))}&path={quote(relative)}"
+
+
 def status_document(job_path: Path, operation: Operation | None = None) -> dict[str, Any]:
     """Return a deliberately small status view without secrets/file inventories."""
 
@@ -329,14 +347,39 @@ class CodegenLabApplication:
         job_value = result.get("job") if isinstance(result, Mapping) else None
         video_value = result.get("video") if isinstance(result, Mapping) else None
         if operation.state == "done" and isinstance(job_value, str) and isinstance(video_value, str):
-            job_path = Path(job_value).resolve()
-            try:
-                relative = Path(video_value).resolve().relative_to(job_path.parent).as_posix()
-            except ValueError:
-                relative = ""
-            if relative:
-                status["video_url"] = f"/api/artifact?job={quote(str(job_path))}&path={quote(relative)}"
+            video_url = _video_url(Path(job_value), video_value)
+            if video_url:
+                status["video_url"] = video_url
         return status
+
+    def latest_prompt_status(self) -> dict[str, Any]:
+        """Return the newest successful prompt job with an existing MP4."""
+
+        candidates: list[tuple[str, float, dict[str, Any]]] = []
+        root = self.config.experiments_root.resolve()
+        if not root.is_dir():
+            return {"status": "empty"}
+        for job_file in root.glob("PF*/job.json"):
+            try:
+                job = _load_job(job_file)
+            except CodegenLabError:
+                continue
+            if job.get("status") != "succeeded":
+                continue
+            video_url = _video_url(job_file, job.get("video"))
+            if not video_url:
+                continue
+            updated_at = str(job.get("updated_at") or "")
+            candidates.append((updated_at, job_file.stat().st_mtime, {
+                "status": "succeeded",
+                "job_id": job.get("job_id") or job_file.parent.name,
+                "updated_at": updated_at,
+                "video_url": video_url,
+            }))
+        if not candidates:
+            return {"status": "empty"}
+        _updated_at, _mtime, latest = max(candidates, key=lambda item: (item[0], item[1]))
+        return latest
 
 
 def _resolution(value: object) -> tuple[int, int]:
@@ -408,6 +451,9 @@ class _CodegenLabHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/prompt-status":
                 operation = query.get("operation", [""])[0]
                 self._send_json(200, {"ok": True, **self.application.prompt_status(operation)})
+                return
+            if parsed.path == "/api/prompt-latest":
+                self._send_json(200, {"ok": True, **self.application.latest_prompt_status()})
                 return
             if parsed.path == "/api/status":
                 job = query.get("job", [""])[0]

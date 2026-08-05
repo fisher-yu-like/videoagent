@@ -26,7 +26,7 @@
 .\.venv\Scripts\python.exe -m videoactagent.cli codegen-lab serve --workspace C:\Users\sy\Desktop\videoactagent --blender D:\blender\blender.exe --port 8781
 ```
 
-Codegen Lab 现在默认打开 Prompt-only 页面：只需输入一段完整场景 Prompt，页面会自动执行 DeepSeek-v4-pro Planner → ShotScript/人物 K0–K4 轨迹 → DeepSeek-v4-pro Blender Codegen → AST 安全检查 → 本地 Blender 真实渲染。Codegen 只负责场景和相机，可信 Runner 会在 `build_scene` 返回后按输入轨迹的真实帧范围注入人物位置关键帧，再做轨迹验收。固定默认时长 5 秒、8 FPS、640×360。每个阶段最多三次尝试；只有把上一轮的 schema/安全/Blender 日志错误反馈给下一轮才允许重试。最终页面只显示 MP4，不显示内部代码或路径。
+Codegen Lab 现在默认打开 Prompt-only 页面：只需输入一段完整场景 Prompt，页面会自动执行 DeepSeek-v4-pro Planner → ShotScript/人物 K0–K4 轨迹 → DeepSeek-v4-pro Blender Codegen → AST 安全检查 → 本地 Blender 真实渲染。Codegen 只负责场景和相机，可信 Runner 会在 `build_scene` 返回后按输入轨迹的真实帧范围注入人物位置关键帧，再做轨迹验收。固定默认时长 5 秒、8 FPS、640×360。每个阶段最多三次尝试；只有把上一轮的 schema/安全/Blender 日志错误反馈给下一轮才允许重试。页面刷新后会从 `/api/prompt-latest` 恢复最近一次已验收 MP4；视频加载失败会在页面显示明确错误。最终页面只显示 MP4，不显示内部代码或路径。
 
 作业证据保存在 `runs/work/codegen_blender_v1/PF<n>/`：`prompt.txt`、`plan/attempt-*`、`source/input.json`、`api/attempt-*`、`renders/smoke/video.mp4`、`render.log` 和 `job.json`。失败作业不返回 `video_url`。旧版 Prepare/Generate/Smoke/Full API 仍保留，供需要手工 ShotScript/轨迹的实验使用。
 
