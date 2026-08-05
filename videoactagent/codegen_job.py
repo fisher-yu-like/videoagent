@@ -262,8 +262,9 @@ def render_codegen_job(
         raise CodegenJobError("profile must be smoke or full")
     job_file = _job_path(job_path)
     job = _load(job_file)
-    if job.get("status") != "code_validated":
-        raise CodegenJobError(f"job cannot render from status {job.get('status')!r}")
+    required_status = {"smoke": "code_validated", "full": "smoke_succeeded"}[profile]
+    if job.get("status") != required_status:
+        raise CodegenJobError(f"job cannot render from status {job.get('status')!r}; required {required_status}")
     with _job_lock(job_file.parent):
         _set_state(job_file, job, "rendering")
         job_root = job_file.parent
@@ -271,10 +272,13 @@ def render_codegen_job(
         input_file = _profile_input(job_root, source_input, profile)
         code_file = job_root / job["paths"]["api"] / "generated_scene.py"
         output_dir = job_root / job["paths"]["renders"] / profile
-        if output_dir.exists():
+        if output_dir.exists() or profile in job.get("renders", {}):
             _set_state(job_file, job, "blender_failed", error="render output already exists; rerender is forbidden")
             raise CodegenJobError(job["error"])
         try:
+            expected_code_hash = job.get("code_sha256")
+            if not isinstance(expected_code_hash, str) or _sha(code_file) != expected_code_hash:
+                raise CodegenJobError("generated code hash changed; render is forbidden")
             render_result = runner(blender=Path(blender), job_root=job_root, input_path=input_file, code_path=code_file, output_dir=output_dir)
         except Exception as exc:
             _set_state(job_file, job, "blender_failed", error=f"{type(exc).__name__}: {exc}")
@@ -292,8 +296,9 @@ def render_codegen_job(
             _set_state(job_file, job, "isolation_failed", error=reason)
             raise CodegenJobError(reason or "isolation failed")
         job.setdefault("renders", {})[profile] = {"render": render_result, "verification": verification, "input": str(input_file.relative_to(job_root)).replace("\\", "/")}
-        _set_state(job_file, job, "succeeded")
-        return {"status": "succeeded", "profile": profile, "render": render_result, "verification": verification}
+        final_status = "smoke_succeeded" if profile == "smoke" else "succeeded"
+        _set_state(job_file, job, final_status)
+        return {"status": final_status, "profile": profile, "render": render_result, "verification": verification}
 
 
 def _resolution(value: str) -> tuple[int, int]:

@@ -59,9 +59,43 @@ class CodegenJobTests(unittest.TestCase):
         def verifier(**kwargs): return {"status": "succeeded", "trajectory": {"max_error": 0.0}}
         with patch("videoactagent.codegen_job.urlopen", return_value=_Guard()):
             result = render_codegen_job(job_path, blender=Path("blender"), profile="smoke", runner=runner, verifier=verifier)
+        self.assertEqual(result["status"], "smoke_succeeded")
+        job = json.loads(job_path.read_text(encoding="utf-8"))
+        code_hash = job["code_sha256"]
+        self.assertEqual(job["status"], "smoke_succeeded")
+        with patch("videoactagent.codegen_job.urlopen", return_value=_Guard()):
+            result = render_codegen_job(job_path, blender=Path("blender"), profile="full", runner=runner, verifier=verifier)
         self.assertEqual(result["status"], "succeeded")
         job = json.loads(job_path.read_text(encoding="utf-8"))
         self.assertEqual(job["status"], "succeeded")
+        self.assertEqual(job["code_sha256"], code_hash)
+        self.assertEqual(set(job["renders"]), {"smoke", "full"})
+
+    def test_full_render_requires_successful_smoke(self):
+        job_path = self.prepare()
+        code = "import bpy\ndef build_scene(context):\n    pass\n"
+        def requester(**kwargs):
+            output = Path(kwargs["output_dir"]); output.mkdir(); (output / "generated_scene.py").write_text(code, encoding="utf-8")
+            return {"status": "succeeded", "api_call_count": 1, "retry_count": 0}
+        generate_codegen_job(job_path, requester=requester)
+        with patch("videoactagent.codegen_job.urlopen", return_value=_Guard()):
+            with self.assertRaisesRegex(CodegenJobError, "smoke_succeeded"):
+                render_codegen_job(job_path, blender=Path("blender"), profile="full", runner=lambda **kwargs: {}, verifier=lambda **kwargs: {})
+
+    def test_render_profile_cannot_be_repeated(self):
+        job_path = self.prepare()
+        code = "import bpy\ndef build_scene(context):\n    pass\n"
+        def requester(**kwargs):
+            output = Path(kwargs["output_dir"]); output.mkdir(); (output / "generated_scene.py").write_text(code, encoding="utf-8")
+            return {"status": "succeeded", "api_call_count": 1, "retry_count": 0}
+        generate_codegen_job(job_path, requester=requester)
+        def runner(**kwargs):
+            output = Path(kwargs["output_dir"]); output.mkdir(parents=True)
+            return {"status": "succeeded", "output_dir": str(output), "code_sha256": "x"}
+        with patch("videoactagent.codegen_job.urlopen", return_value=_Guard()):
+            render_codegen_job(job_path, blender=Path("blender"), profile="smoke", runner=runner, verifier=lambda **kwargs: {"status": "succeeded"})
+            with self.assertRaisesRegex(CodegenJobError, "smoke_succeeded"):
+                render_codegen_job(job_path, blender=Path("blender"), profile="smoke", runner=runner, verifier=lambda **kwargs: {"status": "succeeded"})
 
     def test_failures_are_terminal_and_duplicate_active_lock_is_rejected(self):
         job_path = self.prepare()
