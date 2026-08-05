@@ -41,6 +41,7 @@ class CodegenLabTests(unittest.TestCase):
         }
         result = app.prepare(payload)
         self.assertEqual(result["job_id"], "CG1")
+        self.assertEqual(result["job"], str(self.root / "runs" / "work" / "codegen_blender_v1" / "CG1" / "job.json"))
         self.assertEqual(self.calls, ["prepare"])
 
     def test_status_omits_credentials_and_protected_file_inventory(self):

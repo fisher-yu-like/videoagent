@@ -179,7 +179,9 @@ class CodegenLabApplication:
             raise
         except Exception as exc:
             raise CodegenLabError(f"prepare failed: {type(exc).__name__}: {exc}") from exc
-        return status_document(Path(job_path))
+        result = status_document(Path(job_path))
+        result["job"] = str(Path(job_path).resolve())
+        return result
 
     def _reserve(self, job_path: Path, kind: str) -> Operation:
         with self._lock:

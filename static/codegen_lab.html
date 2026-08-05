@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VideoActAgent · Codegen Lab</title>
+  <style>
+    :root { color-scheme: light; --ink:#182230; --muted:#64748b; --line:#dbe3ec; --blue:#2563eb; --soft:#f5f8fc; --danger:#b42318; --ok:#137333; }
+    * { box-sizing:border-box; } body { margin:0; background:var(--soft); color:var(--ink); font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif; }
+    main { max-width:1280px; margin:0 auto; padding:24px; } h1 { margin:0 0 4px; font-size:26px; } h2 { font-size:17px; margin:0 0 12px; } p { margin:5px 0; color:var(--muted); }
+    .sub { font-size:12px; } .grid { display:grid; grid-template-columns:360px 1fr; gap:16px; margin-top:18px; } .card { background:white; border:1px solid var(--line); border-radius:12px; padding:16px; box-shadow:0 2px 8px #19345b0b; }
+    label { display:block; font-size:12px; font-weight:650; margin:10px 0 4px; } input, textarea, select { width:100%; border:1px solid #c7d2df; border-radius:7px; padding:8px 9px; background:#fff; color:var(--ink); font:inherit; } textarea { min-height:62px; resize:vertical; }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:8px; } button { border:0; border-radius:7px; padding:9px 12px; cursor:pointer; font-weight:650; background:#e7eef9; color:#17315e; } button.primary { background:var(--blue); color:white; } button:disabled { opacity:.45; cursor:not-allowed; } .buttons { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:14px; }
+    .notice { border-left:3px solid #f59e0b; padding:7px 9px; background:#fff9e9; font-size:12px; color:#704d00; margin-top:12px; } .state { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0 14px; } .pill { border:1px solid var(--line); border-radius:999px; padding:4px 9px; color:var(--muted); font-size:12px; } .pill.active { color:var(--blue); border-color:#91b4fa; background:#eff5ff; } .pill.done { color:var(--ok); border-color:#a6d6ae; background:#effaf1; } .pill.fail { color:var(--danger); border-color:#f1b4ad; background:#fff3f1; }
+    .two { display:grid; grid-template-columns:1fr 1fr; gap:16px; } .evidence { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; } .metric { background:var(--soft); border-radius:8px; padding:8px; min-height:52px; } .metric small { display:block; color:var(--muted); font-size:11px; } .metric strong { display:block; overflow-wrap:anywhere; }
+    video { width:100%; max-height:380px; background:#10151c; border-radius:8px; } .frames { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; margin-top:8px; } .frames img { width:100%; background:#10151c; border-radius:6px; aspect-ratio:16/9; object-fit:contain; } .links { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; } .links a { color:var(--blue); font-size:12px; }
+    pre { white-space:pre-wrap; overflow:auto; max-height:220px; background:#111827; color:#dbeafe; border-radius:8px; padding:10px; font:12px/1.4 ui-monospace,monospace; } .error { color:var(--danger); background:#fff3f1; border:1px solid #f1b4ad; padding:10px; border-radius:8px; display:none; } .tabs { display:flex; gap:6px; margin-bottom:8px; } .tabs button.selected { background:#dbeafe; }
+    @media (max-width:900px) { main { padding:12px; } .grid,.two { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Codegen Lab</h1>
+  <p>Prompt/ShotScript/轨迹 → DeepSeek Blender 代码 → 本地真实 Blender 渲染</p>
+  <p class="sub">新页面独立运行在 8781；单机位 8769、三机位/向导 8770 保持不变。</p>
+  <div class="grid">
+    <section class="card">
+      <h2>输入与操作</h2>
+      <label for="prompt">Prompt 文件</label><input id="prompt" placeholder="例如 prompts/station_reunion.txt">
+      <label for="shotscript">ShotScript 文件</label><input id="shotscript" placeholder="例如 stories/station_reunion.json">
+      <label for="trajectory">轨迹 JSON</label><input id="trajectory" placeholder="例如 examples/station_codegen_trajectory.json">
+      <label for="protectedWorkspace">受保护工作区</label><input id="protectedWorkspace" placeholder="8770 工作区目录">
+      <label for="protectedUrl">8770 guard URL</label><input id="protectedUrl" value="http://127.0.0.1:8770/api/session">
+      <label for="blender">Blender 可执行文件</label><input id="blender" value="D:\blender\blender.exe">
+      <div class="row"><div><label for="fps">FPS</label><input id="fps" type="number" value="8" min="1"></div><div><label for="resolution">分辨率</label><input id="resolution" value="640x360"></div></div>
+      <div class="buttons"><button id="prepareButton" class="primary">准备作业</button><button id="generateButton" disabled>真实生成</button><button id="smokeButton" disabled>Smoke 渲染</button><button id="fullButton" disabled>Full 渲染</button></div>
+      <div class="notice">准备作业不调用 API/Blender。点击“真实生成”才会发起一次真实 DeepSeek 调用，失败不会自动重试。Smoke 通过后才可 Full。</div>
+    </section>
+    <section>
+      <div class="card"><h2>状态时间线</h2><div id="statusTimeline" class="state"></div><div id="failurePanel" class="error"></div></div>
+      <div class="card" style="margin-top:16px"><h2>证据</h2><div id="evidencePanel" class="evidence"></div><pre id="logPanel">尚未准备作业。</pre></div>
+      <div class="card" style="margin-top:16px"><h2>结果</h2><div class="tabs"><button id="smokeTab" class="selected">Smoke</button><button id="fullTab">Full</button></div><video id="resultVideo" controls preload="metadata"></video><div id="frames" class="frames"></div><div id="artifactLinks" class="links"></div></div>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+  const fields = ['prompt','shotscript','trajectory','protectedWorkspace','protectedUrl','blender','fps','resolution'];
+  const timeline = ['prepared','generating','code_validated','rendering','smoke_succeeded','succeeded'];
+  let job = localStorage.getItem('codegenLab.job') || '';
+  let operation = '';
+  let currentProfile = 'smoke';
+  const $ = id => document.getElementById(id);
+  fields.forEach(id => { const saved = localStorage.getItem('codegenLab.' + id); if (saved !== null) $(id).value = saved; $(id).addEventListener('change', () => localStorage.setItem('codegenLab.' + id, $(id).value)); });
+  function payload() { return { prompt:$('prompt').value, shotscript:$('shotscript').value, trajectory:$('trajectory').value, protected_workspace:$('protectedWorkspace').value, protected_url:$('protectedUrl').value, blender:$('blender').value, fps:Number($('fps').value), resolution:$('resolution').value }; }
+  async function request(path, options={}) { const response = await fetch(path, {headers:{'Content-Type':'application/json'}, ...options}); const value = await response.json(); if (!response.ok) throw new Error(value.error?.message || 'HTTP ' + response.status); return value; }
+  function showError(error) { $('failurePanel').textContent = error.message || String(error); $('failurePanel').style.display = 'block'; }
+  function clearError() { $('failurePanel').style.display = 'none'; }
+  function renderTimeline(status) { $('statusTimeline').innerHTML = timeline.map(item => `<span class="pill ${item===status?'active':timeline.indexOf(item)<timeline.indexOf(status)?'done':''}">${item}</span>`).join('') + (status && status.endsWith('failed') ? `<span class="pill fail">${status}</span>` : ''); }
+  function setButtons(status) { $('generateButton').disabled = !job || status !== 'prepared'; $('smokeButton').disabled = !job || status !== 'code_validated'; $('fullButton').disabled = !job || status !== 'smoke_succeeded'; }
+  function metric(label, value) { return `<div class="metric"><small>${label}</small><strong>${value ?? '—'}</strong></div>`; }
+  function showResult(status) { const render = status.renders?.[currentProfile]; const files = status.artifacts || []; const mp4 = files.find(x => x.path.includes('/' + currentProfile + '/') && x.path.endsWith('.mp4')) || files.find(x => x.path.endsWith('.mp4')); if (mp4) $('resultVideo').src = mp4.url; const images = files.filter(x => x.path.includes('/' + currentProfile + '/') && x.path.endsWith('.png')).slice(0,3); $('frames').innerHTML = images.map(x => `<img src="${x.url}" alt="${x.path}">`).join(''); $('artifactLinks').innerHTML = files.map(x => `<a href="${x.url}" target="_blank" rel="noreferrer">${x.path}</a>`).join(''); }
+  function renderStatus(status) { renderTimeline(status.status); $('evidencePanel').innerHTML = metric('作业',status.job_id) + metric('状态',status.status) + metric('API 调用',status.api_call_count) + metric('重试',status.retry_count) + metric('代码 SHA-256',status.code_sha256) + metric('轨迹验证',status.renders?.[currentProfile]?.verification?.status); $('logPanel').textContent = JSON.stringify(status.history || status, null, 2); setButtons(status.status); showResult(status); if (status.error) showError(new Error(status.error)); }
+  async function poll() { if (!job) return; try { const query = `/api/status?job=${encodeURIComponent(job)}${operation ? '&operation=' + encodeURIComponent(operation) : ''}`; const status = await request(query); renderStatus(status); const op = status.operation; if (op && (op.state === 'queued' || op.state === 'running')) setTimeout(poll,1000); else operation = ''; } catch (error) { showError(error); } }
+  async function prepare() { clearError(); try { const result = await request('/api/prepare',{method:'POST',body:JSON.stringify(payload())}); job = result.job; localStorage.setItem('codegenLab.job', job); renderStatus(result); } catch (error) { showError(error); } }
+  async function start(endpoint, body) { clearError(); try { const result = await request(endpoint,{method:'POST',body:JSON.stringify(body)}); operation = result.operation_id; poll(); } catch (error) { showError(error); } }
+  $('prepareButton').onclick = prepare; $('generateButton').onclick = () => start('/api/generate',{job}); $('smokeButton').onclick = () => { currentProfile='smoke'; start('/api/render',{job,profile:'smoke',blender:$('blender').value}); }; $('fullButton').onclick = () => { currentProfile='full'; start('/api/render',{job,profile:'full',blender:$('blender').value}); }; $('smokeTab').onclick = () => { currentProfile='smoke'; $('smokeTab').classList.add('selected'); $('fullTab').classList.remove('selected'); poll(); }; $('fullTab').onclick = () => { currentProfile='full'; $('fullTab').classList.add('selected'); $('smokeTab').classList.remove('selected'); poll(); };
+  if (job) poll(); else { renderTimeline(''); setButtons(''); }
+})();
+</script>
+</body>
+</html>
