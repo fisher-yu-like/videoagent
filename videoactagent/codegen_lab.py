@@ -16,6 +16,7 @@ import sys
 from uuid import uuid4
 
 from videoactagent.codegen_job import generate_codegen_job, prepare_codegen_job, render_codegen_job
+from videoactagent.prompt_codegen_pipeline import PromptCodegenRunner, PromptPipelineConfig
 
 
 class CodegenLabError(ValueError):
@@ -43,6 +44,30 @@ class CodegenLabConfig:
     def static_root(self) -> Path:
         return self.static_root_path or Path(__file__).resolve().parent.parent / "static"
 
+    @property
+    def protected_workspace(self) -> Path:
+        candidates = (
+            self.workspace / "runs" / "work" / "my_story",
+            self.workspace.parent.parent / "runs" / "work" / "my_story",
+        )
+        for candidate in candidates:
+            if candidate.is_dir():
+                return candidate.resolve()
+        return (self.workspace / "runs" / "work" / "my_story").resolve()
+
+    @property
+    def protected_url(self) -> str:
+        return "http://127.0.0.1:8770/api/session"
+
+    @property
+    def prompt_pipeline_config(self) -> PromptPipelineConfig:
+        return PromptPipelineConfig(
+            experiments_root=self.experiments_root,
+            blender=self.blender,
+            protected_workspace=self.protected_workspace,
+            protected_url=self.protected_url,
+        )
+
 
 @dataclass
 class Operation:
@@ -52,6 +77,7 @@ class Operation:
     state: str = "queued"
     error: str | None = None
     result: dict[str, Any] | None = None
+    stage: str = "queued"
     _condition: Condition = field(default_factory=Condition, repr=False)
 
     def document(self) -> dict[str, Any]:
@@ -61,6 +87,7 @@ class Operation:
             "kind": self.kind,
             "state": self.state,
             "error": self.error,
+            "stage": self.stage,
             "result": self.result,
         }
 
@@ -132,14 +159,17 @@ class CodegenLabApplication:
         prepare_fn: Callable[..., Path] = prepare_codegen_job,
         generate_fn: Callable[..., dict[str, Any]] = generate_codegen_job,
         render_fn: Callable[..., dict[str, Any]] = render_codegen_job,
+        prompt_runner: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         self.config = config
         self.prepare_fn = prepare_fn
         self.generate_fn = generate_fn
         self.render_fn = render_fn
+        self.prompt_runner = prompt_runner or PromptCodegenRunner(config.prompt_pipeline_config)
         self._lock = Lock()
         self._operations: dict[str, Operation] = {}
         self._active_jobs: dict[Path, str] = {}
+        self._active_prompt: str | None = None
 
     def resolve_job(self, value: object) -> Path:
         if not isinstance(value, (str, Path)) or not str(value):
@@ -197,6 +227,7 @@ class CodegenLabApplication:
     def _run(self, operation: Operation, job_path: Path, function: Callable[..., dict[str, Any]], kwargs: dict[str, Any]) -> None:
         with operation._condition:
             operation.state = "running"
+            operation.stage = operation.kind
             operation._condition.notify_all()
         try:
             operation.result = function(job_path, **kwargs)
@@ -227,6 +258,40 @@ class CodegenLabApplication:
         thread.start()
         return operation.document()
 
+    def start_prompt_run(self, prompt: object) -> dict[str, Any]:
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise CodegenLabError("prompt is required")
+        with self._lock:
+            if self._active_prompt is not None:
+                raise CodegenLabError("a prompt run is already active")
+            operation = Operation(uuid4().hex, "", "prompt")
+            self._operations[operation.operation_id] = operation
+            self._active_prompt = operation.operation_id
+        thread = Thread(target=self._run_prompt, args=(operation, prompt.strip()), daemon=True)
+        thread.start()
+        return operation.document()
+
+    def _run_prompt(self, operation: Operation, prompt: str) -> None:
+        with operation._condition:
+            operation.state = "running"
+            operation.stage = "prompt_pipeline"
+            operation._condition.notify_all()
+        try:
+            operation.result = self.prompt_runner(prompt)
+            if isinstance(operation.result, Mapping) and isinstance(operation.result.get("job"), str):
+                operation.job_path = operation.result["job"]
+            operation.state = "done"
+            operation.stage = "succeeded"
+        except Exception as exc:
+            operation.error = f"{type(exc).__name__}: {exc}"
+            operation.state = "error"
+            operation.stage = "failed"
+        finally:
+            with self._lock:
+                self._active_prompt = None
+            with operation._condition:
+                operation._condition.notify_all()
+
     def get_operation(self, operation_id: str) -> Operation:
         with self._lock:
             try:
@@ -245,6 +310,34 @@ class CodegenLabApplication:
         job_path = self.resolve_job(value)
         operation = self.get_operation(operation_id) if operation_id else None
         return status_document(job_path, operation)
+
+    def prompt_status(self, operation_id: str) -> dict[str, Any]:
+        operation = self.get_operation(operation_id)
+        result = operation.result if isinstance(operation.result, Mapping) else {}
+        status: dict[str, Any] = {
+            "operation_id": operation.operation_id,
+            "state": operation.state,
+            "stage": operation.stage,
+            "status": "running" if operation.state in {"queued", "running"} else ("failed" if operation.state == "error" else result.get("status", "succeeded")),
+            "error": operation.error,
+        }
+        document = result.get("document") if isinstance(result, Mapping) else None
+        if isinstance(document, Mapping):
+            for key in ("job_id", "api_call_count", "retry_count", "planner_attempts", "codegen_attempts"):
+                if key in document:
+                    status[key] = document[key]
+        job_value = result.get("job") if isinstance(result, Mapping) else None
+        video_value = result.get("video") if isinstance(result, Mapping) else None
+        if operation.state == "done" and isinstance(job_value, str) and isinstance(video_value, str):
+            job_path = Path(job_value).resolve()
+            try:
+                relative = Path(video_value).resolve().relative_to(job_path.parent).as_posix()
+            except ValueError:
+                relative = ""
+            if relative:
+                status["job"] = str(job_path)
+                status["video_url"] = f"/api/artifact?job={quote(str(job_path))}&path={quote(relative)}"
+        return status
 
 
 def _resolution(value: object) -> tuple[int, int]:
@@ -313,6 +406,10 @@ class _CodegenLabHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, "service": "codegen-lab", "port": self.config.port, "workspace": str(self.config.workspace), "experiments_root": str(self.config.experiments_root), "blender": str(self.config.blender), "blender_exists": self.config.blender.is_file()})
                 return
             query = parse_qs(parsed.query, keep_blank_values=True)
+            if parsed.path == "/api/prompt-status":
+                operation = query.get("operation", [""])[0]
+                self._send_json(200, {"ok": True, **self.application.prompt_status(operation)})
+                return
             if parsed.path == "/api/status":
                 job = query.get("job", [""])[0]
                 operation = query.get("operation", [None])[0]
@@ -334,6 +431,10 @@ class _CodegenLabHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             payload = self._body()
+            if self.path == "/api/prompt-run":
+                operation = self.application.start_prompt_run(payload.get("prompt"))
+                self._send_json(202, {"ok": True, **operation})
+                return
             if self.path == "/api/prepare":
                 self._send_json(200, {"ok": True, **self.application.prepare(payload)})
                 return
@@ -359,7 +460,7 @@ class _CodegenLabHandler(BaseHTTPRequestHandler):
         range_header = self.headers.get("Range")
         if range_header:
             try:
-                value = range_header.removeprefix("bytes=").split(",", 1)[0]
+                value = (range_header[len("bytes="):] if range_header.startswith("bytes=") else range_header).split(",", 1)[0]
                 left, right = value.split("-", 1)
                 start = int(left) if left else max(0, len(data) - int(right))
                 end = int(right) if right else len(data) - 1

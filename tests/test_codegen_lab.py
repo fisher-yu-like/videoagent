@@ -88,6 +88,45 @@ class CodegenLabTests(unittest.TestCase):
         release.set()
         app.wait_operation(first["operation_id"], timeout=2)
 
+    def test_prompt_run_uses_prompt_runner_and_exposes_only_final_video(self):
+        calls = []
+        def prompt_runner(prompt):
+            calls.append(prompt)
+            job_root = self.root / "runs" / "work" / "codegen_blender_v1" / "PF1"
+            job_root.mkdir(parents=True)
+            video = job_root / "renders" / "smoke" / "video.mp4"
+            video.parent.mkdir(parents=True)
+            video.write_bytes(b"video")
+            job = job_root / "job.json"
+            job.write_text(json.dumps({"job_id": "PF1", "status": "succeeded", "api_call_count": 2, "retry_count": 0}), encoding="utf-8")
+            return {"status": "succeeded", "job": str(job), "video": str(video), "document": {"job_id": "PF1", "api_call_count": 2}}
+        app = CodegenLabApplication(CodegenLabConfig(self.root, self.blender), prompt_runner=prompt_runner)
+        operation = app.start_prompt_run("a station meeting")
+        result = app.wait_operation(operation["operation_id"], timeout=2)
+        self.assertEqual(result["state"], "done")
+        self.assertEqual(calls, ["a station meeting"])
+        status = app.prompt_status(operation["operation_id"])
+        self.assertEqual(status["status"], "succeeded")
+        self.assertTrue(status["video_url"].endswith("renders/smoke/video.mp4"))
+
+    def test_prompt_status_hides_video_until_operation_succeeds(self):
+        started = Event()
+        release = Event()
+        def prompt_runner(prompt):
+            started.set()
+            release.wait(2)
+            raise RuntimeError("planner failed")
+        app = CodegenLabApplication(CodegenLabConfig(self.root, self.blender), prompt_runner=prompt_runner)
+        operation = app.start_prompt_run("bad scene")
+        self.assertTrue(started.wait(2))
+        running = app.prompt_status(operation["operation_id"])
+        self.assertNotIn("video_url", running)
+        release.set()
+        finished = app.wait_operation(operation["operation_id"], timeout=2)
+        self.assertEqual(finished["state"], "error")
+        failed = app.prompt_status(operation["operation_id"])
+        self.assertNotIn("video_url", failed)
+
 
 if __name__ == "__main__":
     unittest.main()

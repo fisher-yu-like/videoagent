@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import time
 from threading import Thread
 import unittest
 from urllib.error import HTTPError
@@ -38,8 +39,18 @@ class CodegenLabHTTPTests(unittest.TestCase):
             self.calls.append("render")
             return {"status": "smoke_succeeded", "profile": kwargs["profile"]}
 
+        def prompt_runner(prompt):
+            self.calls.append("prompt")
+            job_root = self.root / "runs" / "work" / "codegen_blender_v1" / "PF1"
+            video = job_root / "renders" / "smoke" / "video.mp4"
+            video.parent.mkdir(parents=True, exist_ok=True)
+            video.write_bytes(b"video")
+            job = job_root / "job.json"
+            job.write_text(json.dumps({"job_id": "PF1", "status": "succeeded", "api_call_count": 2}), encoding="utf-8")
+            return {"status": "succeeded", "job": str(job), "video": str(video), "document": {"job_id": "PF1", "api_call_count": 2}}
+
         config = CodegenLabConfig(self.root, self.blender, port=0, static_root_path=self.static)
-        app = CodegenLabApplication(config, prepare_fn=preparer, generate_fn=generator, render_fn=renderer)
+        app = CodegenLabApplication(config, prepare_fn=preparer, generate_fn=generator, render_fn=renderer, prompt_runner=prompt_runner)
         self.server = create_server(config, application=app)
         self.thread = Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -83,6 +94,24 @@ class CodegenLabHTTPTests(unittest.TestCase):
         status, _, body = self.request(f"/api/status?job={job_path}&operation={operation['operation_id']}")
         self.assertEqual(status, 200)
         self.assertIn("operation", json.loads(body))
+
+    def test_prompt_run_returns_only_final_video_status(self):
+        status, _, body = self.request("/api/prompt-run", method="POST", payload={"prompt": "a station meeting"})
+        operation = json.loads(body)
+        self.assertEqual(status, 202)
+        operation_id = operation["operation_id"]
+        result = None
+        for _ in range(20):
+            status, _, body = self.request(f"/api/prompt-status?operation={operation_id}")
+            result = json.loads(body)
+            if result.get("state") == "done":
+                break
+            time.sleep(0.05)
+        self.assertEqual(status, 200)
+        assert result is not None
+        self.assertEqual(result["status"], "succeeded")
+        self.assertIn("video_url", result)
+        self.assertNotIn("generated_scene.py", result)
 
     def test_render_accepts_only_smoke_or_full(self):
         with self.assertRaises(HTTPError) as raised:

@@ -9,7 +9,6 @@ import math
 from pathlib import Path
 from typing import Any
 
-import imageio_ffmpeg
 
 
 class CodegenVerifyError(ValueError):
@@ -44,6 +43,10 @@ def _finite_vector(value: object, label: str, length: int = 3) -> list[float]:
 
 
 def _decode(path: Path, *, expected_frames: int, expected_fps: int, expected_resolution: tuple[int, int], expected_duration: float) -> dict[str, Any]:
+    try:
+        import imageio_ffmpeg
+    except ImportError as exc:
+        raise CodegenVerifyError("imageio_ffmpeg is required for video verification") from exc
     if not path.is_file() or path.stat().st_size <= 0:
         raise CodegenVerifyError(f"video is missing or empty: {path}")
     reader = imageio_ffmpeg.read_frames(str(path), pix_fmt="rgb24")

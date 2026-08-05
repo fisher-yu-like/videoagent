@@ -26,7 +26,11 @@
 .\.venv\Scripts\python.exe -m videoactagent.cli codegen-lab serve --workspace C:\Users\sy\Desktop\videoactagent --blender D:\blender\blender.exe --port 8781
 ```
 
-Codegen Lab 页面需要填写 Prompt、ShotScript、轨迹 JSON 和受保护工作区。点击“准备作业”只做哈希快照；“真实生成”只调用一次 DeepSeek-v4-pro，失败不会自动重试；随后先 Smoke，再 Full。页面显示的是实际 `job.json`、日志、哈希和 MP4，不把 HTTP 受理状态当成成功。
+Codegen Lab 现在默认打开 Prompt-only 页面：只需输入一段完整场景 Prompt，页面会自动执行 DeepSeek-v4-pro Planner → ShotScript/人物 K0–K4 轨迹 → DeepSeek-v4-pro Blender Codegen → AST 安全检查 → 本地 Blender 真实渲染。固定默认时长 5 秒、8 FPS、640×360。每个阶段最多三次尝试；只有把上一轮的 schema/安全/Blender 日志错误反馈给下一轮才允许重试。最终页面只显示 MP4，不显示内部代码或路径。
+
+作业证据保存在 `runs/work/codegen_blender_v1/PF<n>/`：`prompt.txt`、`plan/attempt-*`、`source/input.json`、`api/attempt-*`、`renders/smoke/video.mp4`、`render.log` 和 `job.json`。失败作业不返回 `video_url`。旧版 Prepare/Generate/Smoke/Full API 仍保留，供需要手工 ShotScript/轨迹的实验使用。
+
+推荐先运行 `prompts/station_reunion.txt`，再依次试 `prompts/city_crosswalk.txt`、`prompts/forest_path.txt`、`prompts/studio_room.txt`。这些 Prompt 都描述单段完整故事，不拆分镜头。
 
 ## 新页面只做三步
 

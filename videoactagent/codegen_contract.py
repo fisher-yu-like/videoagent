@@ -64,7 +64,10 @@ def _canonical_write(path: Path, value: object) -> None:
             os.fsync(handle.fileno())
         os.replace(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _validate_resolution(resolution: tuple[int, int]) -> tuple[int, int]:

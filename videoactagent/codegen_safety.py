@@ -60,7 +60,7 @@ def validate_generated_code(code: str) -> dict[str, Any]:
     if function.decorator_list:
         raise CodegenSafetyError("build_scene decorators are not allowed")
     args = function.args
-    if args.posonlyargs or len(args.args) != 1 or args.vararg or args.kwarg or args.kwonlyargs or args.defaults or args.kw_defaults:
+    if getattr(args, "posonlyargs", []) or len(args.args) != 1 or args.vararg or args.kwarg or args.kwonlyargs or args.defaults or args.kw_defaults:
         raise CodegenSafetyError("build_scene must accept exactly one context argument")
     if args.args[0].arg != "context":
         raise CodegenSafetyError("build_scene argument must be named context")

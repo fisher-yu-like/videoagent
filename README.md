@@ -35,9 +35,21 @@ Blender 一次加载共享场景，输出 3 路同步视频 + Depth/CryptoObject
 
 浏览器打开 `http://127.0.0.1:8770`，依次完成：输入 Prompt → 审批场景表单 → 审批完整 Reference Proxy → 审批人物/物体轨迹 → 审批三机位职责 → 审批三视角 Proxy。每次批准后页面自动进入下一步；可以返回旧版本重新分叉，旧证据不会覆盖。
 
-Codegen Lab 浏览器打开 `http://127.0.0.1:8781`。它与 8769/8770 独立，可以同时运行；Prepare 不调用 API，点击真实生成才会进行一次 DeepSeek-v4-pro 调用，Smoke 通过后才可 Full。
+Codegen Lab 浏览器打开 `http://127.0.0.1:8781`。它与 8769/8770 独立，可以同时运行；旧版 Codegen Lab 的 Prepare/Generate/Smoke/Full 接口保留，新页面只接收一个 Prompt。
 
-DeepSeek 只读取 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，模型固定为 `deepseek-v4-flash`。只有用户点击生成或重规划才调用 API，每次一次、零自动重试；密钥不会写入证据。DeepSeek 只生成受约束 JSON，本地 [Blender 编译器](videoactagent/blender_proxy.py) 负责生成真实 `.blend` 和 MP4，不执行 LLM 代码。详细说明见 [docs/USAGE.md](docs/USAGE.md)。
+旧向导仍使用 `deepseek-v4-flash`；新的 Prompt-only 页面使用 `deepseek-v4-pro`。两者只读取 `DEEPSEEK_API_KEY` 和 `DEEPSEEK_BASE_URL`，密钥不会写入证据。新页面的每次作业最多执行 Planner 3 次、Blender Codegen 3 次；重试必须带上 schema、AST、安全检查或 Blender 日志反馈，不搜索 seed，也不伪造视频结果。详细说明见 [docs/USAGE.md](docs/USAGE.md)。
+
+## Prompt-only Blender Codegen（新实验）
+
+```text
+用户 Prompt
+    ↓ DeepSeek-v4-pro Planner（严格 scene-plan JSON）
+ShotScript + 人物 K0–K4 轨迹
+    ↓ DeepSeek-v4-pro Blender Codegen（受限 build_scene(context)）
+AST 安全检查 → 本地 Blender 真实渲染 → MP4
+```
+
+新页面只展示 Prompt 输入和最终视频。作业保存在 `runs/work/codegen_blender_v1/PF<n>/`，包含规划尝试、代码尝试、输入快照、日志、视频和 `job.json`；失败作业不返回视频 URL。可以直接使用 `prompts/` 中的示例，例如 `station_reunion.txt`、`city_crosswalk.txt`、`forest_path.txt`、`studio_room.txt`。
 
 ## 已完成与限制
 
