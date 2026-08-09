@@ -612,3 +612,18 @@ def test_t2v_prompt_is_live_action_and_explicitly_preserves_authored_story():
     assert "live-action" in prompt
     assert "no clay" in prompt.lower()
     assert "lead dancer" in prompt
+
+
+def test_seedance_upload_fallback_uses_tested_uguu_without_tos(monkeypatch):
+    from scripts.run_complex_scene_suite import _temp_upload_config
+
+    for name in (
+        "TOS_ACCESS_KEY", "VOLC_ACCESSKEY", "TOS_SECRET_KEY", "VOLC_SECRETKEY",
+        "TOS_BUCKET", "TOS_ENDPOINT", "TOS_REGION", "VIDEOACTAGENT_TEMP_UPLOAD",
+        "VIDEOACTAGENT_TEMP_UPLOAD_ENDPOINT", "VIDEOACTAGENT_TEMP_UPLOAD_PROVIDER",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    config = _temp_upload_config()
+    assert config.temp_upload_enabled is True
+    assert config.temp_upload_provider == "uguu"
+    assert config.temp_upload_endpoint == "https://uguu.se/upload.php"

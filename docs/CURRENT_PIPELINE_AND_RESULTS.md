@@ -312,3 +312,11 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 四个 revision 的真实 Proxy 确定性检查均通过（20 passed / 0 failed / 2 unknown，低模创意可读性仍需人工/VLM）；每个 revision 都是独立目录，没有覆盖旧结果。revision_021–024 各调用 VLM 1 次，均为 `revision_requested`，因此本轮 Seedance/Kling/API 调用保持 0，未进入 Appearance-only Prompt。当前应优先换更标准的人形 rig/动作片段或接入 hand/foot IK，再重新走 ProxyVerifier→VLM。
 
 本轮相关回归测试为 52 passed。完整仓库测试未作为通过依据：VACE 第三方测试收集时缺少 `vace` 包，`tests/` 全量还触发既有外部集成测试并在 360 秒超时；这些失败均保留原始证据。
+
+### 4.14 full-chain Seedance endpoint / 2026-08-10
+
+完整证据见 [E2E_SEEDANCE_RUN_20260810.md](E2E_SEEDANCE_RUN_20260810.md)。使用历史已通过 VLM 的 plaza Proxy，在新不可变目录中按 camera_id 独立提交 Seedance：4 submit、84 query、4 download，四个真实 MP4 均通过文件、ffprobe、时长和黑帧检查。最终 VLM 发现独立 task 之间出现人物身份、服装和场景布局漂移，因此最终视觉门禁为 `revision_requested`；没有把“成功下载”误报为“多视角一致”，也没有再次生成。
+
+同日 `park_badminton` canonical/skeleton 两个 Proxy 真实 VLM 均拒绝，Seedance 调用均为 0；问题回到场景 staging、接触轨迹和机位覆盖。
+
+本轮还修复了两个可复现的执行问题：无 TOS 凭据时复杂场景 runner 不再隐式选择已失败的 tmpfiles，而是使用此前真实跑通的 Uguu 研究上传通道；Seedance 默认最大轮询从 20 提高到 30，只增加同一 task 的状态等待，不增加 submit、不自动重试。相关回归测试共 65 passed。

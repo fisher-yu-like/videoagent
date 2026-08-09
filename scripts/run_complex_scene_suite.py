@@ -2072,11 +2072,15 @@ def _temp_upload_config():
     config = load_upload_config()
     if config.has_tos_credentials or config.temp_upload_enabled:
         return config
+    # The previous implicit fallback used tmpfiles, which returned a real
+    # connection-reset failure on this host.  Keep TOS as the production path,
+    # but use the already-tested Uguu research transport when no credentials
+    # are configured; this does not change the Seedance request shape.
     return config.__class__(
         access_key=config.access_key, secret_key=config.secret_key, bucket=config.bucket,
         endpoint=config.endpoint, region=config.region, expires_seconds=config.expires_seconds,
-        temp_upload_enabled=True, temp_upload_endpoint=config.temp_upload_endpoint,
-        temp_upload_provider=config.temp_upload_provider,
+        temp_upload_enabled=True, temp_upload_endpoint="https://uguu.se/upload.php",
+        temp_upload_provider="uguu",
     )
 
 
@@ -2601,7 +2605,7 @@ def main() -> int:
     parser.add_argument("--allow-unreviewed-backend", action="store_true", help="compatibility override; never use for reported experiments")
     parser.add_argument("--skip-seedance", action="store_true", help="render and verify Proxy only; make no external API calls")
     parser.add_argument("--poll-interval", type=float, default=10.0)
-    parser.add_argument("--max-polls", type=int, default=20)
+    parser.add_argument("--max-polls", type=int, default=30)
     parser.add_argument("--scene-id", action="append", choices=[scene["scene_id"] for scene in iter_scene_specs()])
     args = parser.parse_args()
     if not args.blender.is_file():
