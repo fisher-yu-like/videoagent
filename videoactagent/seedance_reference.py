@@ -15,7 +15,12 @@ import ipaddress
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Literal, Mapping
+from typing import Any, Mapping
+
+try:  # Python 3.7 compatibility for the legacy local Blender environment.
+    from typing import Literal
+except ImportError:  # pragma: no cover - exercised only by old runtimes.
+    from typing_extensions import Literal
 from urllib.parse import urlparse
 import weakref
 

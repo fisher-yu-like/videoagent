@@ -1,0 +1,25 @@
+{
+  "schema_version": "appearance-profile-1.0",
+  "scene_id": "station_001",
+  "subjects": [
+    {
+      "entity_id": "traveler",
+      "description": "adult traveler in a dark wool coat, natural skin and cloth"
+    },
+    {
+      "entity_id": "friend",
+      "description": "adult friend in a muted blue jacket, natural skin and cloth"
+    },
+    {
+      "entity_id": "luggage",
+      "description": "realistic small rolling suitcase with fabric texture and metal handle"
+    }
+  ],
+  "environment": "real railway station platform with grounded architecture and natural depth",
+  "lighting": "soft overcast daylight with coherent contact shadows and stable exposure",
+  "quality": "photoreal live-action appearance, natural anatomy, realistic skin, cloth, and materials",
+  "must_avoid": [
+    "clay or low-poly geometry",
+    "labels, guide lines, and visible CG overlays"
+  ]
+}

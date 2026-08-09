@@ -192,14 +192,15 @@ def compile_trajectory_prompt(
 
         for first_index, first_actor in enumerate(actors):
             for second_actor in actors[first_index + 1:]:
+                spacing = _spacing_change(
+                    _actor_point(first, first_actor),
+                    _actor_point(first, second_actor),
+                    _actor_point(second, first_actor),
+                    _actor_point(second, second_actor),
+                )
                 facts.append(
                     f"{segment}, {first_actor} and {second_actor} "
-                    f"{_spacing_change(
-                        _actor_point(first, first_actor),
-                        _actor_point(first, second_actor),
-                        _actor_point(second, first_actor),
-                        _actor_point(second, second_actor),
-                    )}"
+                    f"{spacing}"
                 )
 
         facts.extend(

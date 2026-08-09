@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "videoactagent://pipeline-v2/world-state.schema.json",
+  "title": "VideoActAgent shared WorldState",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "scene_plan",
+    "physical_state_plan",
+    "character_trajectory_plan",
+    "object_trajectory_plan",
+    "camera_trajectory_plan"
+  ],
+  "properties": {
+    "schema_version": {"const": "world-state-1.0"},
+    "scene_plan": {"$ref": "#/$defs/scenePlan"},
+    "physical_state_plan": {"$ref": "#/$defs/physicalStatePlan"},
+    "character_trajectory_plan": {"$ref": "#/$defs/trajectoryPlan"},
+    "object_trajectory_plan": {"$ref": "#/$defs/trajectoryPlan"},
+    "camera_trajectory_plan": {"$ref": "#/$defs/cameraPlan"}
+  },
+  "$defs": {
+    "vector3": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}],
+      "minItems": 3,
+      "maxItems": 3
+    },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["frame", "position", "rotation"],
+      "properties": {
+        "frame": {"type": "integer", "minimum": 0},
+        "position": {"$ref": "#/$defs/vector3"},
+        "rotation": {"$ref": "#/$defs/vector3"}
+      }
+    },
+    "entity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "asset"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"},
+        "kind": {"enum": ["character", "object"]},
+        "asset": {"type": "string", "minLength": 1}
+      }
+    },
+    "scenePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scene_id", "environment_preset", "duration_seconds", "fps", "frame_count", "entities"],
+      "properties": {
+        "scene_id": {"type": "string"},
+        "environment_preset": {"type": "string", "minLength": 1},
+        "duration_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "fps": {"type": "integer", "minimum": 1},
+        "frame_count": {"type": "integer", "minimum": 2},
+        "entities": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/entity"}}
+      }
+    },
+    "physicalStatePlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["events"],
+      "properties": {
+        "parameters": {"type": "object"},
+        "events": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "frame", "type", "participants"],
+            "properties": {
+              "id": {"type": "string"},
+              "frame": {"type": "integer", "minimum": 0},
+              "type": {"type": "string", "minLength": 1},
+              "participants": {"type": "array", "items": {"type": "string"}}
+            }
+          }
+        }
+      }
+    },
+    "trajectoryPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tracks"],
+      "properties": {
+        "tracks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["target_id", "points"],
+            "properties": {
+              "target_id": {"type": "string"},
+              "points": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/point"}}
+            }
+          }
+        }
+      }
+    },
+    "cameraPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cameras"],
+      "properties": {
+        "cameras": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "role", "target", "lens_mm", "roll_deg", "points"],
+            "properties": {
+              "id": {"type": "string"},
+              "role": {"type": "string", "minLength": 1},
+              "target": {
+                "oneOf": [
+                  {"type": "object", "additionalProperties": false, "required": ["object_id"], "properties": {"object_id": {"type": "string"}}},
+                  {"type": "object", "additionalProperties": false, "required": ["point"], "properties": {"point": {"$ref": "#/$defs/vector3"}}}
+                ]
+              },
+              "lens_mm": {"type": "number", "exclusiveMinimum": 0},
+              "roll_deg": {"type": "number"},
+              "points": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/point"}}
+            }
+          }
+        }
+      }
+    }
+  }
+}

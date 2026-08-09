@@ -108,6 +108,151 @@ def build_seedance_reference_video(
     }
 
 
+def build_seedance_multiview_reference_video(
+    prompt: str,
+    proxy_urls: list[str] | tuple[str, ...],
+    *,
+    model: str,
+    duration: int = 5,
+) -> dict:
+    """Build one Seedance request with exactly three shared-world references."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Seedance multiview prompt must be a nonempty string")
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("Seedance model is not an allowlisted exact model identifier")
+    if type(duration) is not int or duration != 5:
+        raise ValueError("Seedance multiview duration must be exactly 5 seconds")
+    if not isinstance(proxy_urls, (list, tuple)) or len(proxy_urls) != 3:
+        raise ValueError("Seedance multiview requires exactly 3 reference videos")
+    validated = []
+    for url in proxy_urls:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("Seedance multiview URLs must be nonempty strings")
+        if url in validated:
+            raise ValueError("Seedance multiview reference videos must not contain duplicate URLs")
+        from videoactagent.seedance_reference import validate_remote_video_asset
+        validated.append(validate_remote_video_asset(url))
+    return {
+        "model": model,
+        "content": [
+            {"type": "text", "text": prompt},
+            *[
+                {
+                    "type": "video_url",
+                    "video_url": {"url": url},
+                    "role": "reference_video",
+                }
+                for url in validated
+            ],
+        ],
+        "parameters": {
+            "ratio": "16:9",
+            "resolution": "720p",
+            "duration": 5,
+            "watermark": False,
+        },
+    }
+
+
+def build_seedance_reference_videos(
+    prompt: str,
+    proxy_urls: list[str] | tuple[str, ...],
+    *,
+    model: str,
+    duration: int = 5,
+) -> dict:
+    """Build a one-output request with an optional canonical identity anchor.
+
+    The first URL is the canonical identity anchor when two or more URLs are
+    supplied; the remaining URL(s) are motion/camera references.  The gateway
+    requires every video item to use the literal ``reference_video`` role, so
+    the semantic distinction is carried by the Prompt and input ordering.
+    This is deliberately separate from the historical three-view probe,
+    because the gateway still returns one video per task.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Seedance reference prompt must be a nonempty string")
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("Seedance model is not an allowlisted exact model identifier")
+    if type(duration) is not int or duration != 5:
+        raise ValueError("Seedance reference-video duration must be exactly 5 seconds")
+    if not isinstance(proxy_urls, (list, tuple)) or not 1 <= len(proxy_urls) <= 3:
+        raise ValueError("Seedance reference request requires between 1 and 3 reference videos")
+    from videoactagent.seedance_reference import validate_remote_video_asset
+
+    validated = []
+    for url in proxy_urls:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("Seedance reference URLs must be nonempty strings")
+        if url in validated:
+            raise ValueError("Seedance reference videos must not contain duplicate URLs")
+        validated.append(validate_remote_video_asset(url))
+    content = [{"type": "text", "text": prompt}]
+    for url in validated:
+        content.append({"type": "video_url", "video_url": {"url": url}, "role": "reference_video"})
+    return {
+        "model": model,
+        "content": content,
+        "parameters": {
+            "ratio": "16:9",
+            "resolution": "720p",
+            "duration": 5,
+            "watermark": False,
+        },
+    }
+
+
+def build_seedance_multiview_reference_videos(
+    prompt: str,
+    proxy_urls: list[str] | tuple[str, ...],
+    *,
+    model: str,
+    duration: int = 5,
+) -> dict:
+    """Build a research-only 3–8-view request without changing the 3-view API.
+
+    The gateway/model may reject more than three references.  That rejection is
+    useful evidence for the multiview-capability probe and is preserved by the
+    caller; this function intentionally does not silently truncate inputs.
+    """
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("Seedance multiview prompt must be a nonempty string")
+    if model not in SUPPORTED_SEEDANCE_MODELS:
+        raise ValueError("Seedance model is not an allowlisted exact model identifier")
+    if type(duration) is not int or duration != 5:
+        raise ValueError("Seedance multiview duration must be exactly 5 seconds")
+    if not isinstance(proxy_urls, (list, tuple)) or not 3 <= len(proxy_urls) <= 8:
+        raise ValueError("Seedance multiview probe requires between 3 and 8 reference videos")
+    validated = []
+    from videoactagent.seedance_reference import validate_remote_video_asset
+    for url in proxy_urls:
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError("Seedance multiview URLs must be nonempty strings")
+        if url in validated:
+            raise ValueError("Seedance multiview reference videos must not contain duplicate URLs")
+        validated.append(validate_remote_video_asset(url))
+    return {
+        "model": model,
+        "content": [
+            {"type": "text", "text": prompt},
+            *[
+                {
+                    "type": "video_url",
+                    "video_url": {"url": url},
+                    "role": "reference_video",
+                }
+                for url in validated
+            ],
+        ],
+        "parameters": {
+            "ratio": "16:9",
+            "resolution": "720p",
+            "duration": 5,
+            "watermark": False,
+        },
+    }
+
+
 def extract_task_id(response: dict) -> str:
     task_id = response.get("task_id") or (response.get("result") or {}).get(
         "task_id"

@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 .idea/
 artifacts/
 .venv/
@@ -18,3 +19,7 @@ checkpoints/
 *.blend
 .worktrees/
 third_party/
+tmp/
+temp_uploads/
+local_uploads/
+*.log

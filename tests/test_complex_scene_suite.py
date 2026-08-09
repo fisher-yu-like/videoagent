@@ -1,0 +1,357 @@
+import json
+import tempfile
+from pathlib import Path
+
+
+def test_three_scenes_have_explicit_tracks_and_granular_actions():
+    from videoactagent.complex_scene_prompts_v2 import SCENES
+
+    assert len(SCENES) == 3
+    for scene in SCENES:
+        assert len(scene["entities"]) >= 5
+        assert len(scene["cameras"]) == 4
+        assert len(scene["action_phases"]) >= 4
+        assert scene["gesture_tracks"]
+        for track in scene["tracks"]:
+            points = track["points"]
+            assert len(points) >= 4
+            frames = [point["frame"] for point in points]
+            assert frames == sorted(set(frames))
+            assert frames[-1] < 120
+
+
+def test_seedance_prompt_forbids_proxy_geometry_and_preserves_action_order():
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    prompt = scene_spec("plaza_dance_circle")["appearance_prompt"]
+    assert "one continuous five-second" in prompt.lower()
+    assert "clay" in prompt.lower()
+    assert "wave" in prompt.lower() and "dance" in prompt.lower()
+    assert "no cuts" in prompt.lower()
+
+
+def test_suite_budget_is_three_real_seedance_submissions():
+    from scripts.run_complex_scene_suite import SEEDANCE_SUBMISSION_BUDGET
+
+    assert SEEDANCE_SUBMISSION_BUDGET == 3
+
+
+def test_compile_scene_produces_pipeline_worldstate_with_four_cameras():
+    from scripts.run_complex_scene_suite import compile_scene_world
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    world = compile_scene_world(scene_spec("plaza_dance_circle"))
+    assert world.camera_count == 4
+    assert world.frame_count == 120
+    ids = {entity["id"] for entity in world.to_dict()["scene_plan"]["entities"]}
+    assert {"person_a", "person_b"}.issubset(ids)
+
+
+def test_output_root_is_isolated():
+    import tempfile
+    from scripts.run_complex_scene_suite import output_dir_for
+
+    with tempfile.TemporaryDirectory(dir=".") as temp_root:
+        first = output_dir_for(temp_root, "plaza_dance_circle", "20260809_000001")
+        second = output_dir_for(temp_root, "plaza_dance_circle", "20260809_000002")
+        assert first != second
+        assert str(first).endswith("plaza_dance_circle_20260809_000001")
+
+
+def test_seedance_stage_selects_one_camera_per_scene():
+    from scripts.run_complex_scene_suite import select_seedance_camera
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    assert select_seedance_camera(scene_spec("plaza_dance_circle"))["camera_id"] == "master"
+
+
+def test_seedance_stage_submits_every_manifest_camera_independently():
+    from scripts.run_complex_scene_suite import select_seedance_cameras
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    cameras = select_seedance_cameras(scene_spec("plaza_dance_circle"))
+    assert [camera["camera_id"] for camera in cameras] == ["master", "lateral", "reverse", "elevated"]
+
+
+def test_badminton_net_proxy_keeps_players_visible():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'eid + "__top"' in script
+    assert 'eid + "__post_l"' in script
+
+
+def test_director_plan_adapter_overrides_world_schema_version():
+    from scripts.run_complex_scene_suite import director_plan_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+    from scripts.run_complex_scene_suite import compile_scene_world
+
+    plan = director_plan_for(compile_scene_world(scene_spec("plaza_dance_circle")))
+    assert plan["schema_version"] == "director-plan-1.0"
+
+
+def test_canonical_registry_preserves_entities_without_changing_worldstate():
+    from scripts.run_complex_scene_suite import asset_registry_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("plaza_dance_circle")
+    registry = asset_registry_for(spec, "canonical")
+    assert registry["shared_world"] is True
+    person = next(item for item in registry["assets"] if item["asset_id"] == "person_a")
+    assert person["source_kind"] == "canonical_procedural_v3"
+    assert "upper_arm.L" in person["parts"]
+    assert len(person["asset_sha256"]) == 64
+
+
+def test_generated_blender_script_has_canonical_branch_and_preserves_camera_log():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'args.render_style == "canonical"' in script
+    assert "asset_registry.json" in script
+    assert "gesture_tracks.json" in script
+    assert 'add_cube("backdrop", (0, 12.0, 3.0)' in script
+    assert 'camera_logs.append' in script
+
+
+def test_canonical_motion_profile_contains_leg_tracks_and_foot_contacts():
+    from scripts.run_complex_scene_suite import canonical_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    profile = canonical_motion_profile_for(scene_spec("plaza_dance_circle"))
+    assert profile["schema_version"] == "canonical-motion-profile-1.0"
+    dancer = next(item for item in profile["characters"] if item["target_id"] == "person_a")
+    assert set(dancer["limb_tracks"]) >= {"left_leg", "right_leg"}
+    assert len(dancer["limb_tracks"]["left_leg"]) == 5
+    assert len(dancer["foot_contacts"]) == 5
+    assert {"left", "right"} <= set(dancer["foot_contacts"][0])
+
+
+def test_generated_blender_script_consumes_canonical_motion_profile():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'motion_tracks.json' in script
+    assert 'canonical_motion_tracks' in script
+    assert 'foot_contacts' in script
+    assert 'legs[(eid, "left_leg" if side == "L" else "right_leg")]' in script
+
+
+def test_storyblender_revision_preserves_tracks_and_widens_staging():
+    from scripts.run_complex_scene_suite import storyblender_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    original = scene_spec("plaza_dance_circle")
+    revised = storyblender_revision(original)
+    assert revised["revision"]["id"] == "revision_006"
+    assert revised["revision"]["parent_revision"] == "revision_005"
+    assert revised["tracks"] == original["tracks"]
+    assert revised["gesture_tracks"] != original["gesture_tracks"]
+    assert revised["cameras"][0]["lens_mm"] < original["cameras"][0]["lens_mm"]
+    assert revised["cameras"][0]["points"][0]["position"][1] < original["cameras"][0]["points"][0]["position"][1]
+
+
+def test_motion_materialization_verifier_requires_each_character_foot_contacts():
+    from scripts.run_complex_scene_suite import verify_motion_materialization
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        registry = root / "motion_tracks.json"
+        log = root / "motion_log.json"
+        registry.write_text(json.dumps({"characters": [{"target_id": "person_a", "foot_contacts": [{"frame": 0, "left": True, "right": True}]}]}), encoding="utf-8")
+        log.write_text(json.dumps([{"target_id": "person_a", "foot_contacts": [{"frame": 0, "left": True, "right": True}]}]), encoding="utf-8")
+        result = verify_motion_materialization(motion_path=registry, motion_log_path=log, proxy_style="canonical")
+        assert result["status"] == "passed"
+
+
+def test_safe_arm_angle_limits_inward_swing_without_removing_outward_gesture():
+    from scripts.run_complex_scene_suite import safe_arm_angle
+
+    assert safe_arm_angle("left_arm", 1.5) < 1.0
+    assert safe_arm_angle("right_arm", -1.5) > -1.0
+    assert safe_arm_angle("left_arm", -1.2) == -1.2
+    assert safe_arm_angle("right_arm", 1.2) == 1.2
+
+
+def test_generated_blender_script_has_head_collision_guard_for_arms():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "safe_arm_angle" in script
+    assert "arm.location.z = 2.02 + 0.55 * strength" not in script
+
+
+def test_arm_collision_verifier_checks_real_applied_pose_log():
+    from scripts.run_complex_scene_suite import verify_arm_collision_constraints
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        gesture = root / "gesture_tracks.json"
+        pose = root / "arm_pose_log.json"
+        gesture.write_text(json.dumps({"gesture_tracks": [{"target_id": "person_a", "limb": "left_arm"}]}), encoding="utf-8")
+        pose.write_text(json.dumps([{"target_id": "person_a", "limb": "left_arm", "min_angle": -1.2, "max_angle": 0.7, "min_elbow_clearance": 0.18}]), encoding="utf-8")
+        result = verify_arm_collision_constraints(gesture_path=gesture, arm_pose_path=pose, proxy_style="canonical")
+        assert result["status"] == "passed"
+
+
+def test_arm_clearance_revision_is_new_and_preserves_storyblender_revision():
+    from scripts.run_complex_scene_suite import arm_clearance_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = arm_clearance_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_007"
+    assert revised["revision"]["parent_revision"] == "revision_006"
+    assert revised["tracks"] != []
+
+
+def test_skeleton_motion_profile_contains_explicit_bone_tracks_and_constraints():
+    from scripts.run_complex_scene_suite import skeleton_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    profile = skeleton_motion_profile_for(scene_spec("plaza_dance_circle"))
+    assert profile["schema_version"] == "skeleton-motion-profile-1.0"
+    character = next(item for item in profile["characters"] if item["target_id"] == "person_a")
+    required = {"root", "pelvis", "spine", "head", "upper_arm.L", "forearm.L", "hand.L", "upper_leg.L", "lower_leg.L", "foot.L"}
+    assert required <= set(character["bones"])
+    assert len(character["bone_tracks"]["hand.L"]) == 5
+    assert len(character["bone_tracks"]["foot.L"]) == 5
+    assert character["foot_contacts"]
+    assert character["joint_limits"]["elbow"]
+
+
+def test_generated_blender_script_contains_isolated_skeleton_branch():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'choices=["clay", "canonical", "skeleton", "diagnostic"]' in script
+    assert "skeleton_motion.json" in script
+    assert "procedural_skeleton_v1" in script
+    assert "skeleton_pose_log.json" in script
+    assert "ik_target" in script
+    assert 'args.render_style == "canonical"' in script
+
+
+def test_skeleton_verifier_accepts_real_pose_log_and_rejects_missing_bone_frames():
+    from scripts.run_complex_scene_suite import verify_skeleton_materialization
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        motion = root / "skeleton_motion.json"
+        pose = root / "skeleton_pose_log.json"
+        profile = {
+            "schema_version": "skeleton-motion-profile-1.0",
+            "characters": [{
+                "target_id": "person_a",
+                "bones": ["hand.L", "foot.L"],
+                "bone_tracks": {"hand.L": [{"frame": 0, "position": [0, 0, 1], "rotation": [0, 0, 0]}], "foot.L": [{"frame": 0, "position": [0, 0, 0], "rotation": [0, 0, 0]}]},
+                "foot_contacts": [{"frame": 0, "left": True, "right": False}],
+                "joint_limits": {"head_clearance_m": 0.12},
+            }],
+        }
+        motion.write_text(json.dumps(profile), encoding="utf-8")
+        pose.write_text(json.dumps([{"frame": 0, "characters": {"person_a": {"bones": {"hand.L": {"position": [0, 0, 1], "reachable": True}, "foot.L": {"position": [0, 0, 0], "reachable": True}}, "foot_contacts": profile["characters"][0]["foot_contacts"]}}}]), encoding="utf-8")
+        result = verify_skeleton_materialization(motion_path=motion, pose_path=pose, proxy_style="skeleton")
+        assert result["status"] == "passed"
+        pose.write_text(json.dumps([]), encoding="utf-8")
+        failed = verify_skeleton_materialization(motion_path=motion, pose_path=pose, proxy_style="skeleton")
+        assert failed["status"] == "failed"
+
+
+def test_skeleton_revision_is_immutable_next_revision():
+    from scripts.run_complex_scene_suite import skeleton_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = skeleton_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_008"
+    assert revised["revision"]["parent_revision"] == "revision_007"
+
+
+def test_camera_staging_revision_separates_passersby_and_avoids_overhead_rear_views():
+    from scripts.run_complex_scene_suite import camera_staging_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = camera_staging_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_009"
+    assert revised["revision"]["parent_revision"] == "revision_008"
+
+    person_b = next(track for track in revised["tracks"] if track["target_id"] == "person_b")
+    person_c = next(track for track in revised["tracks"] if track["target_id"] == "person_c")
+    # The musician stays separated from the crossing lane while the passerby
+    # remains behind the action, instead of merging into the dancer cluster.
+    assert all(point["position"][1] >= 1.45 for point in person_b["points"])
+    assert all(point["position"][1] >= 2.4 for point in person_c["points"])
+
+    reverse = next(camera for camera in revised["cameras"] if camera["camera_id"] == "reverse")
+    elevated = next(camera for camera in revised["cameras"] if camera["camera_id"] == "elevated")
+    assert reverse["target"] == "person_c"
+    assert max(point["position"][2] for point in elevated["points"]) < 8.0
+    assert elevated["lens_mm"] <= 36.0
+
+
+def test_camera_readability_revision_uses_grounded_three_quarter_coverage():
+    from scripts.run_complex_scene_suite import camera_readability_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = camera_readability_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_010"
+    assert revised["revision"]["parent_revision"] == "revision_009"
+    assert revised["revision"]["preserved"]
+    reverse = next(camera for camera in revised["cameras"] if camera["camera_id"] == "reverse")
+    assert reverse["target"] == "person_a"
+    assert "three-quarter" in reverse["role"]
+    assert all(max(point["position"][2] for point in camera["points"]) <= 6.0 for camera in revised["cameras"])
+
+
+def test_proxy_legibility_revision_keeps_speaker_grounded_and_strengthens_action_beats():
+    from scripts.run_complex_scene_suite import proxy_legibility_revision, _blender_script
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = proxy_legibility_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_011"
+    assert revised["revision"]["parent_revision"] == "revision_010"
+    dancer = next(item for item in revised["gesture_tracks"] if item["target_id"] == "person_a" and item["limb"] == "left_arm")
+    assert max(abs(float(point[1])) for point in dancer["points"]) >= 1.0
+    speaker = next(item for item in revised["tracks"] if item["target_id"] == "speaker")
+    assert all(float(point["position"][2]) == 0.35 for point in speaker["points"])
+    script = _blender_script()
+    assert 'eid + "__body", (0, 0.56, 0.66), (0.24, 0.14, 0.32)' in script
+    assert 'eid + "__body", (0, 0, 0.28), (0.36, 0.25, 0.26)' in script
+
+
+def test_motion_legibility_revision_raises_gesture_targets_and_uses_front_reverse_view():
+    from scripts.run_complex_scene_suite import motion_legibility_revision, skeleton_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("plaza_dance_circle")
+    revised = motion_legibility_revision(spec)
+    assert revised["revision"]["id"] == "revision_012"
+    assert revised["revision"]["parent_revision"] == "revision_011"
+    dancer = next(item for item in skeleton_motion_profile_for(revised)["characters"] if item["target_id"] == "person_a")
+    assert dancer["bone_tracks"]["hand.L"][1]["position"][2] > dancer["bone_tracks"]["hand.L"][0]["position"][2]
+    reverse = next(camera for camera in revised["cameras"] if camera["camera_id"] == "reverse")
+    assert all(point["position"][1] <= 0.0 for point in reverse["points"])
+
+
+def test_skeleton_gesture_targets_stay_within_two_link_reach():
+    from scripts.run_complex_scene_suite import skeleton_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    profile = skeleton_motion_profile_for(scene_spec("plaza_dance_circle"))
+    for character in profile["characters"]:
+        root_tracks = character["bone_tracks"]["root"]
+        for side in ("L", "R"):
+            for root, hand in zip(root_tracks, character["bone_tracks"][f"hand.{side}"]):
+                sign = 1.0 if side == "L" else -1.0
+                shoulder = [float(root["position"][0]) + sign * 0.44, float(root["position"][1]), float(root["position"][2]) + 2.15]
+                distance = sum((float(hand["position"][axis]) - shoulder[axis]) ** 2 for axis in range(3)) ** 0.5
+                assert distance <= 1.10 + 1e-6
+
+
+def test_t2v_prompt_is_live_action_and_explicitly_preserves_authored_story():
+    from scripts.run_complex_scene_suite import real_t2v_prompt
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    prompt = real_t2v_prompt(scene_spec("plaza_dance_circle"))
+    assert "live-action" in prompt
+    assert "no clay" in prompt.lower()
+    assert "lead dancer" in prompt
