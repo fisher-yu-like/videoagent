@@ -321,3 +321,15 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 同日 `park_badminton` canonical/skeleton 两个 Proxy 真实 VLM 均拒绝，Seedance 调用均为 0；问题回到场景 staging、接触轨迹和机位覆盖。
 
 本轮还修复了两个可复现的执行问题：无 TOS 凭据时复杂场景 runner 不再隐式选择已失败的 tmpfiles，而是使用此前真实跑通的 Uguu 研究上传通道；Seedance 默认最大轮询从 20 提高到 30，只增加同一 task 的状态等待，不增加 submit、不自动重试。相关回归测试共 65 passed。
+
+### 4.15 多场景 Proxy 试验 / 2026-08-10
+
+本轮使用三个不同 story prompt 生成新的 canonical 四机位 Proxy，命令入口仍为 `scripts/run_complex_scene_suite.py`，Seedance/Kling 调用为 0：
+
+| 场景 | 真实 Proxy 目录 | VLM | 主要阻塞 |
+|---|---|---|---|
+| `plaza_dance_circle` | `runs/results/complex_scene_suite_20260810_181253/plaza_dance_circle_20260810_181253/` | `revision_requested` | 人物/背包/音箱重叠，道具接地和动作顺序不清 |
+| `park_badminton` | `runs/results/complex_scene_suite_20260810_181253/park_badminton_20260810_181346/` | `revision_requested` | 网、球拍、球员和 spectator 重叠，serve/return 接触与脚接地不可读 |
+| `indoor_market_exchange` | `runs/results/complex_scene_suite_20260810_181253/indoor_market_exchange_20260810_181413/` | `revision_requested` | reverse 机位被 counter 遮挡，手推车轮子接地和 vendor/helper 关系不清 |
+
+三条场景均生成 4 个真实 MP4、manifest、state/camera/asset 日志并通过确定性媒体检查；每条各调用 VLM 1 次。由于反馈全部属于结构、轨迹、相机或物理事件，均没有进入 Appearance-only Prompt，也没有提交 Seedance。下一步应按场景分别做 Director/Blender revision，而不是用同一个真人化 prompt 覆盖这些结构问题。

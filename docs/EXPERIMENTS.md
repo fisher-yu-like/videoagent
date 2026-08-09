@@ -89,6 +89,16 @@
 
 本轮完整证据见 [E2E_SEEDANCE_RUN_20260810.md](E2E_SEEDANCE_RUN_20260810.md)。上传 fallback 改用 Uguu、默认轮询增至 30 的代码修复已通过相关测试；当前相关测试累计 65 passed。
 
+## 多场景与多 prompt Proxy 试验（2026-08-10）
+
+为避免只依赖 plaza 单一 prompt，本轮对三个不同故事分别生成共享世界四机位 canonical Proxy，并各做一次真实 VLM 审核：
+
+1. `plaza_dance_circle`：人物、背包、speaker 互相遮挡，侧步/挥手和接地关系不够清楚；
+2. `park_badminton`：两名球员、短网、球拍、shuttlecock、spectator 的空间关系和 serve/return 接触不够清楚；
+3. `indoor_market_exchange`：reverse 机位被 counter 遮挡，手推车轮子未表现出地面接触，vendor/helper 关系不稳定。
+
+三条 VLM 均为 `revision_requested`，Seedance/Kling 均为 0。该轮说明问题具有场景依赖性：不能用一个通用 Appearance-only Prompt 解决，需要对每个场景单独修 CameraTrajectoryPlan、角色/物体轨迹和接触约束。三条真实 Proxy 的目录和反馈已写入 `runs/results/complex_scene_suite_20260810_181253/`。
+
 ## 下一实验门
 
 轨迹处理保持冻结。只有 whole-story 输入先通过人工验收，并重新定义完整时长协议、真实视频输入方式和人工观察规则后，才讨论新的 API 小样本或 A100 显式控制实验。任何 API 调用或服务器推理必须先报告预算并获得允许。
