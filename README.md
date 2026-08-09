@@ -52,9 +52,9 @@ Proxy 只负责空间、动作、物体关系和机位结构；它不是最终�
 环境要求：Python 3.12、Blender 5.1（默认路径 `D:\blender\blender.exe`）。
 
 ```powershell
-python -m pip install -e .
-python -m pytest -q tests/test_pipeline_v2_state.py tests/test_pipeline_v2_proxy_verifier.py tests/test_complex_scene_suite.py
-python scripts/run_complex_scene_suite.py --scene-id plaza_dance_circle --proxy-style skeleton --skip-seedance
+\.venv\Scripts\python.exe -m pip install -e .
+\.venv\Scripts\python.exe -m pytest -q tests/test_pipeline_v2_state.py tests/test_pipeline_v2_proxy_verifier.py tests/test_complex_scene_suite.py
+\.venv\Scripts\python.exe scripts/run_complex_scene_suite.py --scene-id plaza_dance_circle --proxy-style skeleton --skip-seedance
 ```
 
 只想生成本地 Proxy 时使用 `--skip-seedance`。真实后端必须在 Proxy 通过人工/VLM 门禁后再启用；每个 camera 独立提交一个 reference-video task，不自动重试或换 seed。
