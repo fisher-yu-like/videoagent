@@ -226,6 +226,11 @@ def canonical_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     IK solver or a claim of photoreal motion.
     """
     characters = []
+    revision_id = str(spec.get("revision", {}).get("id", ""))
+    try:
+        revision_number = int(revision_id.rsplit("_", 1)[-1])
+    except (TypeError, ValueError):
+        revision_number = 0
     tracks = {str(track["target_id"]): track for track in spec.get("tracks", [])}
     for entity in spec.get("entities", []):
         if entity.get("kind") != "character":
@@ -240,7 +245,8 @@ def canonical_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
             for index in range(1, len(positions))
         )
         moving = total_distance > 0.45
-        swing = 0.34 if moving else 0.16
+        side_step_lead = target_id == "person_a" and revision_number >= 20
+        swing = 0.0 if side_step_lead else (0.34 if moving else 0.16)
         phase = [0.0, swing, -swing, swing * 0.8, 0.0]
         left = [{"frame": int(point["frame"]), "angle": float(value)} for point, value in zip(points, phase)]
         right = [{"frame": int(point["frame"]), "angle": float(-value)} for point, value in zip(points, phase)]
@@ -256,7 +262,7 @@ def canonical_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
             "root_track_frames": [int(point["frame"]) for point in points],
             "limb_tracks": {"left_leg": left, "right_leg": right},
             "foot_contacts": contacts,
-            "motion_mode": "alternating_stride" if moving else "grounded_weight_shift",
+            "motion_mode": "side_step_transfer" if side_step_lead else "alternating_stride" if moving else "grounded_weight_shift",
         })
     return {
         "schema_version": "canonical-motion-profile-1.0",
@@ -286,6 +292,26 @@ def skeleton_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Compile authored character tracks into explicit local bone landmarks."""
     tracks = {str(track["target_id"]): track for track in spec.get("tracks", [])}
     gestures = {(str(item["target_id"]), str(item["limb"])): item["points"] for item in spec.get("gesture_tracks", [])}
+    revision_id = str(spec.get("revision", {}).get("id", ""))
+    try:
+        revision_number = int(revision_id.rsplit("_", 1)[-1])
+    except (TypeError, ValueError):
+        revision_number = 0
+    # Revisions after 013 inherit the same authored gesture contract.  The
+    # previous equality check silently dropped the explicit hand landmarks for
+    # revisions 014-016, which made later renders visually static again.
+    explicit_silhouette = revision_number >= 13
+
+    def hand_landmark(side: str, phase: float) -> tuple[float, float, float]:
+        """Map semantic gesture phases to readable, reachable silhouettes."""
+        sign = 1.0 if side == "L" else -1.0
+        value = float(phase)
+        if value >= 0.5:
+            return (sign * 0.56, 0.0, 2.58)  # raised above shoulder
+        if value <= -0.5:
+            return (sign * 1.02, 0.0, 2.04)  # outward side-step silhouette
+        return (sign * 0.52, 0.0, 1.40)  # relaxed/down pose
+
     characters = []
     bone_names = [
         "root", "pelvis", "spine", "head",
@@ -315,10 +341,10 @@ def skeleton_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
                 ("head", (0.0, 0.0, 2.72), (0.0, 0.0, 0.0)),
                 ("upper_arm.L", (0.50, 0.0, 2.02), (0.0, safe_arm_angle("left_arm", phase_left), 0.0)),
                 ("forearm.L", (0.50, 0.0, 1.56), (0.0, safe_arm_angle("left_arm", phase_left), 0.0)),
-                ("hand.L", (0.44 - math.sin(safe_arm_angle("left_arm", phase_left)) * 0.55, 0.0, 1.40 + abs(math.sin(safe_arm_angle("left_arm", phase_left))) * 0.70), (0.0, safe_arm_angle("left_arm", phase_left), 0.0)),
+                ("hand.L", hand_landmark("L", phase_left) if explicit_silhouette else (0.44 - math.sin(safe_arm_angle("left_arm", phase_left)) * 0.55, 0.0, 1.40 + abs(math.sin(safe_arm_angle("left_arm", phase_left))) * 0.70), (0.0, safe_arm_angle("left_arm", phase_left), 0.0)),
                 ("upper_arm.R", (-0.50, 0.0, 2.02), (0.0, safe_arm_angle("right_arm", phase_right), 0.0)),
                 ("forearm.R", (-0.50, 0.0, 1.56), (0.0, safe_arm_angle("right_arm", phase_right), 0.0)),
-                ("hand.R", (-0.44 - math.sin(safe_arm_angle("right_arm", phase_right)) * 0.55, 0.0, 1.40 + abs(math.sin(safe_arm_angle("right_arm", phase_right))) * 0.70), (0.0, safe_arm_angle("right_arm", phase_right), 0.0)),
+                ("hand.R", hand_landmark("R", phase_right) if explicit_silhouette else (-0.44 - math.sin(safe_arm_angle("right_arm", phase_right)) * 0.55, 0.0, 1.40 + abs(math.sin(safe_arm_angle("right_arm", phase_right))) * 0.70), (0.0, safe_arm_angle("right_arm", phase_right), 0.0)),
                 ("upper_leg.L", (0.18, 0.0, 0.98), (0.0, 0.0, 0.0)),
                 ("lower_leg.L", (0.18, 0.0, 0.42), (0.0, 0.0, 0.0)),
                 ("foot.L", (0.18 + (0.12 if index in {1, 3} else -0.04), -0.13, 0.12), (0.0, 0.0, 0.0)),
@@ -335,7 +361,8 @@ def skeleton_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
             "joint_limits": {"elbow": [-1.25, 1.25], "knee": [-2.6, 0.1], "head_clearance_m": 0.12},
             "ik_targets": {"hand.L": "hand_target.L", "hand.R": "hand_target.R", "foot.L": "foot_target.L", "foot.R": "foot_target.R"},
         })
-    return {"schema_version": "skeleton-motion-profile-1.0", "scene_id": str(spec["scene_id"]), "characters": characters, "source": "authored root/gesture tracks compiled to explicit bone landmarks"}
+    source = "authored root/gesture tracks compiled to explicit down/out/up hand landmarks" if explicit_silhouette else "authored root/gesture tracks compiled to explicit bone landmarks"
+    return {"schema_version": "skeleton-motion-profile-1.0", "scene_id": str(spec["scene_id"]), "characters": characters, "source": source}
 
 
 def readability_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -620,6 +647,356 @@ def motion_legibility_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
     return revised
 
 
+def readable_stage_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_013 with separated stage lanes and readable beats."""
+    revised = motion_legibility_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+
+    def set_points(target_id: str, points: list[tuple[int, tuple[float, float, float], float]]) -> None:
+        track = tracks[target_id]
+        track["points"] = [
+            {"frame": int(frame), "position": list(position), "rotation": [0.0, 0.0, float(yaw)]}
+            for frame, position, yaw in points
+        ]
+
+    set_points("person_a", [
+        (0, (-3.8, -1.0, 0.0), 0.0),
+        (30, (-2.3, -1.0, 0.0), 0.2),
+        (60, (-0.8, -0.8, 0.0), 0.45),
+        (90, (0.3, -0.6, 0.0), 0.75),
+        (119, (1.2, -0.5, 0.0), 1.0),
+    ])
+    set_points("person_b", [
+        (0, (2.7, 0.8, 0.0), 3.14),
+        (30, (2.7, 0.8, 0.0), 3.14),
+        (60, (2.7, 0.8, 0.0), 3.14),
+        (90, (2.7, 0.8, 0.0), 3.14),
+        (119, (2.7, 0.8, 0.0), 3.14),
+    ])
+    set_points("person_c", [
+        (0, (4.8, 3.2, 0.0), -1.4),
+        (30, (3.8, 3.2, 0.0), -1.4),
+        (60, (2.8, 3.2, 0.0), -1.4),
+        (90, (1.8, 3.2, 0.0), -1.4),
+        (119, (0.8, 3.2, 0.0), -1.4),
+    ])
+    dancer = tracks["person_a"]
+    backpack = tracks["backpack"]
+    for point, dancer_point in zip(backpack["points"], dancer["points"]):
+        point["position"] = [float(dancer_point["position"][0]), float(dancer_point["position"][1]) + 0.55, 1.0]
+        point["rotation"] = list(dancer_point["rotation"])
+    speaker = tracks["speaker"]
+    musician = tracks["person_b"]
+    for point, musician_point in zip(speaker["points"], musician["points"]):
+        point["position"] = [float(musician_point["position"][0]) + 0.75, float(musician_point["position"][1]), 0.35]
+
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("person_a", "left_arm")]["points"] = [(0, 0.0), (30, 1.0), (60, -1.0), (90, 1.0), (119, 0.0)]
+    gestures[("person_a", "right_arm")]["points"] = [(0, 0.0), (30, -1.0), (60, 1.0), (90, -1.0), (119, 0.0)]
+    gestures[("person_b", "right_arm")]["points"] = [(0, 0.0), (30, 0.0), (60, 1.0), (90, 1.0), (119, 0.0)]
+    gestures[("person_c", "right_arm")]["points"] = [(0, 0.0), (30, 0.0), (60, 0.0), (90, 1.0), (119, 0.0)]
+
+    camera_points = {
+        "master": [(0.0, -14.0, 3.4), (0.5, -13.0, 3.4), (1.0, -12.0, 3.5), (1.5, -11.0, 3.6), (2.0, -10.0, 3.6)],
+        "lateral": [(-12.0, -1.0, 3.2), (-11.0, -0.5, 3.2), (-10.0, 0.0, 3.3), (-9.0, 0.5, 3.3), (-8.0, 1.0, 3.4)],
+        "reverse": [(11.0, -8.0, 3.5), (10.0, -7.0, 3.5), (9.0, -6.0, 3.6), (8.0, -5.0, 3.6), (7.0, -4.0, 3.7)],
+        "elevated": [(0.0, 11.0, 8.5), (1.0, 10.5, 8.3), (2.0, 10.0, 8.1), (3.0, 9.5, 7.9), (4.0, 9.0, 7.7)],
+    }
+    camera_targets = {"master": "person_a", "lateral": "person_a", "reverse": "person_b", "elevated": "person_b"}
+    camera_roles = {
+        "master": "wide front master showing all three stage lanes and grounded speaker",
+        "lateral": "wide side follow preserving dancer full-body silhouettes",
+        "reverse": "front three-quarter musician interaction view, not a rear close-up",
+        "elevated": "high wide stage overview centered on the fixed musician lane",
+    }
+    camera_lenses = {"master": 35.0, "lateral": 32.0, "reverse": 36.0, "elevated": 35.0}
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        camera["points"] = [
+            {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+            for frame, position in zip((0, 30, 60, 90, 119), camera_points[camera_id])
+        ]
+        camera["target"] = camera_targets[camera_id]
+        camera["role"] = camera_roles[camera_id]
+        camera["lens_mm"] = camera_lenses[camera_id]
+    revised["revision"] = {
+        "id": "revision_013",
+        "parent_revision": "revision_012",
+        "reason": "VLM found repetitive gestures, actor overlap and overview drift; stage actors in fixed lanes, center wide coverage on the musician lane, and compile explicit down/out/up hand silhouettes",
+        "preserved": ["shared world", "object coupling semantics", "K0-K4 event order", "one task per camera rule", "frame indices"],
+    }
+    return revised
+
+
+def musician_role_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_014 with a visible musician cue and stable speaker gap."""
+    revised = readable_stage_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    speaker = tracks["speaker"]
+    musician = tracks["person_b"]
+    for point, musician_point in zip(speaker.get("points", []), musician.get("points", [])):
+        point["position"] = [float(musician_point["position"][0]) + 1.0, float(musician_point["position"][1]), 0.35]
+    revised["revision"] = {
+        "id": "revision_014",
+        "parent_revision": "revision_013",
+        "reason": "VLM found the speaker coordinate-consistent but visually attributed to the dancer; add a non-entity musician microphone cue and keep a visible one-metre ground gap",
+        "preserved": ["all revision_013 character tracks", "gesture timing", "camera responsibilities", "shared world", "entity count", "frame indices"],
+    }
+    return revised
+
+
+def fixed_stage_camera_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_015 with fixed-center coverage for visible travel."""
+    revised = musician_role_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    musician = tracks["person_b"]
+    for point in musician.get("points", []):
+        point["rotation"] = [0.0, 0.0, 0.0]
+    speaker = tracks["speaker"]
+    for point, musician_point in zip(speaker.get("points", []), musician.get("points", [])):
+        point["position"] = [float(musician_point["position"][0]) + 0.60, float(musician_point["position"][1]), 0.35]
+
+    camera_points = {
+        "master": [(0.0, -14.0, 3.4), (0.0, -14.0, 3.4), (0.0, -14.0, 3.4), (0.0, -14.0, 3.4), (0.0, -14.0, 3.4)],
+        "lateral": [(-12.0, -1.0, 3.2), (-12.0, -1.0, 3.2), (-12.0, -1.0, 3.2), (-12.0, -1.0, 3.2), (-12.0, -1.0, 3.2)],
+        "reverse": [(11.0, -8.0, 3.5), (10.0, -8.0, 3.5), (9.0, -8.0, 3.5), (8.0, -8.0, 3.5), (7.0, -8.0, 3.5)],
+        "elevated": [(0.0, -12.0, 8.5), (0.0, -12.0, 8.5), (0.0, -12.0, 8.5), (0.0, -12.0, 8.5), (0.0, -12.0, 8.5)],
+    }
+    roles = {
+        "master": "fixed-center master exposing dancer travel from left to center",
+        "lateral": "fixed-center lateral profile exposing side-step silhouettes",
+        "reverse": "front three-quarter continuity on the musician and speaker",
+        "elevated": "front-facing high overview centered on the stationary musician lane",
+    }
+    lenses = {"master": 35.0, "lateral": 32.0, "reverse": 36.0, "elevated": 35.0}
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        camera["points"] = [
+            {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+            for frame, position in zip((0, 30, 60, 90, 119), camera_points[camera_id])
+        ]
+        camera["target"] = "person_b"
+        camera["role"] = roles[camera_id]
+        camera["lens_mm"] = lenses[camera_id]
+    revised["revision"] = {
+        "id": "revision_015",
+        "parent_revision": "revision_014",
+        "reason": "VLM found dancer travel canceled by a dancer-following master and musician/speaker relationships unclear from rear views; lock cameras to the stationary musician lane and face the musician toward the front coverage",
+        "preserved": ["all revision_014 entity tracks except musician facing", "explicit hand landmarks", "microphone role cue", "shared world", "frame indices"],
+    }
+    return revised
+
+
+def composition_fit_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_016 by fitting the complete stage into every view."""
+    revised = fixed_stage_camera_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+
+    def set_x(target_id: str, values: tuple[float, ...]) -> None:
+        for point, value in zip(tracks[target_id].get("points", []), values):
+            point["position"][0] = float(value)
+
+    set_x("person_a", (-2.6, -1.6, -0.6, 0.4, 1.2))
+    set_x("person_b", (2.0, 2.0, 2.0, 2.0, 2.0))
+    set_x("person_c", (3.8, 3.3, 2.8, 2.3, 1.8))
+    musician = tracks["person_b"]
+    speaker = tracks["speaker"]
+    dancer = tracks["person_a"]
+    for point, musician_point in zip(speaker.get("points", []), musician.get("points", [])):
+        point["position"] = [float(musician_point["position"][0]) + 0.60, float(musician_point["position"][1]), 0.35]
+    for point, dancer_point in zip(tracks["backpack"].get("points", []), dancer.get("points", [])):
+        point["position"][0] = float(dancer_point["position"][0])
+
+    camera_points = {
+        "master": [(0.0, -11.5, 3.2), (0.0, -11.5, 3.2), (0.0, -11.5, 3.2), (0.0, -11.5, 3.2), (0.0, -11.5, 3.2)],
+        "lateral": [(-10.0, -1.0, 3.0), (-10.0, -1.0, 3.0), (-10.0, -1.0, 3.0), (-10.0, -1.0, 3.0), (-10.0, -1.0, 3.0)],
+        "reverse": [(9.0, -6.0, 3.3), (8.5, -6.0, 3.3), (8.0, -6.0, 3.3), (7.5, -6.0, 3.3), (7.0, -6.0, 3.3)],
+        "elevated": [(0.0, -10.0, 7.5), (0.0, -10.0, 7.5), (0.0, -10.0, 7.5), (0.0, -10.0, 7.5), (0.0, -10.0, 7.5)],
+    }
+    lenses = {"master": 40.0, "lateral": 38.0, "reverse": 40.0, "elevated": 38.0}
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        camera["points"] = [
+            {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+            for frame, position in zip((0, 30, 60, 90, 119), camera_points[camera_id])
+        ]
+        camera["target"] = "person_b"
+        camera["lens_mm"] = lenses[camera_id]
+    revised["revision"] = {
+        "id": "revision_016",
+        "parent_revision": "revision_015",
+        "reason": "VLM found dancer and passerby cropped or too small; fit all actor lanes and grounded speaker inside a closer fixed-center composition without changing event order",
+        "preserved": ["all revision_015 gesture tracks", "musician microphone cue", "speaker coupling relation", "shared world", "frame indices"],
+    }
+    return revised
+
+
+def event_separation_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_017 from the VLM's remaining visual failures.
+
+    This is still a shared-world proxy revision.  It separates the passerby
+    into a clearly rear, right-to-left lane, makes the two dancer side-steps
+    spatially distinct, and places a deliberately visible backpack marker on
+    the dancer's front-side shoulder line.  The authored entity IDs, K0-K4
+    frames, and one-world/four-camera contract remain unchanged.
+    """
+    revised = composition_fit_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+
+    def set_points(target_id: str, positions: list[tuple[float, float, float]], yaws: list[float] | None = None) -> None:
+        track = tracks[target_id]
+        yaws = yaws or [float(point["rotation"][2]) for point in track.get("points", [])]
+        for point, position, yaw in zip(track.get("points", []), positions, yaws):
+            point["position"] = [float(value) for value in position]
+            point["rotation"] = [0.0, 0.0, float(yaw)]
+
+    # The alternating y positions are the two visible side-step beats.  The
+    # dancer remains in front of the musician lane and never crosses him.
+    set_points(
+        "person_a",
+        [(-2.6, -1.20, 0.0), (-1.6, -0.25, 0.0), (-0.6, -1.15, 0.0), (0.4, -0.20, 0.0), (1.2, -0.75, 0.0)],
+        [0.0, 0.25, 0.50, 0.75, 1.0],
+    )
+    # Keep the passerby well behind the performance and move monotonically
+    # right-to-left so the crossing cannot be mistaken for a foreground merge.
+    set_points(
+        "person_c",
+        [(4.4, 4.20, 0.0), (3.0, 4.20, 0.0), (1.6, 4.20, 0.0), (0.2, 4.20, 0.0), (-2.2, 4.20, 0.0)],
+        [-1.57, -1.57, -1.57, -1.57, -1.57],
+    )
+
+    dancer = tracks["person_a"]
+    backpack = tracks["backpack"]
+    for point, dancer_point in zip(backpack.get("points", []), dancer.get("points", [])):
+        # Front-side offset makes the coupling visible from the four cameras;
+        # it is still a deterministic child track of the same dancer.
+        point["position"] = [float(dancer_point["position"][0]) - 0.55, float(dancer_point["position"][1]) - 0.18, 0.95]
+        point["rotation"] = list(dancer_point["rotation"])
+
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("person_a", "left_arm")]["points"] = [(0, 0.0), (30, 1.0), (60, -1.0), (90, 1.0), (119, 0.0)]
+    gestures[("person_a", "right_arm")]["points"] = [(0, 0.0), (30, -1.0), (60, 1.0), (90, -1.0), (119, 0.0)]
+    gestures[("person_b", "right_arm")]["points"] = [(0, 0.0), (30, 1.0), (60, 1.0), (90, 0.0), (119, 0.0)]
+    gestures[("person_c", "right_arm")]["points"] = [(0, 0.0), (30, 0.0), (60, 0.0), (90, 1.0), (119, 0.0)]
+
+    revised["revision"] = {
+        "id": "revision_017",
+        "parent_revision": "revision_016",
+        "reason": "VLM found the passerby path, ordered action beats, and backpack identity ambiguous; use a monotonic rear crossing lane, alternating dancer side-step coordinates, explicit response gestures, and a visible coupled backpack marker",
+        "preserved": ["shared world", "entity IDs", "K0-K4 frame indices", "camera roles", "speaker coupling", "one task per camera rule"],
+    }
+    return revised
+
+
+def rigged_staging_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_018 for the rigged-human proxy branch.
+
+    The bench is a static prop, so moving it sideways is a Director-level
+    occlusion repair.  The dancer's final authored yaw is also made explicit
+    so a skinned mesh has a visible turn toward the rear crossing lane.
+    """
+    revised = event_separation_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    bench = tracks["bench"]
+    for point in bench.get("points", []):
+        point["position"] = [-4.4, 1.8, 0.45]
+    dancer = tracks["person_a"]
+    dancer["points"][-2]["rotation"][2] = 1.20
+    dancer["points"][-1]["rotation"][2] = 1.57
+    revised["revision"] = {
+        "id": "revision_018",
+        "parent_revision": "revision_017",
+        "reason": "standard rigged-human proxy still had bench occlusion and an ambiguous final turn; move the static bench off the passerby lane and set an explicit final dancer yaw toward the rear crossing",
+        "preserved": ["shared world", "entity IDs", "K0-K4 frame indices", "all character/object trajectories except bench placement", "camera roles", "one task per camera rule"],
+    }
+    return revised
+
+
+def choreography_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_019 with explicit side-step choreography and shot roles."""
+    revised = rigged_staging_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    dancer = tracks["person_a"]
+    dancer_points = [
+        (-2.6, -1.20, 0.0, 0.0),
+        (-1.2, -0.80, 0.0, 0.0),
+        (-0.2, -0.80, 0.0, 0.35),
+        (-1.0, -0.80, 0.0, 0.70),
+        (0.5, 1.00, 0.0, 1.57),
+    ]
+    for point, (x, y, z, yaw) in zip(dancer.get("points", []), dancer_points):
+        point["position"] = [x, y, z]
+        point["rotation"] = [0.0, 0.0, yaw]
+
+    backpack = tracks["backpack"]
+    for point, dancer_point in zip(backpack.get("points", []), dancer.get("points", [])):
+        point["position"] = [float(dancer_point["position"][0]) - 0.55, float(dancer_point["position"][1]) - 0.18, 0.95]
+        point["rotation"] = list(dancer_point["rotation"])
+
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("person_a", "left_arm")]["points"] = [(0, 0.0), (30, 1.0), (60, 1.0), (90, -1.0), (119, 0.0)]
+    gestures[("person_a", "right_arm")]["points"] = [(0, 0.0), (30, -1.0), (60, -1.0), (90, 1.0), (119, 0.0)]
+    gestures[("person_b", "right_arm")]["points"] = [(0, 0.0), (30, 1.0), (60, 0.0), (90, 0.0), (119, 0.0)]
+    gestures[("person_c", "right_arm")]["points"] = [(0, 0.0), (30, 0.0), (60, 0.0), (90, 1.0), (119, 0.0)]
+
+    camera_points = {
+        "master": [(0.0, -13.0, 3.4)] * 5,
+        "lateral": [(-9.0, -2.0, 3.2)] * 5,
+        "reverse": [(8.0, -6.0, 3.5), (8.0, -6.0, 3.5), (8.0, -6.0, 3.5), (7.5, -6.0, 3.5), (7.0, -6.0, 3.5)],
+        "elevated": [(0.0, -11.0, 8.0)] * 5,
+    }
+    targets = {"master": "person_a", "lateral": "person_a", "reverse": "person_c", "elevated": "person_b"}
+    roles = {
+        "master": "wide front master for entry, two side-steps and final turn",
+        "lateral": "side profile isolating alternating left/right side-steps",
+        "reverse": "front three-quarter passerby response and rear crossing",
+        "elevated": "wide shared-world overview preserving all event order",
+    }
+    lenses = {"master": 36.0, "lateral": 34.0, "reverse": 36.0, "elevated": 36.0}
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        camera["points"] = [
+            {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+            for frame, position in zip((0, 30, 60, 90, 119), camera_points[camera_id])
+        ]
+        camera["target"] = targets[camera_id]
+        camera["role"] = roles[camera_id]
+        camera["lens_mm"] = lenses[camera_id]
+    revised["revision"] = {
+        "id": "revision_019",
+        "parent_revision": "revision_018",
+        "reason": "VLM still read the lead as running; hold the center entry, alternate left/right side-step positions, make the K4 rear turn explicit, and assign dedicated camera responsibilities to the lead, passerby, and overview",
+        "preserved": ["shared world", "entity IDs", "K0-K4 frame indices", "backpack and speaker coupling", "standard rigged asset interface", "one task per camera rule"],
+    }
+    return revised
+
+
+def side_step_motion_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_020 with a no-running lead motion profile and wider shots."""
+    revised = choreography_revision(spec)
+    camera_points = {
+        "master": [(0.0, -14.0, 3.4)] * 5,
+        "lateral": [(-11.0, -2.0, 3.2)] * 5,
+        "reverse": [(9.0, -7.0, 3.5), (9.0, -7.0, 3.5), (9.0, -7.0, 3.5), (8.5, -7.0, 3.5), (8.0, -7.0, 3.5)],
+        "elevated": [(0.0, -12.0, 8.5)] * 5,
+    }
+    lenses = {"master": 32.0, "lateral": 30.0, "reverse": 32.0, "elevated": 32.0}
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        camera["points"] = [
+            {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+            for frame, position in zip((0, 30, 60, 90, 119), camera_points[camera_id])
+        ]
+        camera["lens_mm"] = lenses[camera_id]
+    revised["revision"] = {
+        "id": "revision_020",
+        "parent_revision": "revision_019",
+        "reason": "VLM still read alternating leg swing as running; mark the lead as a side-step transfer motion, keep the torso upright, drive forearm companions for explicit waves, and widen camera coverage",
+        "preserved": ["shared world", "entity IDs", "K0-K4 frame indices", "camera targets and roles", "backpack/speaker coupling", "standard rigged asset interface", "one task per camera rule"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
     subjects = []
@@ -647,7 +1024,13 @@ def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def copy_canonical_assets(*, spec: Mapping[str, Any], scene_output: Path, asset_dir: Path | None) -> dict[str, str]:
-    """Copy optional per-entity GLBs into the immutable run directory."""
+    """Copy optional per-entity GLBs into the immutable run directory.
+
+    A single verified humanoid source (``CesiumMan.glb`` or
+    ``canonical_humanoid.glb``) may be reused for several roles.  The run
+    still receives one immutable, role-named copy so the asset registry and
+    hashes remain explicit and auditable.
+    """
     if asset_dir is None:
         return {}
     source_root = asset_dir.resolve(strict=True)
@@ -660,10 +1043,16 @@ def copy_canonical_assets(*, spec: Mapping[str, Any], scene_output: Path, asset_
         entity_id = str(entity["id"])
         source = source_root / (entity_id + ".glb")
         if not source.is_file():
+            for fallback_name in ("canonical_humanoid.glb", "CesiumMan.glb", "humanoid.glb"):
+                candidate = source_root / fallback_name
+                if candidate.is_file():
+                    source = candidate
+                    break
+        if not source.is_file():
             continue
-        destination = destination_root / source.name
+        destination = destination_root / (entity_id + ".glb")
         shutil.copy2(source, destination)
-        copied[entity_id] = (Path("assets") / source.name).as_posix()
+        copied[entity_id] = (Path("assets") / destination.name).as_posix()
     return copied
 
 
@@ -775,6 +1164,9 @@ def _blender_script() -> str:
         role_c = bpy.data.materials.new("CanonicalRoleC")
         role_c.diffuse_color = (0.20, 0.52, 0.28, 1.0)
         role_c.roughness = 0.82
+        backpack_accent = bpy.data.materials.new("BackpackAccent")
+        backpack_accent.diffuse_color = (0.86, 0.38, 0.08, 1.0)
+        backpack_accent.roughness = 0.78
 
         def add_cube(name, location, scale, material=clay, bevel=0.08):
             bpy.ops.mesh.primitive_cube_add(location=location)
@@ -843,12 +1235,41 @@ def _blender_script() -> str:
             if not imported:
                 return False
             for obj in imported:
+                if obj.type == "ARMATURE":
+                    obj.data.pose_position = "POSE"
+                    for pose_bone in obj.pose.bones:
+                        pose_bone.location = (0.0, 0.0, 0.0)
+                        pose_bone.rotation_mode = "QUATERNION"
+                        pose_bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+                        pose_bone.scale = (1.0, 1.0, 1.0)
+            for obj in imported:
                 if obj.parent is None:
                     matrix = obj.matrix_world.copy()
                     obj.parent = root
                     obj.matrix_world = matrix
                 obj.name = eid + "__glb__" + obj.name
+            # CesiumMan is authored Y-up.  Normalize the imported hierarchy
+            # once at its top-level empty so mesh, armature and skinning keep
+            # the same transform.  The authored entity root remains the only
+            # source of world-space motion for all cameras.
+            axis_root = next((obj for obj in imported if obj.type == "EMPTY"), None)
+            if axis_root is not None:
+                axis_root.rotation_euler.x = math.radians(90.0)
+                axis_root.scale = (2.0, 2.0, 2.0)
+                axis_root.location = (0.0, 0.0, 0.0)
+            for obj in imported:
+                if obj.type == "MESH" and "Icosphere" in obj.name:
+                    obj.hide_render = True
+                if obj.type == "ARMATURE" and obj.animation_data is not None:
+                    # Keep the imported skin action attached; authored root
+                    # and camera trajectories are still keyed below.
+                    _ = obj.animation_data.action
             return True
+
+        def add_rigged_role_marker(eid, root):
+            """Add a small role-color waist marker without replacing the mesh."""
+            material = role_a if eid.endswith("_a") else role_b if eid.endswith("_b") else role_c
+            parent_local(add_cube(eid + "__role_marker", (0.0, -0.50, 1.55), (0.46, 0.035, 0.08), material, 0.03), root, (0.0, -0.50, 1.55))
 
         def add_canonical_humanoid(eid, root):
             """Materialize one readable articulated human silhouette.
@@ -992,6 +1413,9 @@ def _blender_script() -> str:
             parent_local(add_cube(eid + "__skeleton_vest", (0, -0.02, 1.86), (0.43, 0.25, 0.38), outfit_mat, 0.08), root, (0, -0.02, 1.86))
             parent_local(add_cube(eid + "__skeleton_pelvis", (0, 0, 1.28), (0.36, 0.22, 0.18), leg_mat, 0.08), root, (0, 0, 1.28))
             parent_local(add_sphere(eid + "__skeleton_head", (0, 0, 2.72), (0.30, 0.27, 0.34), body_mat), root, (0, 0, 2.72))
+            if eid.endswith("_b"):
+                parent_local(add_cylinder(eid + "__mic_stand", (0, -0.42, 0.92), 0.035, 1.35, dark), root, (0, -0.42, 0.92))
+                parent_local(add_sphere(eid + "__mic_head", (0, -0.42, 1.62), (0.10, 0.10, 0.10), dark), root, (0, -0.42, 1.62))
             parts = {"torso": torso, "arms": {}, "legs": {}, "hands": {}, "feet": {}}
             for side, sign in (("L", 1.0), ("R", -1.0)):
                 parts["arms"][side] = {"upper": parent_local(add_cylinder(eid + "__skeleton_upper_arm." + side, (sign * 0.46, 0, 1.82), 0.14, 0.58, body_mat), root, (sign * 0.46, 0, 1.82)), "lower": parent_local(add_cylinder(eid + "__skeleton_forearm." + side, (sign * 0.46, 0, 1.30), 0.12, 0.52, body_mat), root, (sign * 0.46, 0, 1.30))}
@@ -1005,6 +1429,7 @@ def _blender_script() -> str:
         for track in world_state["character_trajectory_plan"]["tracks"] + world_state["object_trajectory_plan"]["tracks"]:
             tracks[track["target_id"]] = track["points"]
         roots, arms, legs, skeleton_parts = {}, {}, {}, {}
+        rigged_armatures = {}
         asset_log = []
 
         # A single shared neutral floor/backdrop makes spatial relationships visible.
@@ -1021,7 +1446,16 @@ def _blender_script() -> str:
             if kind == "character":
                 imported_glb = try_import_canonical_glb(eid, root, registry_asset)
                 if imported_glb:
-                    pass
+                    add_rigged_role_marker(eid, root)
+                    armature = next((obj for obj in bpy.context.scene.objects if obj.name.startswith(eid + "__glb__") and obj.type == "ARMATURE"), None)
+                    if armature is not None:
+                        # Use a new authored action so gesture keyframes are
+                        # real pose data rather than a log-only annotation.
+                        if armature.animation_data is not None:
+                            armature.animation_data.action = None
+                        armature.animation_data_create()
+                        armature.animation_data.action = bpy.data.actions.new(eid + "__authored_pose")
+                        rigged_armatures[eid] = armature
                 elif args.render_style == "skeleton":
                     add_skeleton_humanoid(eid, root)
                 elif args.render_style == "canonical":
@@ -1039,6 +1473,11 @@ def _blender_script() -> str:
                 parent_local(add_cube(eid + "__body", (0, 0.56, 0.66), (0.24, 0.14, 0.32), dark), root, (0, 0.56, 0.66))
                 parent_local(add_cube(eid + "__strap_l", (-0.14, 0.38, 0.78), (0.03, 0.04, 0.30), light, 0.02), root, (-0.14, 0.38, 0.78))
                 parent_local(add_cube(eid + "__strap_r", (0.14, 0.38, 0.78), (0.03, 0.04, 0.30), light, 0.02), root, (0.14, 0.38, 0.78))
+                # A front-side accent is intentionally redundant with the
+                # neutral body: it keeps the coupled prop identifiable in a
+                # low-resolution proxy without changing its trajectory.
+                parent_local(add_cube(eid + "__visible_pack", (0, 0.12, 0.72), (0.30, 0.12, 0.38), backpack_accent, 0.08), root, (0, 0.12, 0.72))
+                parent_local(add_cube(eid + "__visible_flap", (0, -0.02, 0.98), (0.20, 0.04, 0.06), light, 0.03), root, (0, -0.02, 0.98))
             elif eid in {"speaker"}:
                 parent_local(add_cube(eid + "__body", (0, 0, 0.28), (0.36, 0.25, 0.26), dark), root, (0, 0, 0.28))
                 parent_local(add_cube(eid + "__front", (0, -0.27, 0.28), (0.20, 0.03, 0.16), light, 0.02), root, (0, -0.27, 0.28))
@@ -1084,7 +1523,8 @@ def _blender_script() -> str:
         arm_pose_log = []
         for gesture in gesture_tracks:
             arm = arms.get((gesture["target_id"], gesture["limb"]))
-            if arm is None:
+            rigged = rigged_armatures.get(gesture["target_id"])
+            if arm is None and rigged is None:
                 continue
             points = gesture["points"]
             applied_angles = []
@@ -1104,14 +1544,28 @@ def _blender_script() -> str:
                 # that center into the head.  The inward clamp prevents the
                 # elbow/forearm chain from crossing the head corridor.
                 angle = safe_arm_angle(gesture["limb"], angle)
-                arm.rotation_euler[1] = float(angle)
-                arm.location.z = 2.02
-                arm.keyframe_insert(data_path="rotation_euler", frame=frame)
-                arm.keyframe_insert(data_path="location", frame=frame)
+                if arm is not None:
+                    arm.rotation_euler[1] = float(angle)
+                    arm.location.z = 2.02
+                    arm.keyframe_insert(data_path="rotation_euler", frame=frame)
+                    arm.keyframe_insert(data_path="location", frame=frame)
+                else:
+                    rigged_bone_names = {
+                        "left_arm": ("Skeleton_arm_joint_L__4_", "Skeleton_arm_joint_L__3_"),
+                        "right_arm": ("Skeleton_arm_joint_R", "Skeleton_arm_joint_R__2_"),
+                    }
+                    pose_bones = [rigged.pose.bones.get(name) for name in rigged_bone_names.get(gesture["limb"], ())]
+                    pose_bones = [pose_bone for pose_bone in pose_bones if pose_bone is not None]
+                    if not pose_bones:
+                        continue
+                    for bone_index, pose_bone in enumerate(pose_bones):
+                        pose_bone.rotation_mode = "XYZ"
+                        pose_bone.rotation_euler[0] = float(angle) * (1.0 if bone_index == 0 else 0.65)
+                        pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
                 applied_angles.append(float(angle))
             shoulder_x = 0.44 if gesture["limb"] == "left_arm" else -0.44
             clearances = [abs(shoulder_x - math.sin(angle) * 0.29) for angle in applied_angles]
-            arm_pose_log.append({"target_id": gesture["target_id"], "limb": gesture["limb"], "min_angle": min(applied_angles), "max_angle": max(applied_angles), "min_elbow_clearance": min(clearances)})
+            arm_pose_log.append({"target_id": gesture["target_id"], "limb": gesture["limb"], "min_angle": min(applied_angles), "max_angle": max(applied_angles), "min_elbow_clearance": min(clearances), "asset_kind": "procedural" if arm is not None else "rigged_glb"})
 
         # StoryBlender-style animation layer: keep the authored root path and
         # add a small deterministic gait/weight-shift pass.  Contacts are
@@ -1121,7 +1575,8 @@ def _blender_script() -> str:
             target_id = str(motion.get("target_id"))
             for limb_name, samples in motion.get("limb_tracks", {}).items():
                 parts = legs.get((target_id, limb_name))
-                if not parts or not samples:
+                rigged = rigged_armatures.get(target_id)
+                if (not parts and rigged is None) or not samples:
                     continue
                 for frame in range(frame_count):
                     if frame <= int(samples[0]["frame"]):
@@ -1137,12 +1592,23 @@ def _blender_script() -> str:
                                 ratio = float(frame - left_frame) / float(right_frame - left_frame)
                                 angle = float(left_sample["angle"]) * (1.0 - ratio) + float(right_sample["angle"]) * ratio
                                 break
-                    parts["upper"].rotation_euler[1] = angle
-                    parts["lower"].rotation_euler[1] = -0.55 * angle
-                    parts["foot"].rotation_euler[1] = 0.20 * angle
-                    for part in parts.values():
-                        part.keyframe_insert(data_path="rotation_euler", frame=frame)
-            motion_log.append({"target_id": target_id, "motion_mode": motion.get("motion_mode"), "foot_contacts": motion.get("foot_contacts", [])})
+                    if parts:
+                        parts["upper"].rotation_euler[1] = angle
+                        parts["lower"].rotation_euler[1] = -0.55 * angle
+                        parts["foot"].rotation_euler[1] = 0.20 * angle
+                        for part in parts.values():
+                            part.keyframe_insert(data_path="rotation_euler", frame=frame)
+                    else:
+                        rigged_bone_names = {
+                            "left_leg": "leg_joint_L_1",
+                            "right_leg": "leg_joint_R_1",
+                        }
+                        pose_bone = rigged.pose.bones.get(rigged_bone_names.get(limb_name, ""))
+                        if pose_bone is not None:
+                            pose_bone.rotation_mode = "XYZ"
+                            pose_bone.rotation_euler[0] = float(angle)
+                            pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
+            motion_log.append({"target_id": target_id, "motion_mode": motion.get("motion_mode"), "foot_contacts": motion.get("foot_contacts", []), "asset_kind": "procedural" if legs.get((target_id, "left_leg")) else "rigged_glb"})
 
         skeleton_pose_log = []
         if args.render_style == "skeleton":
@@ -1593,6 +2059,10 @@ def run_proxy_review(*, scene_output: Path, verifier: Mapping[str, Any], review_
     if mode in {"none", "manual"}:
         return {"status": "pending_review", "mode": mode, "api_calls": 0, "reason": "visual approval is not inferred from deterministic checks"}
     review_dir = scene_output / "proxy_vlm_review"
+    suffix = 0
+    while review_dir.exists():
+        suffix += 1
+        review_dir = scene_output / f"proxy_vlm_review_{suffix:03d}"
     try:
         document = request_vlm_feedback(
             proxy_report=verifier,
@@ -1792,6 +2262,14 @@ def main() -> int:
     parser.add_argument("--camera-readability-revision", action="store_true", help="apply revision_010 with grounded three-quarter camera coverage")
     parser.add_argument("--proxy-legibility-revision", action="store_true", help="apply revision_011 with distinct props and stronger action landmarks")
     parser.add_argument("--motion-legibility-revision", action="store_true", help="apply revision_012 with raised gesture targets and wide front-side coverage")
+    parser.add_argument("--readable-stage-revision", action="store_true", help="apply revision_013 with separated stage lanes and explicit hand silhouettes")
+    parser.add_argument("--musician-role-revision", action="store_true", help="apply revision_014 with a visible musician cue and stable speaker gap")
+    parser.add_argument("--fixed-stage-camera-revision", action="store_true", help="apply revision_015 with fixed-center coverage that exposes dancer travel")
+    parser.add_argument("--composition-fit-revision", action="store_true", help="apply revision_016 with closer camera framing and bounded stage lanes")
+    parser.add_argument("--event-separation-revision", action="store_true", help="apply revision_017 with a rear passerby crossing, alternating side-steps, and visible backpack coupling")
+    parser.add_argument("--rigged-staging-revision", action="store_true", help="apply revision_018 for rigged-human legibility and bench occlusion repair")
+    parser.add_argument("--choreography-revision", action="store_true", help="apply revision_019 with explicit side-step timing and dedicated camera responsibilities")
+    parser.add_argument("--side-step-motion-revision", action="store_true", help="apply revision_020 with side-step transfer motion and wider coverage")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
     parser.add_argument("--proxy-review", choices=["none", "manual", "vlm"], default="manual", help="Proxy visual approval gate; VLM makes exactly one review request")
     parser.add_argument("--final-review", choices=["none", "manual", "vlm"], default="manual", help="final video review gate; VLM makes exactly one review request")
@@ -1820,6 +2298,22 @@ def main() -> int:
         selected = [proxy_legibility_revision(spec) for spec in selected]
     if args.motion_legibility_revision:
         selected = [motion_legibility_revision(spec) for spec in selected]
+    if args.readable_stage_revision:
+        selected = [readable_stage_revision(spec) for spec in selected]
+    if args.musician_role_revision:
+        selected = [musician_role_revision(spec) for spec in selected]
+    if args.fixed_stage_camera_revision:
+        selected = [fixed_stage_camera_revision(spec) for spec in selected]
+    if args.composition_fit_revision:
+        selected = [composition_fit_revision(spec) for spec in selected]
+    if args.event_separation_revision:
+        selected = [event_separation_revision(spec) for spec in selected]
+    if args.rigged_staging_revision:
+        selected = [rigged_staging_revision(spec) for spec in selected]
+    if args.choreography_revision:
+        selected = [choreography_revision(spec) for spec in selected]
+    if args.side_step_motion_revision:
+        selected = [side_step_motion_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

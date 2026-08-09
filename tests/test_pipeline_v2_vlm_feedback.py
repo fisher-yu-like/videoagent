@@ -46,6 +46,8 @@ def test_build_vlm_payload_uses_real_frame_data_and_feedback_schema() -> None:
     assert "non-negative integer frame" in payload["messages"][1]["content"][0]["text"]
     assert payload["messages"][1]["content"][1]["type"] == "image_url"
     assert payload["messages"][1]["content"][1]["image_url"]["url"].startswith("data:image/bmp;base64,")
+    assert payload["messages"][1]["content"][2]["type"] == "text"
+    assert "camera_1_02" in payload["messages"][1]["content"][2]["text"]
 
 
 def test_extract_vlm_feedback_rejects_invalid_category_and_accepts_approval() -> None:

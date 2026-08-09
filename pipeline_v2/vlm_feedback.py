@@ -89,6 +89,12 @@ def build_vlm_payload(
     }]
     for path in paths:
         content.append({"type": "image_url", "image_url": {"url": _image_data_url(path)}})
+        camera_label = path.parent.name
+        frame_label = path.stem
+        content.append({
+            "type": "text",
+            "text": f"Evidence label: camera={camera_label}; frame={frame_label}. Preserve this order when judging the action sequence.",
+        })
     return {
         "model": model,
         "messages": [

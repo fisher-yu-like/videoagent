@@ -290,3 +290,17 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 | 012 修正版 | passed | revision_requested | 仍有遮挡、手势和全身上下文可读性问题 |
 
 本轮 Seedance/Kling 调用均为 0；VLM 调用 4 次。由于最终反馈属于 `scene_structure`、`character_trajectory`、`camera_trajectory` 和 `physical_event`，未进入 Appearance-only prompt，也未提交真实视频后端。
+
+### 4.11 revision_013–revision_017（2026-08-09）
+
+最新真实运行和 VLM 反馈见 [PROXY_REVISION_013_017_RUN.md](PROXY_REVISION_013_017_RUN.md)。`revision_017` 的四个 Blender MP4、state/camera/skeleton 日志和哈希均通过确定性检查；本次 VLM 只调用 1 次，结果仍为 `revision_requested`。反馈集中在侧步像走位、最终回头不清楚、路人回挥被长椅/角色遮挡以及机位重叠。
+
+这轮还修复了一个真实代码根因：显式手 landmark 原先只对 `revision_013` 生效，`revision_014–016` 被错误地降级为角度推断；现在所有 revision 编号 >= 013 都使用显式 down/out/up landmark。该修复不改变 pipeline_v2 schema、实体 ID、K0–K4 帧或共享世界。
+
+结论：当前失败不在 API、编码、哈希或轨迹日志，而在程序化球/圆柱骨架无法稳定表达侧步、转身和后景交互。未通过 Proxy 视觉门禁，因此本轮 Seedance/Kling、Appearance-only Prompt 和最终视频审查均为 0 次。下一步应接入标准 rigged humanoid/GLB 与动作重定向，并把 bench 移出 passerby lane，再对同一场景重新复审。
+
+### 4.12 rigged humanoid / revision_018–revision_020（2026-08-09）
+
+详细记录见 [RIGGED_HUMANOID_REVISION_018_020_RUN.md](RIGGED_HUMANOID_REVISION_018_020_RUN.md)。已接入带网格、骨骼和蒙皮的 `CesiumMan.glb`，修复了 Y-up 垂直偏移、默认迈步姿态、真实 pose 日志和 VLM camera/frame 顺序标签。`revision_018–020` 每次真实四机位渲染均为 20 passed、0 failed、2 unknown；VLM 均为 `revision_requested`，Seedance/Kling 均为 0。
+
+最新阻塞是动作素材而非管线：标准人形仍缺少可读的侧步/挥手动作片段和脚掌 IK，640×360 下背包和角色容易重叠。下一阶段应接入真实 BVH/动作捕捉片段重定向到该骨骼，并把背包绑定到角色骨骼局部挂点；未通过 Proxy 视觉门禁前不得进入 Appearance-only 或后端视频生成。

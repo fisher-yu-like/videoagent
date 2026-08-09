@@ -347,6 +347,202 @@ def test_skeleton_gesture_targets_stay_within_two_link_reach():
                 assert distance <= 1.10 + 1e-6
 
 
+def test_readable_stage_revision_separates_lanes_and_uses_explicit_hand_poses():
+    from scripts.run_complex_scene_suite import readable_stage_revision, skeleton_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = readable_stage_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_013"
+    assert revised["revision"]["parent_revision"] == "revision_012"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(point["position"][1] <= -0.4 for point in tracks["person_a"]["points"])
+    assert all(point["position"][1] >= 0.6 for point in tracks["person_b"]["points"])
+    assert all(point["position"][1] >= 2.8 for point in tracks["person_c"]["points"])
+    elevated = next(camera for camera in revised["cameras"] if camera["camera_id"] == "elevated")
+    assert elevated["target"] == "person_b"
+    profile = skeleton_motion_profile_for(revised)
+    dancer = next(item for item in profile["characters"] if item["target_id"] == "person_a")
+    left = dancer["bone_tracks"]["hand.L"]
+    assert left[1]["position"][2] > 2.4  # K1 explicit raised hand
+    assert left[2]["position"][2] > left[0]["position"][2]  # K2 outward silhouette
+    assert profile["source"].endswith("explicit down/out/up hand landmarks")
+
+
+def test_musician_role_revision_adds_proxy_role_cue_without_new_world_entity():
+    from scripts.run_complex_scene_suite import musician_role_revision, _blender_script
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    original = scene_spec("plaza_dance_circle")
+    revised = musician_role_revision(original)
+    assert revised["revision"]["id"] == "revision_014"
+    assert revised["revision"]["parent_revision"] == "revision_013"
+    assert [item["id"] for item in revised["entities"]] == [item["id"] for item in original["entities"]]
+    speaker = next(item for item in revised["tracks"] if item["target_id"] == "speaker")
+    musician = next(item for item in revised["tracks"] if item["target_id"] == "person_b")
+    assert all(float(a["position"][0]) - float(b["position"][0]) >= 0.95 for a, b in zip(speaker["points"], musician["points"]))
+    script = _blender_script()
+    assert "__mic_stand" in script
+    assert "__mic_head" in script
+
+
+def test_fixed_stage_camera_revision_exposes_dancer_travel_and_front_facing_musician():
+    from scripts.run_complex_scene_suite import fixed_stage_camera_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = fixed_stage_camera_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_015"
+    assert revised["revision"]["parent_revision"] == "revision_014"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(point["rotation"][2] == 0.0 for point in tracks["person_b"]["points"])
+    assert all(abs(float(s["position"][0]) - float(m["position"][0])) <= 0.65 for s, m in zip(tracks["speaker"]["points"], tracks["person_b"]["points"]))
+    assert {camera["target"] for camera in revised["cameras"]} == {"person_b"}
+
+
+def test_composition_fit_revision_keeps_all_roles_inside_the_stage_bounds():
+    from scripts.run_complex_scene_suite import composition_fit_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = composition_fit_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_016"
+    assert revised["revision"]["parent_revision"] == "revision_015"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    xs = [float(point["position"][0]) for target in ("person_a", "person_b", "person_c") for point in tracks[target]["points"]]
+    assert min(xs) >= -2.8 and max(xs) <= 4.0
+    assert all(float(point["position"][2]) == 0.35 for point in tracks["speaker"]["points"])
+    assert all(float(camera["lens_mm"]) >= 36.0 for camera in revised["cameras"])
+
+
+def test_event_separation_revision_makes_crossing_beats_and_backpack_coupling_explicit():
+    from scripts.run_complex_scene_suite import event_separation_revision, skeleton_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = event_separation_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_017"
+    assert revised["revision"]["parent_revision"] == "revision_016"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    passerby = tracks["person_c"]
+    assert all(float(point["position"][1]) >= 4.0 for point in passerby["points"])
+    assert float(passerby["points"][0]["position"][0]) > float(passerby["points"][-1]["position"][0])
+    dancer_y = [float(point["position"][1]) for point in tracks["person_a"]["points"]]
+    assert dancer_y[1] > dancer_y[0] and dancer_y[2] < dancer_y[1] and dancer_y[3] > dancer_y[2]
+    backpack = tracks["backpack"]
+    dancer = tracks["person_a"]
+    assert all(abs(float(b["position"][0]) - float(d["position"][0]) + 0.55) < 1e-6 for b, d in zip(backpack["points"], dancer["points"]))
+    profile = skeleton_motion_profile_for(revised)
+    assert profile["source"].endswith("explicit down/out/up hand landmarks")
+
+
+def test_event_separation_script_has_visible_backpack_material():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "BackpackAccent" in script
+    assert 'eid + "__visible_pack", (0, 0.12, 0.72)' in script
+
+
+def test_canonical_asset_dir_can_reuse_one_verified_humanoid_source_for_each_role():
+    from scripts.run_complex_scene_suite import copy_canonical_assets
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("plaza_dance_circle")
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        source = root / "CesiumMan.glb"
+        source.write_bytes(b"verified-glb-placeholder")
+        out = root / "run"
+        copied = copy_canonical_assets(spec=spec, scene_output=out, asset_dir=root)
+        assert set(copied) == {"person_a", "person_b", "person_c"}
+        assert all((out / copied[eid]).is_file() for eid in copied)
+        assert all(Path(copied[eid]).name == f"{eid}.glb" for eid in copied)
+
+
+def test_blender_script_normalizes_imported_rigged_asset_into_z_up_shared_root():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "canonical_glb" in script
+    assert "rotation_euler.x = math.radians(90.0)" in script
+    assert "axis_root.location = (0.0, 0.0, 0.0)" in script
+    assert "animation_data" in script
+
+
+def test_blender_script_applies_authored_gestures_to_imported_rigged_bones_and_logs_them():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "rigged_armatures" in script
+    assert "Skeleton_arm_joint_L__4_" in script
+    assert "__authored_pose" in script
+    assert "asset_kind" in script
+
+
+def test_rigged_staging_revision_moves_bench_out_of_passerby_lane_and_turns_dancer():
+    from scripts.run_complex_scene_suite import rigged_staging_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = rigged_staging_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_018"
+    assert revised["revision"]["parent_revision"] == "revision_017"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    bench = tracks["bench"]["points"][0]["position"]
+    assert bench[0] <= -4.0
+    dancer_yaw = tracks["person_a"]["points"][-1]["rotation"][2]
+    assert dancer_yaw >= 1.4
+
+
+def test_blender_script_contains_rigged_leg_bone_mapping():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "leg_joint_L_1" in script
+    assert "leg_joint_R_1" in script
+
+
+def test_choreography_revision_separates_two_side_steps_and_camera_responsibilities():
+    from scripts.run_complex_scene_suite import choreography_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = choreography_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_019"
+    assert revised["revision"]["parent_revision"] == "revision_018"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    dancer_x = [float(point["position"][0]) for point in tracks["person_a"]["points"]]
+    assert dancer_x[2] > dancer_x[1] and dancer_x[3] < dancer_x[2]
+    assert float(tracks["person_a"]["points"][-1]["rotation"][2]) >= 1.5
+    cameras = {camera["camera_id"]: camera for camera in revised["cameras"]}
+    assert cameras["reverse"]["target"] == "person_c"
+    assert cameras["lateral"]["target"] == "person_a"
+
+
+def test_side_step_motion_revision_disables_running_stride_for_lead_and_widens_shots():
+    from scripts.run_complex_scene_suite import side_step_motion_revision, canonical_motion_profile_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = side_step_motion_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_020"
+    profile = canonical_motion_profile_for(revised)
+    dancer = next(item for item in profile["characters"] if item["target_id"] == "person_a")
+    assert dancer["motion_mode"] == "side_step_transfer"
+    assert all(float(item["angle"]) == 0.0 for item in dancer["limb_tracks"]["left_leg"])
+    assert all(float(camera["lens_mm"]) <= 32.0 for camera in revised["cameras"])
+
+
+def test_blender_script_drives_rigged_forearms_with_authored_gestures():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "Skeleton_arm_joint_L__3_" in script
+    assert "Skeleton_arm_joint_R__2_" in script
+
+
+def test_blender_script_resets_imported_rigged_rest_pose_before_authored_tracks():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "rotation_quaternion = (1.0, 0.0, 0.0, 0.0)" in script
+    assert "pose_position" in script
+
+
 def test_t2v_prompt_is_live_action_and_explicitly_preserves_authored_story():
     from scripts.run_complex_scene_suite import real_t2v_prompt
     from videoactagent.complex_scene_prompts_v2 import scene_spec
