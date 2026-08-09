@@ -47,3 +47,12 @@ Seedance/Kling reference-video 采用“一台 camera 一个 task、一个 refer
 ## 5. 评估边界
 
 最终视频检查分为媒体完整性、轨迹/摄像机一致性、人物和物体身份、物理事件以及人工/VLM 视觉判断。当前 procedural Proxy 的目标是结构预演，不代表真人外观；ATI、ReCamMaster、CamTrol、VACE 等模型只作为后续独立控制分支接入。
+
+## 6. 2026-08-10 全链路实测补充
+
+一条真实 endpoint run 已完成：批准的共享世界 Proxy 经 Uguu 上传后，按四个
+`camera_id` 分别调用 `Doubao-Seedance-2.0`，4 个任务全部下载并通过媒体完整性检查。
+最终 VLM 发现四个独立任务的人物身份、服装和场景布局发生漂移，因此“独立 task
+链路跑通”与“多视角一致性通过”必须分开记录。当前 pipeline 的后端 gate 仍保留：
+只有 Proxy approve 才能进入 Appearance-only 和 Seedance；最终 VLM 不通过则结果标记
+为 `revision_requested`，不自动再次生成。

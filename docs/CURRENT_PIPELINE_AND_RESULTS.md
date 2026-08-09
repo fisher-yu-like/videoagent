@@ -1,6 +1,6 @@
 # VideoActAgent 当前 Pipeline 与实验结果
 
-更新时间：2026-08-09
+更新时间：2026-08-10
 
 这份文档是当前实现的单一事实来源。后续任务开始前，先读取本文件，再读取与任务匹配的 skill；如果代码、旧报告和本文件冲突，以最新真实 run 目录中的 manifest、日志和报告为准。
 
@@ -8,9 +8,10 @@
 
 - 已完成：Prompt → Director/WorldState → Blender CodeAgent → 共享世界四机位 Proxy → ProxyVerifier → VLM 审核 → Appearance-only Prompt/Backend bundle。
 - 最新已通过 Proxy：`revision_005`，VLM 已通过；最新结构修订实验为 `revision_007`，VLM 仍为 `revision_requested`。
-- Seedance 2.0：已有 1 个旧的“三视频同 request”真实任务仍在运行；该任务保留为历史证据，不作为新的提交方式。新的标准是每个机位一个独立 task。
-- 尚未完成：Seedance 最终视频人工/VLM 审核、Kling 对照、VACE 控制评估、24 条正式矩阵、ATI/ReCamMaster/CamTrol 对照。
-- 当前结果不能表述为“真实视频生成完成”；只能表述为“Proxy 通过，Seedance 任务已提交且仍在运行”。
+- Seedance 2.0：已完成一条真实独立机位 endpoint run；4 个 task 均下载成功，但最终 VLM 判定跨机位人物/场景不一致。
+- 当前最新 Proxy 主线：`revision_024` 已接入 ACCAD BVH，但 VLM 仍拒绝动作可读性；后端 endpoint 使用历史已批准的 `revision_005`，不绕过当前 Proxy gate。
+- 尚未完成：Seedance 多视角一致性修复、Kling 对照、VACE 控制评估、24 条正式矩阵、ATI/ReCamMaster/CamTrol 对照。
+- 当前结果可表述为“真实 Seedance 视频生成和媒体链路完成”，不能表述为“多视角一致性通过”。
 
 ## 2. 当前端到端结构
 

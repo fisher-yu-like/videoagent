@@ -62,6 +62,33 @@
 
 因此以下历史结论全部撤销：同 seed 公平比较、修订策略导致退化、15 秒全片完成、相机控制已验证、121/91 个独立人工观察、三条件公平对照。四条真实 MP4、媒体元数据、哈希、合计 18 个坐标点和 2 个遮挡状态可作为描述性 s01 证据保留，本轮不重新生成它们。四条视频按 121 帧/24 fps 的计帧时长约为 5.04 秒；Seedance 容器的 stream duration 为 5.09 秒，不影响“请求仅覆盖 5 秒 s01”的结论。
 
+## 当前全链路实验（2026-08-10）
+
+### Proxy 阶段
+
+- `revision_021–024`：真实 ACCAD BVH 导入、四肢重定向、直立约束和有界 side-step overlay；每个 revision 都产生独立四机位 Blender MP4。
+- 确定性检查：每轮 20 passed、0 failed、2 unknown；VLM 每轮 1 次，均为 `revision_requested`。
+- `park_badminton` canonical 和 skeleton 两个真实 Proxy 试验也均被 VLM 拒绝，问题集中在网/球拍/人物接触、spectator 角色和机位覆盖。
+
+### Seedance 端到端
+
+使用历史已获 VLM approve 的 plaza `revision_005` Proxy，复制到新的不可变目录后按 camera_id 独立提交：
+
+`runs/results/e2e_seedance_approved_proxy_20260810_174500/`
+
+| 阶段 | 真实结果 |
+|---|---|
+| 上传 | Uguu 成功；tmpfiles 首次真实连接被远端关闭 |
+| submit | 4 次，4 个独立 task |
+| query | 84 次（初始 80 次 + 同 task 续查 4 次） |
+| download | 4 次，全部得到 MP4 |
+| 媒体检查 | 四条均 1280×720、121 帧、24fps、5.086 秒、无黑帧 |
+| 最终 VLM | `revision_requested` |
+
+最终 VLM 的问题不是视频文件损坏，而是独立 Seedance task 生成了不同人物、服装、场景布局和镜头语义。由此确认：当前“每机位独立 reference-video task”能保证提交与下载审计，但不能保证模型内部的跨机位身份/环境一致性。该问题不能靠伪造轨迹指标或重复提交掩盖。
+
+本轮完整证据见 [E2E_SEEDANCE_RUN_20260810.md](E2E_SEEDANCE_RUN_20260810.md)。上传 fallback 改用 Uguu、默认轮询增至 30 的代码修复已通过相关测试；当前相关测试累计 65 passed。
+
 ## 下一实验门
 
 轨迹处理保持冻结。只有 whole-story 输入先通过人工验收，并重新定义完整时长协议、真实视频输入方式和人工观察规则后，才讨论新的 API 小样本或 A100 显式控制实验。任何 API 调用或服务器推理必须先报告预算并获得允许。
