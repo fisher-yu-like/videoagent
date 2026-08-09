@@ -24,12 +24,14 @@ def build_blender_command(
     *,
     render_style: str = "clay",
     resolution: tuple[int, int] = (640, 360),
+    motion_bvh: Path | str | None = None,
+    motion_bvh_alt: Path | str | None = None,
 ) -> list[str]:
     if render_style not in {"clay", "canonical", "skeleton", "diagnostic"}:
         raise SandboxError("render_style must be clay, canonical, skeleton, or diagnostic")
     if len(resolution) != 2 or any(type(item) is not int or item <= 0 for item in resolution):
         raise SandboxError("resolution must contain two positive integers")
-    return [
+    command = [
         str(Path(blender_executable).resolve()),
         "--background",
         "--factory-startup",
@@ -45,6 +47,11 @@ def build_blender_command(
         "--resolution",
         f"{resolution[0]}x{resolution[1]}",
     ]
+    if motion_bvh is not None:
+        command.extend(["--motion-bvh", str(Path(motion_bvh))])
+    if motion_bvh_alt is not None:
+        command.extend(["--motion-bvh-alt", str(Path(motion_bvh_alt))])
+    return command
 
 
 def sha256_file(path: Path) -> str:
@@ -65,6 +72,8 @@ def run_blender_sandbox(
     resolution: tuple[int, int] = (640, 360),
     timeout_seconds: int = 900,
     expected_world_state_hash: str | None = None,
+    motion_bvh: Path | str | None = None,
+    motion_bvh_alt: Path | str | None = None,
     runner: Callable[..., Any] = subprocess.run,
 ) -> dict[str, Any]:
     output = Path(output_dir).resolve()
@@ -76,6 +85,8 @@ def run_blender_sandbox(
         output,
         render_style=render_style,
         resolution=resolution,
+        motion_bvh=motion_bvh,
+        motion_bvh_alt=motion_bvh_alt,
     )
     try:
         completed = runner(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout_seconds)

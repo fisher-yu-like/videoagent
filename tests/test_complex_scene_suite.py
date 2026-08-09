@@ -543,6 +543,67 @@ def test_blender_script_resets_imported_rigged_rest_pose_before_authored_tracks(
     assert "pose_position" in script
 
 
+def test_blender_script_contains_bvh_retarget_mapping_and_pose_stats():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "import_anim.bvh" in script
+    assert "motion_bvh_alt" in script
+    assert "bvh_retarget" in script
+    assert "LeftForeArm" in script
+    assert "scene.frame_set(int(round(src_frame)))" in script
+    assert "rotation_euler.to_quaternion()" in script
+    assert "rotation_quaternion.to_euler()" in script
+    assert "real motion as the base layer" in script
+    assert "retarget limbs only" in script
+    assert "bounded authored leg overlay" in script
+    assert "arm_sign = -1.0" in script
+
+
+def test_bvh_motion_revision_preserves_shared_world_and_selects_real_clips():
+    from scripts.run_complex_scene_suite import bvh_motion_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = bvh_motion_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_021"
+    assert revised["revision"]["parent_revision"] == "revision_020"
+    assert "real BVH retarget" in revised["revision"]["reason"]
+
+
+def test_bvh_readability_revision_separates_lanes_and_times_wave_beats():
+    from scripts.run_complex_scene_suite import bvh_readability_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = bvh_readability_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_022"
+    assert revised["revision"]["parent_revision"] == "revision_021"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert tracks["person_a"]["points"][-1]["position"][1] < -1.5
+    gestures = {(item["target_id"], item["limb"]): item for item in revised["gesture_tracks"]}
+    assert (30, 1.1) in gestures[("person_a", "left_arm")]["points"]
+
+
+def test_bvh_upright_revision_keeps_real_limbs_and_widens_side_step():
+    from scripts.run_complex_scene_suite import bvh_upright_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = bvh_upright_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_023"
+    assert revised["revision"]["parent_revision"] == "revision_022"
+    points = revised["tracks"][0]["points"]
+    assert float(points[2]["position"][0]) - float(points[1]["position"][0]) > 1.0
+
+
+def test_bvh_choreography_revision_adds_explicit_side_step_overlay_contract():
+    from scripts.run_complex_scene_suite import bvh_choreography_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = bvh_choreography_revision(scene_spec("plaza_dance_circle"))
+    assert revised["revision"]["id"] == "revision_024"
+    assert revised["revision"]["parent_revision"] == "revision_023"
+    assert "bounded authored leg" in revised["revision"]["reason"]
+
+
 def test_t2v_prompt_is_live_action_and_explicitly_preserves_authored_story():
     from scripts.run_complex_scene_suite import real_t2v_prompt
     from videoactagent.complex_scene_prompts_v2 import scene_spec

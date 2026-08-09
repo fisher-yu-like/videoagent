@@ -304,3 +304,11 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 详细记录见 [RIGGED_HUMANOID_REVISION_018_020_RUN.md](RIGGED_HUMANOID_REVISION_018_020_RUN.md)。已接入带网格、骨骼和蒙皮的 `CesiumMan.glb`，修复了 Y-up 垂直偏移、默认迈步姿态、真实 pose 日志和 VLM camera/frame 顺序标签。`revision_018–020` 每次真实四机位渲染均为 20 passed、0 failed、2 unknown；VLM 均为 `revision_requested`，Seedance/Kling 均为 0。
 
 最新阻塞是动作素材而非管线：标准人形仍缺少可读的侧步/挥手动作片段和脚掌 IK，640×360 下背包和角色容易重叠。下一阶段应接入真实 BVH/动作捕捉片段重定向到该骨骼，并把背包绑定到角色骨骼局部挂点；未通过 Proxy 视觉门禁前不得进入 Appearance-only 或后端视频生成。
+
+### 4.13 ACCAD BVH retarget / revision_021–revision_024（2026-08-10）
+
+详细证据见 [BVH_RETARGET_RUN_20260810.md](BVH_RETARGET_RUN_20260810.md)。本轮使用 ACCAD/Open Motion Project 的真实 BVH（CC BY 3.0），将两个 side-step clip 导入 Blender 隐藏源骨架，再把四肢局部旋转重定向到共享 CesiumMan。修复过三个真实问题：Blender `frame_set` 浮点错误、Euler BVH 被误读为单位 quaternion、BVH 躯干后仰掩盖侧步。最终 revision_024 增加了明确记录的有界 side-step overlay 和手势 overlay。
+
+四个 revision 的真实 Proxy 确定性检查均通过（20 passed / 0 failed / 2 unknown，低模创意可读性仍需人工/VLM）；每个 revision 都是独立目录，没有覆盖旧结果。revision_021–024 各调用 VLM 1 次，均为 `revision_requested`，因此本轮 Seedance/Kling/API 调用保持 0，未进入 Appearance-only Prompt。当前应优先换更标准的人形 rig/动作片段或接入 hand/foot IK，再重新走 ProxyVerifier→VLM。
+
+本轮相关回归测试为 52 passed。完整仓库测试未作为通过依据：VACE 第三方测试收集时缺少 `vace` 包，`tests/` 全量还触发既有外部集成测试并在 360 秒超时；这些失败均保留原始证据。

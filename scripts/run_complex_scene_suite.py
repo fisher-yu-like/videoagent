@@ -997,6 +997,135 @@ def side_step_motion_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
     return revised
 
 
+def bvh_motion_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_021 using real BVH clips for the lead humanoid.
+
+    The authored WorldState roots and camera plans remain unchanged.  The
+    revision only changes the local pose source for ``person_a``; the Blender
+    sandbox retargets two real ACCAD clips in sequence and keeps the source
+    hashes in the render manifest.
+    """
+    revised = side_step_motion_revision(spec)
+    revised["revision"] = {
+        "id": "revision_021",
+        "parent_revision": "revision_020",
+        "reason": "replace the procedural side-step overlay with real BVH retarget motion for the lead while preserving the shared world and authored root trajectory",
+        "preserved": [
+            "shared world",
+            "entity IDs",
+            "K0-K4 frame indices",
+            "all authored character/object root trajectories",
+            "camera targets and roles",
+            "one task per camera rule",
+        ],
+        "motion_sources": ["Female1_C24_SideStepLeft.bvh", "Female1_C25_SideStepRight.bvh"],
+    }
+    return revised
+
+
+def bvh_readability_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_022 with separated event lanes and explicit beats."""
+    revised = bvh_motion_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    lead = tracks["person_a"]
+    lead_points = [
+        (-2.6, -1.35, 0.0, 0.0),
+        (-1.35, -1.35, 0.0, 0.0),
+        (-0.35, -1.35, 0.0, 0.35),
+        (-1.20, -1.35, 0.0, 0.70),
+        (0.00, -1.65, 0.0, 1.57),
+    ]
+    for point, (x, y, z, yaw) in zip(lead.get("points", []), lead_points):
+        point["position"] = [x, y, z]
+        point["rotation"] = [0.0, 0.0, yaw]
+    backpack = tracks["backpack"]
+    for point, lead_point in zip(backpack.get("points", []), lead.get("points", [])):
+        point["position"] = [float(lead_point["position"][0]) - 0.55, float(lead_point["position"][1]) - 0.18, 0.95]
+        point["rotation"] = list(lead_point["rotation"])
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("person_a", "left_arm")]["points"] = [(0, 0.0), (18, 0.0), (30, 1.1), (42, 0.0), (119, 0.0)]
+    gestures[("person_a", "right_arm")]["points"] = [(0, 0.0), (48, 0.0), (60, -1.0), (72, 0.0), (119, 0.0)]
+    gestures[("person_b", "right_arm")]["points"] = [(0, 0.0), (24, 0.0), (36, 1.0), (48, 0.0), (119, 0.0)]
+    gestures[("person_c", "right_arm")]["points"] = [(0, 0.0), (78, 0.0), (90, 1.1), (102, 0.0), (119, 0.0)]
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["role"] = "wide front master with separated lead-to-musician wave and final turn"
+        elif camera_id == "lateral":
+            camera["role"] = "isolated side profile for the two non-overlapping lead side-step beats"
+        elif camera_id == "reverse":
+            camera["points"] = [
+                {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+                for frame, position in zip((0, 30, 60, 90, 119), [(10.5, -5.0, 4.1)] * 3 + [(10.0, -5.0, 4.1), (9.5, -5.0, 4.1)])
+            ]
+            camera["role"] = "three-quarter reverse isolating the passerby's return wave and rear crossing"
+        elif camera_id == "elevated":
+            camera["role"] = "high overview proving the three separated lanes and event order"
+    revised["revision"] = {
+        "id": "revision_022",
+        "parent_revision": "revision_021",
+        "reason": "VLM found trajectory overlap and unreadable action beats; separate the lead from the musician, time explicit wave beats, and adjust reverse coverage while preserving real BVH retarget motion",
+        "preserved": ["shared world", "real BVH sources", "entity IDs", "K0-K4 frame indices", "camera count", "one task per camera rule"],
+    }
+    return revised
+
+
+def bvh_upright_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_023 with upright BVH limbs and stronger event spacing."""
+    revised = bvh_readability_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    lead = tracks["person_a"]
+    lead_points = [
+        (-2.8, -1.55, 0.0, 0.0),
+        (-1.35, -1.55, 0.0, 0.0),
+        (0.20, -1.55, 0.0, 0.25),
+        (-1.35, -1.55, 0.0, 0.55),
+        (0.20, -1.55, 0.0, 1.35),
+    ]
+    for point, (x, y, z, yaw) in zip(lead.get("points", []), lead_points):
+        point["position"] = [x, y, z]
+        point["rotation"] = [0.0, 0.0, yaw]
+    backpack = tracks["backpack"]
+    for point, lead_point in zip(backpack.get("points", []), lead.get("points", [])):
+        point["position"] = [float(lead_point["position"][0]) - 0.55, float(lead_point["position"][1]) - 0.18, 0.95]
+        point["rotation"] = list(lead_point["rotation"])
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("person_b", "right_arm")]["points"] = [(0, 0.0), (24, 0.0), (36, 1.35), (48, 0.0), (119, 0.0)]
+    gestures[("person_c", "right_arm")]["points"] = [(0, 0.0), (78, 0.0), (90, 1.35), (102, 0.0), (119, 0.0)]
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["points"] = [{"frame": frame, "position": [0.0, -12.0, 3.0], "rotation": [0.0, 0.0, 0.0]} for frame in (0, 30, 60, 90, 119)]
+            camera["lens_mm"] = 36.0
+        elif camera_id == "lateral":
+            camera["points"] = [{"frame": frame, "position": [-9.0, -1.0, 2.8], "rotation": [0.0, 0.0, 0.0]} for frame in (0, 30, 60, 90, 119)]
+            camera["lens_mm"] = 36.0
+        elif camera_id == "reverse":
+            camera["lens_mm"] = 40.0
+        elif camera_id == "elevated":
+            camera["points"] = [{"frame": frame, "position": [0.0, -11.0, 7.8], "rotation": [0.0, 0.0, 0.0]} for frame in (0, 30, 60, 90, 119)]
+            camera["lens_mm"] = 36.0
+    revised["revision"] = {
+        "id": "revision_023",
+        "parent_revision": "revision_022",
+        "reason": "VLM read the BVH torso as repeated backward leaning; keep the real limb retarget but hold the lead upright, widen the root side-step path, strengthen musician/passersby wave beats, and tighten the coverage",
+        "preserved": ["shared world", "real BVH limb sources", "entity IDs", "K0-K4 frame indices", "four camera responsibilities", "one task per camera rule"],
+    }
+    return revised
+
+
+def bvh_choreography_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_024 with explicit leg alternation over the BVH base."""
+    revised = bvh_upright_revision(spec)
+    revised["revision"] = {
+        "id": "revision_024",
+        "parent_revision": "revision_023",
+        "reason": "VLM still saw a static open-arm stance; retain real BVH limb motion and add a bounded authored leg/arm choreography overlay so the two side-step phases and interaction beats are explicit",
+        "preserved": ["shared world", "real BVH source hashes", "upright retarget policy", "entity IDs", "K0-K4 frame indices", "four camera responsibilities", "one task per camera rule"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
     subjects = []
@@ -1100,6 +1229,8 @@ def _blender_script() -> str:
         parser.add_argument("--output-dir", required=True)
         parser.add_argument("--render-style", default="clay", choices=["clay", "canonical", "skeleton", "diagnostic"])
         parser.add_argument("--resolution", default="640x360")
+        parser.add_argument("--motion-bvh")
+        parser.add_argument("--motion-bvh-alt")
         args = parser.parse_args(values)
         out = Path(args.output_dir).resolve()
         out.mkdir(parents=True, exist_ok=True)
@@ -1140,6 +1271,28 @@ def _blender_script() -> str:
                 scene.render.engine = "BLENDER_WORKBENCH"
             except Exception:
                 pass
+
+        bvh_sources = []
+        bvh_metadata = []
+        for raw_motion_path in (args.motion_bvh, args.motion_bvh_alt):
+            if not raw_motion_path:
+                continue
+            motion_path = Path(raw_motion_path).resolve()
+            if not motion_path.is_file() or motion_path.suffix.lower() != ".bvh":
+                raise RuntimeError("motion BVH file is missing: " + str(motion_path))
+            before = set(obj.name for obj in bpy.context.scene.objects)
+            bpy.ops.import_anim.bvh(filepath=str(motion_path), target="ARMATURE", global_scale=0.01, use_fps_scale=False, update_scene_fps=False)
+            imported_motion = [obj for obj in bpy.context.scene.objects if obj.name not in before and obj.type == "ARMATURE"]
+            if not imported_motion:
+                raise RuntimeError("Blender imported no armature from BVH: " + str(motion_path))
+            source_armature = imported_motion[-1]
+            source_armature.hide_render = True
+            source_armature.hide_viewport = True
+            action = source_armature.animation_data.action if source_armature.animation_data else None
+            if action is None:
+                raise RuntimeError("BVH armature has no action: " + str(motion_path))
+            bvh_sources.append(source_armature)
+            bvh_metadata.append({"path": str(motion_path), "sha256": hashlib.sha256(motion_path.read_bytes()).hexdigest(), "frame_range": [float(action.frame_range[0]), float(action.frame_range[1])]})
 
         world = bpy.data.worlds.new(scene_plan["scene_id"] + "_SharedWorld")
         scene.world = world
@@ -1520,11 +1673,169 @@ def _blender_script() -> str:
                 root.keyframe_insert(data_path="location", frame=frame)
                 root.keyframe_insert(data_path="rotation_euler", frame=frame)
 
+        # Optional real-motion branch.  The BVH armatures are hidden source
+        # rigs; only their local rotations are retargeted onto the lead
+        # CesiumMan armature.  Root translation remains exclusively authored
+        # by WorldState so all four cameras observe the same physical path.
+        bvh_target_ids = set()
+        bvh_pose_stats = {}
+        if bvh_sources and "person_a" in rigged_armatures:
+            bvh_target_ids.add("person_a")
+            bvh_bone_map = {
+                "Hips": "Skeleton_torso_joint_1",
+                "ToSpine": "Skeleton_torso_joint_2",
+                "Spine": "Skeleton_torso_joint_3",
+                "Spine1": "torso_joint_3",
+                "Neck": "Skeleton_neck_joint_1",
+                "Head": "Skeleton_neck_joint_2",
+                "LeftArm": "Skeleton_arm_joint_L__4_",
+                "LeftForeArm": "Skeleton_arm_joint_L__3_",
+                "LeftHand": "Skeleton_arm_joint_L__2_",
+                "RightArm": "Skeleton_arm_joint_R",
+                "RightForeArm": "Skeleton_arm_joint_R__2_",
+                "RightHand": "Skeleton_arm_joint_R__3_",
+                "LeftUpLeg": "leg_joint_L_1",
+                "LeftLeg": "leg_joint_L_2",
+                "LeftFoot": "leg_joint_L_3",
+                "LeftToeBase": "leg_joint_L_5",
+                "RightUpLeg": "leg_joint_R_1",
+                "RightLeg": "leg_joint_R_2",
+                "RightFoot": "leg_joint_R_3",
+                "RightToeBase": "leg_joint_R_5",
+            }
+            target_rig = rigged_armatures["person_a"]
+            target_by_name = {bone.name: bone for bone in target_rig.pose.bones}
+            target_rig.animation_data.action = bpy.data.actions.new("person_a__bvh_retarget")
+            bvh_pose_stats = {"left_arm": [], "right_arm": [], "left_leg": [], "right_leg": []}
+            bvh_mapped_bones = set()
+
+            def _source_quaternion(source_bone):
+                # Blender's BVH importer normally keeps channel rotations in
+                # Euler mode.  Reading rotation_quaternion in that mode returns
+                # the identity and silently discards the real motion.
+                if source_bone.rotation_mode == "QUATERNION":
+                    return source_bone.rotation_quaternion.copy()
+                if source_bone.rotation_mode == "AXIS_ANGLE":
+                    return source_bone.rotation_axis_angle.to_quaternion()
+                return source_bone.rotation_euler.to_quaternion()
+
+            def _source_frame(action, output_frame, clip_index):
+                start, end = float(action.frame_range[0]), float(action.frame_range[1])
+                if len(bvh_sources) > 1:
+                    half = max(1, frame_count // len(bvh_sources))
+                    clip_index = min(len(bvh_sources) - 1, int(output_frame) // half)
+                    local_frame = int(output_frame) - clip_index * half
+                    local_count = half if clip_index < len(bvh_sources) - 1 else max(1, frame_count - clip_index * half)
+                    ratio = min(1.0, max(0.0, float(local_frame) / float(max(1, local_count - 1))))
+                else:
+                    ratio = min(1.0, max(0.0, float(output_frame) / float(max(1, frame_count - 1))))
+                return start + ratio * (end - start), clip_index
+
+            for output_frame in range(frame_count):
+                src_action = bvh_sources[0].animation_data.action
+                src_frame, clip_index = _source_frame(src_action, output_frame, 0)
+                if len(bvh_sources) > 1:
+                    src_action = bvh_sources[clip_index].animation_data.action
+                    src_frame, _ = _source_frame(src_action, output_frame, clip_index)
+                scene.frame_set(int(round(src_frame)))
+                source_rig = bvh_sources[clip_index]
+                source_by_name = {bone.name: bone for bone in source_rig.pose.bones}
+                for source_name, target_name in bvh_bone_map.items():
+                    # retarget limbs only: ACCAD's side-step pelvis/spine lean
+                    # is held at the authored upright staging pose.
+                    if source_name in {"Hips", "ToSpine", "Spine", "Spine1", "Neck", "Head"}:
+                        continue
+                    source_bone = source_by_name.get(source_name)
+                    target_bone = target_by_name.get(target_name)
+                    if source_bone is None or target_bone is None:
+                        continue
+                    bvh_mapped_bones.add(source_name)
+                    target_bone.rotation_mode = "QUATERNION"
+                    target_bone.rotation_quaternion = _source_quaternion(source_bone)
+                    target_bone.keyframe_insert(data_path="rotation_quaternion", frame=output_frame)
+                # Keep the real motion as the base layer, then add the
+                # authored wave beats as a small local overlay so the semantic
+                # event remains visible without replacing mocap.
+                for gesture in gesture_tracks:
+                    if str(gesture.get("target_id")) != "person_a":
+                        continue
+                    points = gesture.get("points", [])
+                    if not points:
+                        continue
+                    if output_frame <= int(points[0][0]):
+                        overlay_angle = float(points[0][1])
+                    elif output_frame >= int(points[-1][0]):
+                        overlay_angle = float(points[-1][1])
+                    else:
+                        overlay_angle = float(points[-1][1])
+                        for left_point, right_point in zip(points, points[1:]):
+                            if int(left_point[0]) <= output_frame <= int(right_point[0]):
+                                ratio = float(output_frame - int(left_point[0])) / float(max(1, int(right_point[0]) - int(left_point[0])))
+                                overlay_angle = float(left_point[1]) * (1.0 - ratio) + float(right_point[1]) * ratio
+                                break
+                    overlay_angle = safe_arm_angle(str(gesture.get("limb")), overlay_angle)
+                    overlay_names = {"left_arm": ("Skeleton_arm_joint_L__4_", "Skeleton_arm_joint_L__3_"), "right_arm": ("Skeleton_arm_joint_R", "Skeleton_arm_joint_R__2_")}.get(str(gesture.get("limb")), ())
+                    for bone_index, bone_name in enumerate(overlay_names):
+                        target_bone = target_by_name.get(bone_name)
+                        if target_bone is None:
+                            continue
+                        arm_sign = -1.0 if str(gesture.get("limb")) == "left_arm" else 1.0
+                        overlay = mathutils.Euler((float(overlay_angle) * arm_sign * (1.0 if bone_index == 0 else 0.65), 0.0, 0.0), "XYZ").to_quaternion()
+                        target_bone.rotation_quaternion = target_bone.rotation_quaternion @ overlay
+                        target_bone.keyframe_insert(data_path="rotation_quaternion", frame=output_frame)
+                # A bounded authored leg overlay makes the two semantic
+                # side-step phases visible even when the real clip's local
+                # leg angles are small after retargeting.  It is additive to,
+                # and logged alongside, the real BVH motion.
+                step_points = ((0, 0.0), (30, 0.82), (60, -0.82), (90, 0.82), (119, 0.0))
+                if output_frame <= step_points[0][0]:
+                    step_angle = step_points[0][1]
+                elif output_frame >= step_points[-1][0]:
+                    step_angle = step_points[-1][1]
+                else:
+                    step_angle = step_points[-1][1]
+                    for left_point, right_point in zip(step_points, step_points[1:]):
+                        if left_point[0] <= output_frame <= right_point[0]:
+                            ratio = float(output_frame - left_point[0]) / float(max(1, right_point[0] - left_point[0]))
+                            step_angle = left_point[1] * (1.0 - ratio) + right_point[1] * ratio
+                            break
+                for side, sign in (("L", 1.0), ("R", -1.0)):
+                    for bone_name, factor in ((f"leg_joint_{side}_1", 1.0), (f"leg_joint_{side}_2", -0.70), (f"leg_joint_{side}_3", 0.25)):
+                        target_bone = target_by_name.get(bone_name)
+                        if target_bone is None:
+                            continue
+                        target_bone.rotation_mode = "QUATERNION"
+                        overlay = mathutils.Euler((float(step_angle) * sign * factor, 0.0, 0.0), "XYZ").to_quaternion()
+                        target_bone.rotation_quaternion = target_bone.rotation_quaternion @ overlay
+                        target_bone.keyframe_insert(data_path="rotation_quaternion", frame=output_frame)
+                left = target_by_name.get(bvh_bone_map["LeftArm"])
+                right = target_by_name.get(bvh_bone_map["RightArm"])
+                if left is not None:
+                    bvh_pose_stats["left_arm"].append(float(left.rotation_quaternion.to_euler()[0]))
+                if right is not None:
+                    bvh_pose_stats["right_arm"].append(float(right.rotation_quaternion.to_euler()[0]))
+                left_leg = target_by_name.get(bvh_bone_map["LeftUpLeg"])
+                right_leg = target_by_name.get(bvh_bone_map["RightUpLeg"])
+                if left_leg is not None:
+                    bvh_pose_stats["left_leg"].append(float(left_leg.rotation_quaternion.to_euler()[0]))
+                if right_leg is not None:
+                    bvh_pose_stats["right_leg"].append(float(right_leg.rotation_quaternion.to_euler()[0]))
+            if not {"LeftUpLeg", "RightUpLeg"}.issubset(bvh_mapped_bones):
+                raise RuntimeError("BVH retarget mapped no CesiumMan leg bones")
+            scene.frame_set(0)
+
         arm_pose_log = []
         for gesture in gesture_tracks:
             arm = arms.get((gesture["target_id"], gesture["limb"]))
             rigged = rigged_armatures.get(gesture["target_id"])
             if arm is None and rigged is None:
+                continue
+            if str(gesture["target_id"]) in bvh_target_ids:
+                key = str(gesture["limb"])
+                angles = list(bvh_pose_stats.get(key, [])) or [0.0]
+                shoulder_x = 0.44 if key == "left_arm" else -0.44
+                clearances = [abs(shoulder_x - math.sin(angle) * 0.29) for angle in angles]
+                arm_pose_log.append({"target_id": gesture["target_id"], "limb": gesture["limb"], "min_angle": min(angles), "max_angle": max(angles), "min_elbow_clearance": min(clearances), "asset_kind": "bvh_retarget"})
                 continue
             points = gesture["points"]
             applied_angles = []
@@ -1573,6 +1884,13 @@ def _blender_script() -> str:
         motion_log = []
         for motion in canonical_motion_tracks:
             target_id = str(motion.get("target_id"))
+            if target_id in bvh_target_ids:
+                pose_stats = {}
+                for limb_name in ("left_arm", "right_arm", "left_leg", "right_leg"):
+                    values = list(bvh_pose_stats.get(limb_name, [])) or [0.0]
+                    pose_stats[limb_name] = {"min_angle": min(values), "max_angle": max(values), "sample_count": len(values)}
+                motion_log.append({"target_id": target_id, "motion_mode": "bvh_retarget+authored_side_step", "foot_contacts": motion.get("foot_contacts", []), "asset_kind": "bvh_retarget", "source_count": len(bvh_sources), "mapped_bones": sorted(bvh_mapped_bones), "pose_stats": pose_stats, "overlay": "bounded_authored_side_step"})
+                continue
             for limb_name, samples in motion.get("limb_tracks", {}).items():
                 parts = legs.get((target_id, limb_name))
                 rigged = rigged_armatures.get(target_id)
@@ -1724,7 +2042,7 @@ def _blender_script() -> str:
         (out / "motion_log.json").write_text(json.dumps(motion_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "arm_pose_log.json").write_text(json.dumps(arm_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "skeleton_pose_log.json").write_text(json.dumps(skeleton_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        (out / "render_manifest.json").write_text(json.dumps({"schema_version": "pipeline-v2-render-manifest-1.0", "world_state_hash": world_hash, "proxy_style": args.render_style, "asset_registry": str(registry_path.name) if registry_path.is_file() else None, "frame_count": frame_count, "fps": fps, "resolution": [width, height], "videos": videos}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        (out / "render_manifest.json").write_text(json.dumps({"schema_version": "pipeline-v2-render-manifest-1.0", "world_state_hash": world_hash, "proxy_style": args.render_style, "asset_registry": str(registry_path.name) if registry_path.is_file() else None, "frame_count": frame_count, "fps": fps, "resolution": [width, height], "motion_sources": bvh_metadata, "videos": videos}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         bpy.context.scene.camera = bpy.data.objects[world_state["camera_trajectory_plan"]["cameras"][0]["id"]]
         bpy.ops.wm.save_as_mainfile(filepath=str(out / "shared_world.blend"))
         print("PIPELINE_V2_BLENDER_OK")
@@ -2103,7 +2421,7 @@ def run_final_review(*, scene_output: Path, final_report: Mapping[str, Any], fin
         return {"status": "vlm_failed", "mode": "vlm", "api_calls": 1, "error": f"{type(exc).__name__}: {exc}"}
 
 
-def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, model: str, proxy_style: str, asset_dir: Path | None, realization_mode: str, proxy_review_mode: str, final_review_mode: str, allow_unreviewed_backend: bool, poll_interval: float, max_polls: int, run_api: bool = True) -> dict[str, Any]:
+def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, model: str, proxy_style: str, asset_dir: Path | None, motion_bvh: Path | None = None, motion_bvh_alt: Path | None = None, realization_mode: str, proxy_review_mode: str, final_review_mode: str, allow_unreviewed_backend: bool, poll_interval: float, max_polls: int, run_api: bool = True) -> dict[str, Any]:
     run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     scene_output = output_dir_for(output_root, spec["scene_id"], run_id)
     scene_output.mkdir(parents=True, exist_ok=False)
@@ -2134,11 +2452,12 @@ def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, mode
     code_dir.mkdir()
     script_path = code_dir / "generated_blender.py"
     script_path.write_text(_blender_script(), encoding="utf-8")
-    evidence = {"status": "succeeded", "agent": "Codex-local-complex-scene-compiler", "world_state_hash": world.world_state_hash(), "script_validation": {"script_sha256": sha256_file(script_path)}, "planner_sha256": sha256_file(planner_path), "gesture_tracks_sha256": sha256_file(gesture_path), "motion_tracks_sha256": sha256_file(motion_path), "skeleton_motion_sha256": sha256_file(skeleton_motion_path), "asset_registry_sha256": sha256_file(asset_registry_path), "scene_layout_sha256": sha256_file(layout_path), "proxy_style": proxy_style, "notes": ["one shared Blender world", "four synchronized cameras", "fine-grained gesture keyframes", "gesture sidecar consumed by Blender", "canonical asset registry sidecar", "canonical motion profile with leg tracks and foot contacts", "skeleton motion sidecar with explicit per-bone landmarks"]}
+    motion_sources = [str(path.resolve()) for path in (motion_bvh, motion_bvh_alt) if path is not None]
+    evidence = {"status": "succeeded", "agent": "Codex-local-complex-scene-compiler", "world_state_hash": world.world_state_hash(), "script_validation": {"script_sha256": sha256_file(script_path)}, "planner_sha256": sha256_file(planner_path), "gesture_tracks_sha256": sha256_file(gesture_path), "motion_tracks_sha256": sha256_file(motion_path), "skeleton_motion_sha256": sha256_file(skeleton_motion_path), "asset_registry_sha256": sha256_file(asset_registry_path), "scene_layout_sha256": sha256_file(layout_path), "proxy_style": proxy_style, "motion_sources": motion_sources, "notes": ["one shared Blender world", "four synchronized cameras", "fine-grained gesture keyframes", "gesture sidecar consumed by Blender", "canonical asset registry sidecar", "canonical motion profile with leg tracks and foot contacts", "skeleton motion sidecar with explicit per-bone landmarks"]}
     _write_json(code_dir / "evidence.json", evidence)
     sandbox_dir = scene_output / "sandbox"
     try:
-        manifest = run_blender_sandbox(blender_executable=blender, generated_script=script_path, world_state_path=world_path, output_dir=sandbox_dir, render_style=proxy_style, resolution=(640, 360), timeout_seconds=1800, expected_world_state_hash=world.world_state_hash())
+        manifest = run_blender_sandbox(blender_executable=blender, generated_script=script_path, world_state_path=world_path, output_dir=sandbox_dir, render_style=proxy_style, resolution=(640, 360), timeout_seconds=1800, expected_world_state_hash=world.world_state_hash(), motion_bvh=motion_bvh, motion_bvh_alt=motion_bvh_alt)
         verifier = verify_proxy(world_state_path=world_path, render_output_dir=sandbox_dir, director_plan_path=director_path, code_agent_evidence_path=code_dir / "evidence.json", generated_script_path=script_path, probe_video=_probe)
         asset_check = verify_asset_materialization(registry_path=asset_registry_path, asset_log_path=sandbox_dir / "asset_log.json", proxy_style=proxy_style)
         verifier.setdefault("checks", []).append(asset_check)
@@ -2270,6 +2589,12 @@ def main() -> int:
     parser.add_argument("--rigged-staging-revision", action="store_true", help="apply revision_018 for rigged-human legibility and bench occlusion repair")
     parser.add_argument("--choreography-revision", action="store_true", help="apply revision_019 with explicit side-step timing and dedicated camera responsibilities")
     parser.add_argument("--side-step-motion-revision", action="store_true", help="apply revision_020 with side-step transfer motion and wider coverage")
+    parser.add_argument("--bvh-motion-revision", action="store_true", help="apply revision_021 and retarget real BVH clips onto the lead rig")
+    parser.add_argument("--bvh-readability-revision", action="store_true", help="apply revision_022 to separate BVH-backed action lanes and wave beats")
+    parser.add_argument("--bvh-upright-revision", action="store_true", help="apply revision_023 with upright BVH limbs and wider side-step spacing")
+    parser.add_argument("--bvh-choreography-revision", action="store_true", help="apply revision_024 with an explicit bounded side-step overlay")
+    parser.add_argument("--motion-bvh", type=Path, help="real BVH clip for the lead motion branch")
+    parser.add_argument("--motion-bvh-alt", type=Path, help="optional second real BVH clip concatenated after the first")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
     parser.add_argument("--proxy-review", choices=["none", "manual", "vlm"], default="manual", help="Proxy visual approval gate; VLM makes exactly one review request")
     parser.add_argument("--final-review", choices=["none", "manual", "vlm"], default="manual", help="final video review gate; VLM makes exactly one review request")
@@ -2314,6 +2639,14 @@ def main() -> int:
         selected = [choreography_revision(spec) for spec in selected]
     if args.side_step_motion_revision:
         selected = [side_step_motion_revision(spec) for spec in selected]
+    if args.bvh_motion_revision:
+        selected = [bvh_motion_revision(spec) for spec in selected]
+    if args.bvh_readability_revision:
+        selected = [bvh_readability_revision(spec) for spec in selected]
+    if args.bvh_upright_revision:
+        selected = [bvh_upright_revision(spec) for spec in selected]
+    if args.bvh_choreography_revision:
+        selected = [bvh_choreography_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
@@ -2321,7 +2654,7 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=False)
     results = []
     for spec in selected:
-        results.append(run_scene(spec, output_root=root, blender=args.blender.resolve(), model=args.model, proxy_style=args.proxy_style, asset_dir=args.asset_dir.resolve() if args.asset_dir else None, realization_mode=args.realization_mode, proxy_review_mode=args.proxy_review, final_review_mode=args.final_review, allow_unreviewed_backend=args.allow_unreviewed_backend, poll_interval=args.poll_interval, max_polls=args.max_polls, run_api=not args.skip_seedance))
+        results.append(run_scene(spec, output_root=root, blender=args.blender.resolve(), model=args.model, proxy_style=args.proxy_style, asset_dir=args.asset_dir.resolve() if args.asset_dir else None, motion_bvh=args.motion_bvh.resolve() if args.motion_bvh else None, motion_bvh_alt=args.motion_bvh_alt.resolve() if args.motion_bvh_alt else None, realization_mode=args.realization_mode, proxy_review_mode=args.proxy_review, final_review_mode=args.final_review, allow_unreviewed_backend=args.allow_unreviewed_backend, poll_interval=args.poll_interval, max_polls=args.max_polls, run_api=not args.skip_seedance))
         _write_json(root / "progress.json", results)
     summary = {"schema_version": "complex-scene-full-chain-1.0", "model": args.model, "proxy_style": args.proxy_style, "realization_mode": args.realization_mode, "proxy_review": args.proxy_review, "final_review": args.final_review, "scene_count": len(selected), "seedance_submission_budget": SEEDANCE_SUBMISSION_BUDGET, "results": results, "api_calls": {key: sum(int(item.get("seedance", {}).get("api_calls", {}).get(key, 0)) for item in results) for key in ("submit", "query", "download")}, "vlm_review_calls": sum(int(item.get("proxy_review", {}).get("api_calls", 0)) + int(item.get("final_review", {}).get("api_calls", 0)) for item in results)}
     _write_json(root / "summary.json", summary)
