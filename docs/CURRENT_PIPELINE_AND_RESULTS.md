@@ -353,3 +353,16 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 Seedance 使用 approved revision_029 Proxy，4 个独立 reference-video task，`submit=4, query=118, download=4`，无重新 submit。四条真实视频媒体检查均通过，但最终 VLM 仍为 `revision_requested`：四个独立 task 产生了不同人物、推车、箱子和市场布局。完整 prompt、task ID、哈希和结果见 [SEEDANCE_STORYHUMAN_REVISION_029_RUN.md](SEEDANCE_STORYHUMAN_REVISION_029_RUN.md) 和 [endpoint](../runs/results/e2e_seedance_storyhuman_market_revision_029_20260810/)。
 
 结论：Proxy 侧的人形轮廓和物体耦合问题已真实修复；剩余失败是 Seedance 独立 reference-video task 的跨视角一致性限制，不能再通过 appearance-only prompt 或重复提交掩盖。
+
+### 4.18 Seedance camera-lock / identity-anchor / camera-first 修复实验 / 2026-08-10
+
+本轮保持 revision_029 approved storyhuman Proxy 不变，连续做四种真实后端条件化对照，旧 endpoint 均未覆盖：
+
+1. `e2e_seedance_storyhuman_camera_prompt_20260810`：每个 camera_id 使用 camera-specific structural-lock prompt；submit=4，query=130（含 continuation），download=4。
+2. `e2e_seedance_storyhuman_identity_anchor_20260810_retry`：每个任务增加 master Proxy 为 canonical identity/world anchor；submit=4，query=130，download=4。
+3. `e2e_seedance_storyhuman_real_anchor_20260810`：用已下载的真实 master MP4 作 identity/material anchor，只为其余三机位新提交；submit=3，query=97，download=3，master immutable reuse。
+4. `e2e_seedance_storyhuman_camera_first_20260810`：当前机位 Proxy 放在第一 reference，真实 master 放在第二 reference；submit=3，query=98，download=3，master immutable reuse。
+
+四轮所有已下载 MP4 都通过真实文件、ffprobe、时长/帧数/fps 和 blackdetect；但最终 VLM 四轮均为 `revision_requested`。最后一轮 VLM 仍观察到四路近似 front-facing、customer/helper 角色混淆、纸张早于 cart 出现、elevated 不是 overhead、lateral/reverse 不是 authored coverage。
+
+Blender `camera_log.json` 已记录四个 authored/applied camera 的不同位置和 look-at rotation，因此本轮根因不在 Proxy 相机轨迹日志或上传完整性，而在当前网关对独立 Seedance reference-video task 的跨任务共享世界/身份/机位约束不足。详细 prompt、task、SHA-256、媒体报告和四个最后视频见 [SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md](SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md)。在接入原生 multiview/显式 camera-control 后端前，不再用同一接口重复提交来搜索“通过”结果。

@@ -59,6 +59,45 @@ def test_build_single_camera_job_has_exactly_one_reference_video() -> None:
     assert job["request"]["content"][1]["role"] == "reference_video"
 
 
+def test_build_single_camera_job_can_bind_canonical_identity_anchor() -> None:
+    from videoactagent.seedance_auto_chain import build_single_camera_job
+
+    anchor = _asset("https://media.volccdn.com/identity_anchor.mp4", "master")
+    camera = _asset("https://media.volccdn.com/lateral.mp4", "lateral")
+    job = build_single_camera_job(
+        job_id="scene_lateral",
+        camera_id="lateral",
+        prompt="appearance-only lateral camera with shared identity anchor",
+        asset=camera,
+        identity_anchor=anchor,
+        model="Doubao-Seedance-2.0",
+    )
+
+    refs = job["request"]["content"][1:]
+    assert [item["video_url"]["url"] for item in refs] == [anchor.url, camera.url]
+    assert job["reference_assets"][0]["url"] == anchor.url
+    assert job["reference_assets"][1]["url"] == camera.url
+
+
+def test_build_single_camera_job_can_put_camera_plate_first() -> None:
+    from videoactagent.seedance_auto_chain import build_single_camera_job
+
+    anchor = _asset("https://media.volccdn.com/identity_anchor.mp4", "master")
+    camera = _asset("https://media.volccdn.com/elevated.mp4", "elevated")
+    job = build_single_camera_job(
+        job_id="scene_elevated",
+        camera_id="elevated",
+        prompt="camera-first elevated view",
+        asset=camera,
+        identity_anchor=anchor,
+        identity_anchor_first=False,
+        model="Doubao-Seedance-2.0",
+    )
+
+    refs = job["request"]["content"][1:]
+    assert [item["video_url"]["url"] for item in refs] == [camera.url, anchor.url]
+
+
 def test_camera_jobs_submit_one_task_per_asset(monkeypatch) -> None:
     import videoactagent.seedance_auto_chain as chain
 
@@ -84,3 +123,30 @@ def test_camera_jobs_submit_one_task_per_asset(monkeypatch) -> None:
     assert calls == ["scene_master", "scene_lateral"]
     assert result["status"] == "succeeded"
     assert result["api_calls"] == {"submit": 2, "query": 2, "download": 2}
+
+
+def test_camera_jobs_pass_shared_identity_anchor_to_each_task(monkeypatch) -> None:
+    import videoactagent.seedance_auto_chain as chain
+
+    assets = [_asset("https://media.volccdn.com/a.mp4", "master"), _asset("https://media.volccdn.com/b.mp4", "lateral")]
+    anchor = assets[0]
+    received = []
+
+    def fake_run(**kwargs):
+        received.append(kwargs["identity_anchor"])
+        return {"status": "succeeded", "api_calls": {"submit": 1, "query": 1, "download": 1}, "camera_id": kwargs["camera_id"]}
+
+    monkeypatch.setattr(chain, "run_uploaded_single_camera_job", fake_run)
+    chain.run_uploaded_camera_jobs(
+        job_id="scene",
+        prompt="appearance-only",
+        assets=assets,
+        camera_ids=["master", "lateral"],
+        output_root="runs/results/test-camera-jobs-anchor",
+        api_key="key",
+        base_url="https://gateway.example",
+        model="Doubao-Seedance-2.0",
+        identity_anchor=anchor,
+    )
+
+    assert received == [anchor, anchor]

@@ -1357,6 +1357,37 @@ def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def seedance_camera_prompt_for(spec: Mapping[str, Any], camera_id: str, *, identity_anchor_first: bool = True) -> str:
+    """Compile a camera-specific Seedance restyle prompt.
+
+    The previous runner sent identical text to every independent task.  That
+    left the backend free to reinterpret each reference as a new shot.  This
+    prompt keeps the shared cast/props from the appearance compiler while
+    binding the task to its authored camera role and visible proxy plate.
+    """
+    camera = next((item for item in spec.get("cameras", []) if str(item.get("camera_id")) == str(camera_id)), None)
+    if camera is None:
+        raise ValueError(f"unknown camera_id: {camera_id}")
+    entity_ids = [str(item.get("id")) for item in spec.get("entities", []) if isinstance(item, Mapping)]
+    entity_text = ", ".join(entity_ids)
+    role = str(camera.get("role", ""))
+    target = str(camera.get("target", ""))
+    reference_order = (
+        "If two reference videos are supplied, the first is the canonical shared identity/world anchor and the second is the authored camera motion plate; use both together, never replace the anchor cast, clothing, cart, box count, counter, or lighting with the second video's independent interpretation."
+        if identity_anchor_first else
+        "If two reference videos are supplied, the first is the authored camera motion plate and controls viewpoint, framing, target, occlusion order, and path; the second is only a canonical identity/material anchor. Do not let the identity anchor override the first video's camera role or turn a lateral/reverse/elevated view into a front master view."
+    )
+    return (
+        str(spec["appearance_prompt"]).strip()
+        + "\n\nCamera-specific structural lock\n"
+        + f"This is the camera_id={camera_id} task. Authored camera responsibility: {role}. Authored camera target: {target}.\n"
+        + "Treat the uploaded reference video as a locked structural plate, not as loose inspiration: produce a one-to-one live-action restyle of every frame with the same camera path, framing, timing, occlusion order, and spatial layout.\n"
+        + f"The shared-world entity set is exactly: {entity_text}. every visible proxy person and prop in the input must be restyled and remain present in its authored image region; do not omit, merge, duplicate, or replace any visible entity.\n"
+        + reference_order + "\n"
+        + "Do not create a new environment, a new shot, a new camera angle, a cut, a mannequin scene, or a pallet/cart substitute. Preserve the supplied camera role and all visible white-proxy silhouettes while changing only their appearance to coherent live action."
+    )
+
+
 def copy_canonical_assets(*, spec: Mapping[str, Any], scene_output: Path, asset_dir: Path | None) -> dict[str, str]:
     """Copy optional per-entity GLBs into the immutable run directory.
 
@@ -2389,7 +2420,7 @@ def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def run_seedance_single(*, scene_output: Path, spec: Mapping[str, Any], model: str, poll_interval: float, max_polls: int) -> dict[str, Any]:
+def run_seedance_single(*, scene_output: Path, spec: Mapping[str, Any], model: str, poll_interval: float, max_polls: int, identity_anchor_camera_id: str | None = None, identity_anchor_path: Path | None = None) -> dict[str, Any]:
     """Submit one independent Seedance task per rendered camera.
 
     The old helper name is retained for compatibility, but this is no longer
@@ -2415,6 +2446,7 @@ def run_seedance_single(*, scene_output: Path, spec: Mapping[str, Any], model: s
     normalized_dir.mkdir()
     uploads_dir.mkdir()
     assets = []
+    identity_anchor = None
     try:
         for video in videos:
             camera_id = str(video["camera_id"])
@@ -2423,17 +2455,34 @@ def run_seedance_single(*, scene_output: Path, spec: Mapping[str, Any], model: s
             asset = upload_proxy(normalized, run_id=f"{spec['scene_id']}_{camera_id}", config=config)
             assets.append(asset)
             write_upload_record(asset, uploads_dir / f"{camera_id}.json")
+        if identity_anchor_path is not None:
+            anchor_source = Path(identity_anchor_path).resolve(strict=True)
+            anchor_media = normalize_proxy(anchor_source, normalized_dir / "identity_anchor_seedance.mp4")
+            identity_anchor = upload_proxy(anchor_media, run_id=f"{spec['scene_id']}_identity_anchor", config=config)
+            write_upload_record(identity_anchor, uploads_dir / "identity_anchor.json")
     except Exception as exc:
         result = {"status": "upload_failed", "stage": "upload", "error": str(exc), "api_calls": {"submit": 0, "query": 0, "download": 0}}
         _write_json(job_dir / "failure.json", result)
         return result
     prompt = spec["appearance_prompt"]
+    camera_ids = [str(video["camera_id"]) for video in videos]
+    camera_prompts = {camera_id: seedance_camera_prompt_for(spec, camera_id) for camera_id in camera_ids}
+    if identity_anchor is None and identity_anchor_camera_id:
+        identity_anchor = next((asset for asset in assets if str(asset.metadata.get("camera_id", "")) == identity_anchor_camera_id), None)
+        # Upload records do not carry camera_id in all historical runs, so
+        # resolve the anchor by the manifest order when needed.
+        if identity_anchor is None:
+            anchor_index = camera_ids.index(identity_anchor_camera_id) if identity_anchor_camera_id in camera_ids else -1
+            if anchor_index >= 0 and anchor_index < len(assets):
+                identity_anchor = assets[anchor_index]
     base_url = os.environ.get("JD_KLING_BASE", "https://modelservice.jdcloud.com")
     result = run_uploaded_camera_jobs(
         job_id=spec["scene_id"],
         prompt=prompt,
         assets=assets,
-        camera_ids=[str(video["camera_id"]) for video in videos],
+        camera_ids=camera_ids,
+        prompts=camera_prompts,
+        identity_anchor=identity_anchor,
         output_root=job_dir / "camera_tasks",
         api_key=key,
         base_url=base_url,
@@ -2730,12 +2779,18 @@ def run_final_review(*, scene_output: Path, final_report: Mapping[str, Any], fin
     if not review_frames:
         return {"status": "vlm_failed", "mode": "vlm", "api_calls": 0, "error": "final video review frames could not be extracted"}
     review_dir = scene_output / "final_vlm_review"
+    camera_audit = "\n".join(
+        f"camera_id={camera.get('camera_id')}: role={camera.get('role')}; target={camera.get('target')}"
+        for camera in spec.get("cameras", [])
+        if isinstance(camera, Mapping)
+    )
+    review_context = str(spec["prompt"]) + "\n\nCamera trajectory audit requirements:\n" + camera_audit + "\nCheck every supplied camera against its authored role, target, path, visible entity count, object continuity, and action order."
     try:
         document = request_vlm_feedback(
             proxy_report=final_report,
             frame_paths=review_frames,
             output_dir=review_dir,
-            story_context=str(spec["prompt"]),
+            story_context=review_context,
             review_stage="final",
         )
         return {"status": "approved" if document["verdict"] == "approve" else "revision_requested", "mode": "vlm", "api_calls": 1, "feedback": document}

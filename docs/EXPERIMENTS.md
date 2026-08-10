@@ -115,6 +115,10 @@ Seedance 按 camera_id 独立提交四个 reference-video task：`submit=4, quer
 
 ## storyhuman Proxy + Seedance revision_029（2026-08-10）
 
+## Seedance 多视角锁定修复（2026-08-10）
+
+在不覆盖旧结果的前提下，真实测试了 camera-specific prompt、Proxy identity anchor、真实 master anchor 和 camera-first reference ordering。四轮均获得真实 MP4 并通过媒体检查，但最终 VLM 均 `revision_requested`。最后一轮 endpoint、四个 MP4、task/request/response、SHA-256 和 VLM 反馈见 [SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md](SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md)。结论是当前独立 reference-video task 无法稳定共享跨机位场景、人物和相机职责；需要原生 multiview 或显式 camera-control 后端，而不是继续重复提交相同接口。
+
 通过 Blender MCP 检查 revision_027 后确认：CesiumMan 仍是低模人物，箱子/行李类物体只使用绝对轨迹。新增 `storyhuman` 圆润人体代理和根级 coupling materialization；revision_028 修复客户与车重叠和轮子接地，revision_029 分离 helper 并明确两张纸的完整事件。Proxy VLM 为 `approve`。
 
 使用 revision_029 的 appearance prompt（增加固定 cast/prop identity bible）真实提交 Seedance：4 submit、118 query、4 download，无重新 submit。四条 MP4 媒体检查通过；最终 VLM 仍判定 `revision_requested`，因为独立 task 之间的人物、推车、箱子和市场环境不一致。该轮详细证据和 prompt 见 [SEEDANCE_STORYHUMAN_REVISION_029_RUN.md](SEEDANCE_STORYHUMAN_REVISION_029_RUN.md)。

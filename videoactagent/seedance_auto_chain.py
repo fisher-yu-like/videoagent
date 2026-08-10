@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 
 from .backends.jd import (
     build_seedance_reference_video,
+    build_seedance_reference_videos,
     build_seedance_multiview_reference_videos,
     extract_status,
     download_once,
@@ -76,6 +77,8 @@ def build_single_camera_job(
     camera_id: str,
     prompt: str,
     asset: UploadedAsset,
+    identity_anchor: UploadedAsset | None = None,
+    identity_anchor_first: bool = True,
     model: str,
 ) -> dict[str, object]:
     """Build one Seedance request for exactly one camera reference.
@@ -87,7 +90,19 @@ def build_single_camera_job(
     """
     if not isinstance(camera_id, str) or not camera_id.strip():
         raise ValueError("camera_id must be nonempty")
-    request = build_seedance_reference_video(prompt, asset.url, model=model, duration=5)
+    reference_assets = [asset]
+    if identity_anchor is not None and identity_anchor.url != asset.url:
+        # The backend often gives the first reference stronger structural
+        # weight. Record whether identity or camera structure is first.
+        reference_assets = [identity_anchor, asset] if identity_anchor_first else [asset, identity_anchor]
+        request = build_seedance_reference_videos(
+            prompt,
+            [item.url for item in reference_assets],
+            model=model,
+            duration=5,
+        )
+    else:
+        request = build_seedance_reference_video(prompt, asset.url, model=model, duration=5)
     return {
         "job_id": job_id,
         "camera_id": camera_id,
@@ -95,6 +110,7 @@ def build_single_camera_job(
         "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "prompt": prompt,
         "upload": asset.to_dict(),
+        "reference_assets": [item.to_dict() for item in reference_assets],
         "request": request,
         "request_sha256": _canonical_sha(request),
         "api_calls": {"submit": 0, "query": 0, "download": 0},
@@ -271,6 +287,8 @@ def run_uploaded_single_camera_job(
     camera_id: str,
     prompt: str,
     asset: UploadedAsset,
+    identity_anchor: UploadedAsset | None = None,
+    identity_anchor_first: bool = True,
     output_root: Path | str,
     api_key: str,
     base_url: str,
@@ -286,11 +304,15 @@ def run_uploaded_single_camera_job(
     uploads_dir = job_dir / "uploads"
     uploads_dir.mkdir()
     write_upload_record(asset, uploads_dir / "reference.json")
+    if identity_anchor is not None and identity_anchor.url != asset.url:
+        write_upload_record(identity_anchor, uploads_dir / "identity_anchor.json")
     job = build_single_camera_job(
         job_id=job_id,
         camera_id=camera_id,
         prompt=prompt,
         asset=asset,
+        identity_anchor=identity_anchor,
+        identity_anchor_first=identity_anchor_first,
         model=model,
     )
     _write_json(job_dir / "prepared_job.json", job)
@@ -347,6 +369,9 @@ def run_uploaded_camera_jobs(
     api_key: str,
     base_url: str,
     model: str,
+    prompts: Mapping[str, str] | None = None,
+    identity_anchor: UploadedAsset | None = None,
+    identity_anchor_first: bool = True,
     poll_interval_seconds: float = 10.0,
     max_polls: int = 30,
 ) -> dict[str, object]:
@@ -355,12 +380,15 @@ def run_uploaded_camera_jobs(
         raise ValueError("assets and camera_ids must have the same nonzero length")
     results = []
     for camera_id, asset in zip(camera_ids, assets):
+        camera_prompt = str((prompts or {}).get(str(camera_id), prompt))
         results.append(
             run_uploaded_single_camera_job(
                 job_id=f"{job_id}_{camera_id}",
                 camera_id=camera_id,
-                prompt=prompt,
+                prompt=camera_prompt,
                 asset=asset,
+                identity_anchor=identity_anchor,
+                identity_anchor_first=identity_anchor_first,
                 output_root=output_root,
                 api_key=api_key,
                 base_url=base_url,

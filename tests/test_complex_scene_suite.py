@@ -711,3 +711,14 @@ def test_storyhuman_market_readability_revision_separates_helper_and_paper_landi
     assert all(float(point["position"][1]) >= 0.7 for point in tracks["helper"]["points"])
     assert tracks["paper_a"]["points"][-1]["position"][:2] == [2.6, 1.3]
     assert tracks["paper_b"]["points"][-1]["position"][:2] == [2.9, 1.4]
+
+
+def test_seedance_camera_prompt_locks_role_and_entity_coverage():
+    from scripts.run_complex_scene_suite import seedance_camera_prompt_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    prompt = seedance_camera_prompt_for(scene_spec("indoor_market_exchange"), "master")
+    assert "camera_id=master" in prompt
+    assert "locked structural plate" in prompt
+    assert "every visible proxy person and prop" in prompt
+    assert "front master" in prompt
