@@ -13,7 +13,7 @@
 
 | endpoint | 真实模型调用 | 媒体核验 | 最终 VLM |
 |---|---:|---|---|
-| [camera prompt](../runs/results/e2e_seedance_storyhuman_camera_prompt_20260810/) | submit 4 / query 124+6 continuation / download 4 | 四路 MP4 均存在、1280x720、约 5 s、24 fps、无黑帧 | revision_requested |
+| [camera prompt](../runs/results/e2e_seedance_storyhuman_camera_prompt_20260810/) | submit 4 / query 124 / download 4 | 四路 MP4 均存在、1280x720、约 5 s、24 fps、无黑帧 | revision_requested |
 | [identity anchor](../runs/results/e2e_seedance_storyhuman_identity_anchor_20260810_retry/) | submit 4 / query 130 / download 4 | 四路 MP4 均通过文件与 ffprobe 检查 | revision_requested |
 | [real master anchor](../runs/results/e2e_seedance_storyhuman_real_anchor_20260810/) | submit 3 / query 97 / download 3，master 复用 | 四路 MP4 均通过文件与 ffprobe 检查 | revision_requested |
 | [camera-first](../runs/results/e2e_seedance_storyhuman_camera_first_20260810/) | submit 3 / query 98 / download 3，master 复用 | 四路 MP4 均通过文件与 ffprobe 检查 | revision_requested |
