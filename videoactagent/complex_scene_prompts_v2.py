@@ -33,8 +33,11 @@ def _camera(camera_id: str, role: str, target: str, start, middle, end) -> dict:
     }
 
 
-def _entity(entity_id: str, kind: str, asset: str) -> dict:
-    return {"id": entity_id, "kind": kind, "asset": asset}
+def _entity(entity_id: str, kind: str, asset: str, asset_id: str | None = None) -> dict:
+    entity = {"id": entity_id, "kind": kind, "asset": asset}
+    if asset_id is not None:
+        entity["asset_id"] = asset_id
+    return entity
 
 
 def _planner(route: str, family: str, landmarks: list[str], gates: list[str]) -> dict:
@@ -72,9 +75,9 @@ PLAZA_DANCE = {
         "Use four synchronized camera responsibilities: master orbit, lateral follow, reverse continuity, and elevated wide."
     ),
     "entities": [
-        _entity("person_a", "character", "adult_dancer_proxy"),
-        _entity("person_b", "character", "street_musician_proxy"),
-        _entity("person_c", "character", "crossing_passerby_proxy"),
+        _entity("person_a", "character", "adult_dancer_proxy", "human_male_v1"),
+        _entity("person_b", "character", "street_musician_proxy", "human_female_v1"),
+        _entity("person_c", "character", "crossing_passerby_proxy", "human_female_v1"),
         _entity("backpack", "object", "backpack_proxy"),
         _entity("speaker", "object", "speaker_proxy"),
         _entity("bench", "object", "bench_proxy"),
@@ -131,8 +134,8 @@ PARK_BADMINTON = {
         "reverse player view, and high diagonal wide coverage without cuts."
     ),
     "entities": [
-        _entity("person_a", "character", "left_player_proxy"), _entity("person_b", "character", "right_player_proxy"),
-        _entity("spectator", "character", "spectator_proxy"), _entity("racket_a", "object", "racket_proxy"),
+        _entity("person_a", "character", "left_player_proxy", "human_male_v1"), _entity("person_b", "character", "right_player_proxy", "human_female_v1"),
+        _entity("spectator", "character", "spectator_proxy", "human_female_v1"), _entity("racket_a", "object", "racket_proxy"),
         _entity("racket_b", "object", "racket_proxy"), _entity("shuttlecock", "object", "shuttlecock_proxy"),
         _entity("net", "object", "net_proxy"), _entity("bench", "object", "bench_proxy"),
     ],
@@ -187,7 +190,7 @@ INDOOR_MARKET = {
         "vendor view, and overhead layout without cuts or layout changes."
     ),
     "entities": [
-        _entity("vendor", "character", "vendor_proxy"), _entity("customer", "character", "customer_proxy"), _entity("helper", "character", "helper_proxy"),
+        _entity("vendor", "character", "vendor_proxy", "human_female_v1"), _entity("customer", "character", "customer_proxy", "human_male_v1"), _entity("helper", "character", "helper_proxy", "human_female_v1"),
         _entity("handcart", "object", "handcart_proxy"), _entity("box_a", "object", "box_proxy"), _entity("box_b", "object", "box_proxy"),
         _entity("paper_a", "object", "paper_sheet_proxy"), _entity("paper_b", "object", "paper_sheet_proxy"), _entity("counter", "object", "counter_proxy"),
     ],

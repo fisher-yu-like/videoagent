@@ -112,6 +112,12 @@ def compile_scene_world(spec: Mapping[str, Any]) -> WorldState:
             "roll_deg": camera["roll_deg"],
             "points": camera["points"],
         })
+    # SceneSpec may carry asset_id for the asset catalog, but pipeline_v2's
+    # WorldState entity contract is intentionally strict and remains unchanged.
+    world_entities = [
+        {key: entity[key] for key in ("id", "kind", "asset")}
+        for entity in spec["entities"]
+    ]
     document = {
         "schema_version": SCHEMA_VERSION,
         "scene_plan": {
@@ -120,7 +126,7 @@ def compile_scene_world(spec: Mapping[str, Any]) -> WorldState:
             "duration_seconds": 5.0,
             "fps": 24,
             "frame_count": 120,
-            "entities": spec["entities"],
+            "entities": world_entities,
         },
         "physical_state_plan": {
             "events": spec["physical_events"],

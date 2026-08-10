@@ -722,3 +722,20 @@ def test_seedance_camera_prompt_locks_role_and_entity_coverage():
     assert "locked structural plate" in prompt
     assert "every visible proxy person and prop" in prompt
     assert "front master" in prompt
+
+
+def test_all_character_entities_have_explicit_asset_ids():
+    from videoactagent.complex_scene_prompts_v2 import iter_scene_specs
+
+    for spec in iter_scene_specs():
+        characters = [entity for entity in spec["entities"] if entity["kind"] == "character"]
+        assert characters
+        assert all(entity.get("asset_id") in {"human_male_v1", "human_female_v1"} for entity in characters)
+
+
+def test_asset_ids_do_not_change_tracks_or_cameras():
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("indoor_market_exchange")
+    assert [track["target_id"] for track in spec["tracks"]]
+    assert [camera["camera_id"] for camera in spec["cameras"]] == ["master", "lateral", "reverse", "elevated"]
