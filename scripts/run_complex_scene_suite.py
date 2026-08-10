@@ -1126,6 +1126,103 @@ def bvh_choreography_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
     return revised
 
 
+def indoor_market_readability_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_025 for the market counter/cart readability defects."""
+    revised = copy.deepcopy(spec)
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["target"] = "counter"
+            camera["role"] = "front master showing customer, grounded cart, helper and vendor counter"
+            camera["lens_mm"] = 38.0
+        elif camera_id == "lateral":
+            camera["target"] = "handcart"
+            camera["role"] = "cart-side context preserving wheels, boxes and vendor lane"
+            camera["lens_mm"] = 38.0
+        elif camera_id == "reverse":
+            camera["target"] = "counter"
+            camera["role"] = "wide vendor-facing exchange view with counter below the vendor, not filling frame"
+            camera["lens_mm"] = 34.0
+            camera["points"] = [
+                {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+                for frame, position in zip((0, 30, 60, 90, 119), [(10.0, -4.5, 4.2)] * 3 + [(9.5, -4.5, 4.2), (9.0, -4.5, 4.2)])
+            ]
+        elif camera_id == "elevated":
+            camera["target"] = "counter"
+            camera["role"] = "high layout view preserving the complete cart-to-counter path and paper settling"
+            camera["lens_mm"] = 38.0
+            camera["points"] = [
+                {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+                for frame, position in zip((0, 30, 60, 90, 119), [(0.0, -1.0, 9.0)] * 5)
+            ]
+    revised["revision"] = {
+        "id": "revision_025",
+        "parent_revision": "base_indoor_market_exchange",
+        "reason": "VLM found reverse counter occlusion and an ungrounded handcart; compact the counter proxy, use vertical grounded wheel geometry, and widen reverse/elevated camera coverage",
+        "preserved": ["all customer/vendor/helper root trajectories", "cart-box coupling", "paper flutter keyframes", "entity IDs", "four camera count", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_counter_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_026 with a table-like counter and wider overhead view."""
+    revised = indoor_market_readability_revision(spec)
+    for camera in revised.get("cameras", []):
+        if str(camera.get("camera_id")) == "elevated":
+            camera["target"] = "handcart"
+            camera["lens_mm"] = 30.0
+            camera["role"] = "distant overhead establishing cart path, counter, vendor and helper in one frame"
+            camera["points"] = [
+                {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+                for frame, position in zip((0, 30, 60, 90, 119), [(0.0, -7.0, 12.0)] * 5)
+            ]
+    revised["revision"] = {
+        "id": "revision_026",
+        "parent_revision": "revision_025",
+        "reason": "VLM still read the counter as a torso block and the elevated view as a counter close-up; replace the market counter with a table-like proxy and pull the overhead camera back to cover the full exchange",
+        "preserved": ["all character/object root trajectories", "cart-box coupling", "paper flutter keyframes", "revision_025 wheel orientation", "entity IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_event_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_027 with explicit vendor, pause, gesture and flutter beats."""
+    revised = indoor_market_counter_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    for point in tracks["vendor"].get("points", []):
+        point["position"] = [3.2, 2.45, 0.0]
+    for point in tracks["helper"].get("points", []):
+        point["position"][1] = 2.7
+    # Customer pause at K1/K2, with cart and boxes kept coupled at the same
+    # position before the exchange resumes.
+    for target_id in ("customer", "handcart", "box_a", "box_b"):
+        points = tracks[target_id].get("points", [])
+        if len(points) >= 3:
+            points[2]["position"] = list(points[1]["position"])
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("customer", "right_arm")]["points"] = [(0, 0.0), (24, 0.0), (36, 1.25), (54, 1.25), (66, 0.0), (119, 0.0)]
+    gestures[("helper", "right_arm")]["points"] = [(0, 0.0), (48, 0.0), (60, 1.0), (78, 1.0), (90, 0.0), (119, 0.0)]
+    for target_id in ("paper_a", "paper_b"):
+        points = tracks[target_id].get("points", [])
+        if len(points) >= 5:
+            points[2]["position"][2] = 3.2
+            points[3]["position"][2] = 1.8
+    for camera in revised.get("cameras", []):
+        if str(camera.get("camera_id")) == "reverse":
+            camera["points"] = [
+                {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+                for frame, position in zip((0, 30, 60, 90, 119), [(12.0, -8.0, 5.0)] * 5)
+            ]
+            camera["lens_mm"] = 32.0
+    revised["revision"] = {
+        "id": "revision_027",
+        "parent_revision": "revision_026",
+        "reason": "VLM found vendor occlusion and ambiguous event timing; move vendor/helper to explicit depth layers, add a customer pause and raised-hand interval, preserve cart-box coupling, increase paper flutter height, and widen reverse coverage",
+        "preserved": ["table-like counter geometry", "vertical cart wheels", "all entity IDs", "shared world", "four camera responsibilities"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
     subjects = []
@@ -1651,13 +1748,27 @@ def _blender_script() -> str:
                 parent_local(add_cube(eid + "__base", (0, 0, 0.38), (0.9, 0.55, 0.14), dark), root, (0, 0, 0.38))
                 parent_local(add_cube(eid + "__handle", (0, -0.55, 1.0), (0.08, 0.08, 0.65), light), root, (0, -0.55, 1.0))
                 for wheel_x in (-0.65, 0.65):
-                    parent_local(add_cylinder(eid + "__wheel" + str(wheel_x), (wheel_x, 0, 0.12), 0.18, 0.10, light), root, (wheel_x, 0, 0.12))
+                    wheel = parent_local(add_cylinder(eid + "__wheel" + str(wheel_x), (wheel_x, 0, 0.22), 0.22, 0.12, light), root, (wheel_x, 0, 0.22))
+                    # Blender cylinders are born with their axis on Z.  A
+                    # cart wheel must stand on the floor and roll around X;
+                    # the old horizontal discs made the cart read as floating.
+                    wheel.rotation_euler[0] = math.radians(90.0)
             elif eid.startswith("box_"):
                 parent_local(add_cube(eid + "__body", (0, 0, 0.38), (0.38, 0.38, 0.38), light), root, (0, 0, 0.38))
             elif eid.startswith("paper_"):
                 parent_local(add_cube(eid + "__sheet", (0, 0, 0), (0.42, 0.30, 0.025), light, 0.01), root, (0, 0, 0))
             elif eid == "counter":
-                parent_local(add_cube(eid + "__body", (0, 0, 1.0), (1.4, 0.65, 1.0), dark), root, (0, 0, 1.0))
+                if scene_plan["scene_id"] == "indoor_market_exchange":
+                    # A solid cube was read as a character torso in VLM
+                    # frames.  Use a visibly open table silhouette instead.
+                    parent_local(add_cube(eid + "__top", (0, 0, 1.25), (1.05, 0.48, 0.12), dark, 0.05), root, (0, 0, 1.25))
+                    for leg_x in (-0.86, 0.86):
+                        for leg_y in (-0.34, 0.34):
+                            parent_local(add_cube(eid + "__leg" + str(leg_x) + str(leg_y), (leg_x, leg_y, 0.58), (0.10, 0.10, 0.58), dark, 0.03), root, (leg_x, leg_y, 0.58))
+                else:
+                    counter_scale = (1.4, 0.65, 1.0)
+                    counter_height = float(counter_scale[2])
+                    parent_local(add_cube(eid + "__body", (0, 0, counter_height), counter_scale, dark), root, (0, 0, counter_height))
             else:
                 parent_local(add_cube(eid + "__body", (0, 0, 0.45), (0.45, 0.45, 0.45), light), root, (0, 0, 0.45))
 
@@ -2597,6 +2708,9 @@ def main() -> int:
     parser.add_argument("--bvh-readability-revision", action="store_true", help="apply revision_022 to separate BVH-backed action lanes and wave beats")
     parser.add_argument("--bvh-upright-revision", action="store_true", help="apply revision_023 with upright BVH limbs and wider side-step spacing")
     parser.add_argument("--bvh-choreography-revision", action="store_true", help="apply revision_024 with an explicit bounded side-step overlay")
+    parser.add_argument("--indoor-market-readability-revision", action="store_true", help="apply revision_025 for counter/cart grounding and vendor-side coverage")
+    parser.add_argument("--indoor-market-counter-revision", action="store_true", help="apply revision_026 with table-like counter and distant overhead coverage")
+    parser.add_argument("--indoor-market-event-revision", action="store_true", help="apply revision_027 with explicit vendor/pause/gesture/flutter beats")
     parser.add_argument("--motion-bvh", type=Path, help="real BVH clip for the lead motion branch")
     parser.add_argument("--motion-bvh-alt", type=Path, help="optional second real BVH clip concatenated after the first")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
@@ -2651,6 +2765,12 @@ def main() -> int:
         selected = [bvh_upright_revision(spec) for spec in selected]
     if args.bvh_choreography_revision:
         selected = [bvh_choreography_revision(spec) for spec in selected]
+    if args.indoor_market_readability_revision:
+        selected = [indoor_market_readability_revision(spec) for spec in selected]
+    if args.indoor_market_counter_revision:
+        selected = [indoor_market_counter_revision(spec) for spec in selected]
+    if args.indoor_market_event_revision:
+        selected = [indoor_market_event_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

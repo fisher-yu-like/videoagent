@@ -102,3 +102,13 @@
 ## 下一实验门
 
 轨迹处理保持冻结。只有 whole-story 输入先通过人工验收，并重新定义完整时长协议、真实视频输入方式和人工观察规则后，才讨论新的 API 小样本或 A100 显式控制实验。任何 API 调用或服务器推理必须先报告预算并获得允许。
+
+## indoor_market_exchange revision_025–027 + Seedance 真实端到端（2026-08-10）
+
+本轮连续修复 Proxy：`revision_025` 修复 reverse 遮挡和手推车接地，`revision_026` 将 counter 改为桌面+四脚并拉远 elevated，`revision_027` 增加 vendor/helper 深度层、customer 停顿举手、cart/box 耦合停顿和纸张抛起。revision_027 的四机位 Proxy 获得 VLM approve。
+
+Endpoint：`runs/results/e2e_seedance_indoor_market_revision_027_20260810/`
+
+Seedance 按 camera_id 独立提交四个 reference-video task：`submit=4, query=125, download=4`，无重新 submit。四个 MP4 均真实下载、1280×720、24 fps、121 frames、约 5 秒、黑帧 0。修复了 verifier 将 `24.0` 与 `24/1` 字符串比较导致的假失败，并保留真实媒体哈希和源 manifest 哈希。
+
+最终 VLM 调用 1 次，`revision_requested`。四个独立任务各自生成了真人视频，但没有保持跨机位人物/推车/道具/环境一致，问题类别为 scene、character、object、camera、physical。该失败必须回到多视角一致性后端或共享外观锚点，不能改写为成功，也不能用重复提交掩盖。详细证据见 [SEEDANCE_MARKET_REVISION_027_RUN.md](SEEDANCE_MARKET_REVISION_027_RUN.md)。

@@ -49,6 +49,29 @@ def test_final_video_verifier_keeps_visual_review_pending() -> None:
     assert report["video"]["sha256"]
 
 
+def test_final_video_verifier_accepts_float_scene_plan_fps(tmp_path: Path) -> None:
+    video = tmp_path / "seedance.mp4"
+    video.write_bytes(b"real-media-placeholder-for-probe-hook")
+
+    report = verify_final_video(
+        video,
+        expected_frame_count=120,
+        expected_fps=24.0,
+        expected_duration=5.0,
+        probe_video=lambda _path: {
+            "nb_frames": 121,
+            "r_frame_rate": "24/1",
+            "duration": 5.062,
+            "width": 1280,
+            "height": 720,
+        },
+        blackdetect_events=0,
+    )
+
+    assert report["verdict"] == "pending_review"
+    assert report["checks"][1]["status"] == "passed"
+
+
 def test_aggregate_final_video_reports_preserves_each_camera_and_fails_closed() -> None:
     report = aggregate_final_video_reports(
         {

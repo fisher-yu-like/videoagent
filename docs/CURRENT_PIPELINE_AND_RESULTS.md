@@ -333,3 +333,13 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 | `indoor_market_exchange` | `runs/results/complex_scene_suite_20260810_181253/indoor_market_exchange_20260810_181413/` | `revision_requested` | reverse 机位被 counter 遮挡，手推车轮子接地和 vendor/helper 关系不清 |
 
 三条场景均生成 4 个真实 MP4、manifest、state/camera/asset 日志并通过确定性媒体检查；每条各调用 VLM 1 次。由于反馈全部属于结构、轨迹、相机或物理事件，均没有进入 Appearance-only Prompt，也没有提交 Seedance。下一步应按场景分别做 Director/Blender revision，而不是用同一个真人化 prompt 覆盖这些结构问题。
+
+### 4.16 indoor_market_exchange revision_025–revision_027 与 Seedance 真实端到端 / 2026-08-10
+
+本轮按 VLM 结构反馈连续生成 `revision_025`、`revision_026`、`revision_027`，修复反向机位遮挡、柜台被读成躯干、手推车轮子方向/悬空、vendor/helper 深度层、customer 停顿举手、cart/box 同步停顿和纸张事件。`revision_027` 的四机位 Proxy 通过确定性检查并获得 VLM approve，未覆盖旧 revision。
+
+随后把 approved Proxy 复制到不可变 endpoint，按 camera_id 独立提交 Seedance：4 submit、125 query、4 download；最后一次只是继续查询原 task，没有新 submit。四条真实 MP4 均成功下载，媒体检查均通过（1280×720、24 fps、121 frames、约 5 秒、黑帧 0）。此前 verifier 因调用方把 scene plan 的 `24.0` 与 ffprobe 的 `24/1` 做字符串比较而误报失败；现已改为数值化 FPS 比较并加入回归测试。
+
+完整证据见 [SEEDANCE_MARKET_REVISION_027_RUN.md](SEEDANCE_MARKET_REVISION_027_RUN.md)，endpoint 见 [e2e_seedance_indoor_market_revision_027_20260810](../runs/results/e2e_seedance_indoor_market_revision_027_20260810/)。
+
+最终 VLM 真实调用 1 次，结论为 `revision_requested`：四个独立 Seedance task 虽都返回可播放真人视频，但没有保持跨机位共享人物、推车、道具和环境，反馈类别为 scene/character/object/camera/physical。因此按 pipeline 不能用 Appearance-only Prompt 掩盖，必须回到多视角一致性后端或加入共享外观锚点。这是后端限制的真实失败证据，不把“下载成功”误报为“多视角一致”。

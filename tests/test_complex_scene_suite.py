@@ -1,4 +1,5 @@
 import json
+import math
 import tempfile
 from pathlib import Path
 
@@ -627,3 +628,41 @@ def test_seedance_upload_fallback_uses_tested_uguu_without_tos(monkeypatch):
     assert config.temp_upload_enabled is True
     assert config.temp_upload_provider == "uguu"
     assert config.temp_upload_endpoint == "https://uguu.se/upload.php"
+
+
+def test_indoor_market_readability_revision_widens_reverse_and_preserves_tracks():
+    from scripts.run_complex_scene_suite import indoor_market_readability_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    original = scene_spec("indoor_market_exchange")
+    revised = indoor_market_readability_revision(original)
+    assert revised["revision"]["id"] == "revision_025"
+    assert revised["revision"]["parent_revision"] == "base_indoor_market_exchange"
+    assert revised["tracks"] == original["tracks"]
+    cameras = {item["camera_id"]: item for item in revised["cameras"]}
+    assert cameras["reverse"]["target"] == "counter"
+    assert cameras["reverse"]["lens_mm"] == 34.0
+
+
+def test_indoor_market_counter_revision_changes_overhead_role():
+    from scripts.run_complex_scene_suite import indoor_market_counter_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_counter_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_026"
+    elevated = next(item for item in revised["cameras"] if item["camera_id"] == "elevated")
+    assert elevated["target"] == "handcart"
+    assert elevated["lens_mm"] == 30.0
+
+
+def test_indoor_market_event_revision_adds_pause_and_preserves_cart_box_coupling():
+    from scripts.run_complex_scene_suite import indoor_market_event_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_event_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_027"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    customer_delta = [tracks["customer"]["points"][2]["position"][axis] - tracks["handcart"]["points"][2]["position"][axis] for axis in range(2)]
+    assert math.isclose(customer_delta[0], -0.2, abs_tol=1e-6) and math.isclose(customer_delta[1], 0.0, abs_tol=1e-6)
+    gestures = {(item["target_id"], item["limb"]): item for item in revised["gesture_tracks"]}
+    assert (36, 1.25) in gestures[("customer", "right_arm")]["points"]

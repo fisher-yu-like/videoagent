@@ -18,6 +18,24 @@ FINAL_VIDEO_VERIFIER_SCHEMA_VERSION = "final-video-verifier-1.0"
 MULTI_CAMERA_FINAL_VIDEO_VERIFIER_SCHEMA_VERSION = "multi-camera-final-video-verifier-1.0"
 
 
+def _fps_matches(actual: object, expected: object) -> bool:
+    """Compare ffprobe's rational FPS with the numeric contract value.
+
+    Callers may deserialize the scene plan as ``24.0`` while ffprobe returns
+    ``24/1``.  Comparing their string representations incorrectly rejects
+    otherwise valid Seedance outputs.
+    """
+    try:
+        if isinstance(actual, str) and "/" in actual:
+            numerator, denominator = actual.split("/", 1)
+            actual_value = float(numerator) / float(denominator)
+        else:
+            actual_value = float(actual)
+        return abs(actual_value - float(expected)) <= 0.01
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -52,7 +70,7 @@ def verify_final_video(
             probe = dict(probe_video(path))
             duration_ok = abs(float(probe.get("duration", 0.0)) - expected_duration) <= 0.20
             frame_ok = int(probe.get("nb_frames", -1)) >= max(1, expected_frame_count - 5)
-            fps_ok = str(probe.get("r_frame_rate")) in {f"{expected_fps}/1", str(expected_fps)}
+            fps_ok = _fps_matches(probe.get("r_frame_rate"), expected_fps)
             resolution_ok = expected_resolution is None or [int(probe.get("width", -1)), int(probe.get("height", -1))] == list(expected_resolution)
             passed = duration_ok and frame_ok and fps_ok and resolution_ok
             checks.append({"check_id": "media.ffprobe", "status": "passed" if passed else "failed", "message": "downloaded media metadata matches the expected contract" if passed else "downloaded media metadata does not match the expected contract", "probe": probe, "expected": {"frame_count": expected_frame_count, "fps": expected_fps, "duration": expected_duration, "resolution": list(expected_resolution) if expected_resolution else None}})
