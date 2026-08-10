@@ -112,3 +112,9 @@ Endpoint：`runs/results/e2e_seedance_indoor_market_revision_027_20260810/`
 Seedance 按 camera_id 独立提交四个 reference-video task：`submit=4, query=125, download=4`，无重新 submit。四个 MP4 均真实下载、1280×720、24 fps、121 frames、约 5 秒、黑帧 0。修复了 verifier 将 `24.0` 与 `24/1` 字符串比较导致的假失败，并保留真实媒体哈希和源 manifest 哈希。
 
 最终 VLM 调用 1 次，`revision_requested`。四个独立任务各自生成了真人视频，但没有保持跨机位人物/推车/道具/环境一致，问题类别为 scene、character、object、camera、physical。该失败必须回到多视角一致性后端或共享外观锚点，不能改写为成功，也不能用重复提交掩盖。详细证据见 [SEEDANCE_MARKET_REVISION_027_RUN.md](SEEDANCE_MARKET_REVISION_027_RUN.md)。
+
+## storyhuman Proxy + Seedance revision_029（2026-08-10）
+
+通过 Blender MCP 检查 revision_027 后确认：CesiumMan 仍是低模人物，箱子/行李类物体只使用绝对轨迹。新增 `storyhuman` 圆润人体代理和根级 coupling materialization；revision_028 修复客户与车重叠和轮子接地，revision_029 分离 helper 并明确两张纸的完整事件。Proxy VLM 为 `approve`。
+
+使用 revision_029 的 appearance prompt（增加固定 cast/prop identity bible）真实提交 Seedance：4 submit、118 query、4 download，无重新 submit。四条 MP4 媒体检查通过；最终 VLM 仍判定 `revision_requested`，因为独立 task 之间的人物、推车、箱子和市场环境不一致。该轮详细证据和 prompt 见 [SEEDANCE_STORYHUMAN_REVISION_029_RUN.md](SEEDANCE_STORYHUMAN_REVISION_029_RUN.md)。

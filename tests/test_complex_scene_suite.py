@@ -224,7 +224,7 @@ def test_generated_blender_script_contains_isolated_skeleton_branch():
     from scripts.run_complex_scene_suite import _blender_script
 
     script = _blender_script()
-    assert 'choices=["clay", "canonical", "skeleton", "diagnostic"]' in script
+    assert 'choices=["clay", "canonical", "storyhuman", "skeleton", "diagnostic"]' in script
     assert "skeleton_motion.json" in script
     assert "procedural_skeleton_v1" in script
     assert "skeleton_pose_log.json" in script
@@ -666,3 +666,48 @@ def test_indoor_market_event_revision_adds_pause_and_preserves_cart_box_coupling
     assert math.isclose(customer_delta[0], -0.2, abs_tol=1e-6) and math.isclose(customer_delta[1], 0.0, abs_tol=1e-6)
     gestures = {(item["target_id"], item["limb"]): item for item in revised["gesture_tracks"]}
     assert (36, 1.25) in gestures[("customer", "right_arm")]["points"]
+
+
+def test_storyhuman_registry_declares_rounded_articulated_asset():
+    from scripts.run_complex_scene_suite import asset_registry_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    registry = asset_registry_for(scene_spec("indoor_market_exchange"), "storyhuman")
+    characters = [item for item in registry["assets"] if item["kind"] == "character"]
+    assert registry["proxy_style"] == "storyhuman"
+    assert all(item["source_kind"] == "storyhuman_procedural_v1" for item in characters)
+    assert all("capsule_limbs" in item["parts"] for item in characters)
+
+
+def test_coupling_rules_bind_boxes_and_backpack_to_authored_parents():
+    from scripts.run_complex_scene_suite import coupling_rules_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    market = coupling_rules_for(scene_spec("indoor_market_exchange"))
+    plaza = coupling_rules_for(scene_spec("plaza_dance_circle"))
+    assert market == {"box_a": "handcart", "box_b": "handcart"}
+    assert plaza["backpack"] == "person_a"
+
+
+def test_storyhuman_market_revision_separates_pusher_and_grounds_cart():
+    from scripts.run_complex_scene_suite import indoor_market_storyhuman_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_storyhuman_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_028"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(float(point["position"][2]) == 0.0 for point in tracks["handcart"]["points"])
+    assert all(float(point["position"][1]) <= -1.3 for point in tracks["customer"]["points"])
+    assert all(float(point["position"][1]) <= 0.5 for point in tracks["helper"]["points"])
+
+
+def test_storyhuman_market_readability_revision_separates_helper_and_paper_landing():
+    from scripts.run_complex_scene_suite import indoor_market_storyhuman_readability_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_storyhuman_readability_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_029"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(float(point["position"][1]) >= 0.7 for point in tracks["helper"]["points"])
+    assert tracks["paper_a"]["points"][-1]["position"][:2] == [2.6, 1.3]
+    assert tracks["paper_b"]["points"][-1]["position"][:2] == [2.9, 1.4]

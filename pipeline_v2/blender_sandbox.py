@@ -27,8 +27,8 @@ def build_blender_command(
     motion_bvh: Path | str | None = None,
     motion_bvh_alt: Path | str | None = None,
 ) -> list[str]:
-    if render_style not in {"clay", "canonical", "skeleton", "diagnostic"}:
-        raise SandboxError("render_style must be clay, canonical, skeleton, or diagnostic")
+    if render_style not in {"clay", "canonical", "skeleton", "storyhuman", "diagnostic"}:
+        raise SandboxError("render_style must be clay, canonical, skeleton, storyhuman, or diagnostic")
     if len(resolution) != 2 or any(type(item) is not int or item <= 0 for item in resolution):
         raise SandboxError("resolution must contain two positive integers")
     command = [
@@ -134,6 +134,8 @@ def run_blender_sandbox(
     for log_name in ("state_log.json", "camera_log.json", "applied_state_log.json"):
         if not (output / log_name).is_file() or (output / log_name).stat().st_size == 0:
             raise SandboxError(f"missing required log: {log_name}")
+    if manifest.get("couplings") and (not (output / "coupling_log.json").is_file() or (output / "coupling_log.json").stat().st_size == 0):
+        raise SandboxError("manifest declares couplings but coupling_log.json is missing")
     blend_files = [path for path in output.glob("*.blend") if path.is_file() and path.stat().st_size > 0]
     if not blend_files:
         raise SandboxError("missing non-empty .blend preview artifact")

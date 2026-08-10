@@ -36,3 +36,10 @@ def test_build_blender_command_passes_optional_motion_bvh_inputs():
         motion_bvh_alt=Path("right_side_step.bvh"),
     )
     assert command[-4:] == ["--motion-bvh", "left_side_step.bvh", "--motion-bvh-alt", "right_side_step.bvh"]
+
+
+def test_build_blender_command_accepts_storyhuman_proxy_style() -> None:
+    command = build_blender_command(
+        "blender.exe", "script.py", "state.json", "out", render_style="storyhuman"
+    )
+    assert command[command.index("--render-style") + 1] == "storyhuman"

@@ -343,3 +343,13 @@ StoryBlender 的调研和兼容融合方案见：[STORYBLENDER_ADAPTATION.md](ST
 完整证据见 [SEEDANCE_MARKET_REVISION_027_RUN.md](SEEDANCE_MARKET_REVISION_027_RUN.md)，endpoint 见 [e2e_seedance_indoor_market_revision_027_20260810](../runs/results/e2e_seedance_indoor_market_revision_027_20260810/)。
 
 最终 VLM 真实调用 1 次，结论为 `revision_requested`：四个独立 Seedance task 虽都返回可播放真人视频，但没有保持跨机位共享人物、推车、道具和环境，反馈类别为 scene/character/object/camera/physical。因此按 pipeline 不能用 Appearance-only Prompt 掩盖，必须回到多视角一致性后端或加入共享外观锚点。这是后端限制的真实失败证据，不把“下载成功”误报为“多视角一致”。
+
+### 4.17 storyhuman Proxy / revision_028–revision_029 与 Seedance 真实复跑 / 2026-08-10
+
+针对上一轮反馈，本轮通过 Blender MCP 打开 revision_027 的 shared world，确认三个人物实际为 CesiumMan 低模，箱子和物体根节点只有复制的绝对轨迹，没有根级父子关系。随后新增 `storyhuman` 代理：圆润躯干、头发、肩/肘/膝、手、胶囊式四肢和圆角鞋；新增 `coupling_rules_for()`、根级父变换和 `coupling_log.json`，覆盖 backpack→person_a、box_a/box_b→handcart、luggage/suitcase→traveler。
+
+`revision_028` 修复客户与车体重叠、helper 深度和手推车根 z；`revision_029` 分离 helper 后方轨迹并明确两张纸的起点、flutter arc 和落点。revision_029 的四机位 Proxy 确定性检查通过，VLM 为 `approve`。
+
+Seedance 使用 approved revision_029 Proxy，4 个独立 reference-video task，`submit=4, query=118, download=4`，无重新 submit。四条真实视频媒体检查均通过，但最终 VLM 仍为 `revision_requested`：四个独立 task 产生了不同人物、推车、箱子和市场布局。完整 prompt、task ID、哈希和结果见 [SEEDANCE_STORYHUMAN_REVISION_029_RUN.md](SEEDANCE_STORYHUMAN_REVISION_029_RUN.md) 和 [endpoint](../runs/results/e2e_seedance_storyhuman_market_revision_029_20260810/)。
+
+结论：Proxy 侧的人形轮廓和物体耦合问题已真实修复；剩余失败是 Seedance 独立 reference-video task 的跨视角一致性限制，不能再通过 appearance-only prompt 或重复提交掩盖。

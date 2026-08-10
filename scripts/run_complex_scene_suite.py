@@ -145,6 +145,29 @@ def director_plan_for(world: WorldState) -> dict[str, Any]:
     return {**world.to_dict(), "schema_version": "director-plan-1.0"}
 
 
+def coupling_rules_for(spec: Mapping[str, Any]) -> dict[str, str]:
+    """Return hard parent relations implied by authored object semantics.
+
+    These relations are implemented in Blender as shared-world parent
+    transforms, not just duplicated absolute keyframes.  That prevents a
+    suitcase, backpack, or loaded box from drifting away from the actor/cart
+    that owns it when a later revision changes the parent trajectory.
+    """
+    entity_ids = {str(item.get("id")) for item in spec.get("entities", []) if isinstance(item, Mapping)}
+    rules: dict[str, str] = {}
+    if {"backpack", "person_a"}.issubset(entity_ids):
+        rules["backpack"] = "person_a"
+    if {"box_a", "handcart"}.issubset(entity_ids):
+        rules["box_a"] = "handcart"
+    if {"box_b", "handcart"}.issubset(entity_ids):
+        rules["box_b"] = "handcart"
+    if {"luggage", "traveler"}.issubset(entity_ids):
+        rules["luggage"] = "traveler"
+    if {"suitcase", "traveler"}.issubset(entity_ids):
+        rules["suitcase"] = "traveler"
+    return rules
+
+
 def asset_registry_for(spec: Mapping[str, Any], proxy_style: str, asset_paths: Mapping[str, str] | None = None) -> dict[str, Any]:
     """Create a deterministic sidecar registry without changing WorldState.
 
@@ -152,8 +175,8 @@ def asset_registry_for(spec: Mapping[str, Any], proxy_style: str, asset_paths: M
     registry is the StoryBlender-inspired source of truth for how an entity is
     materialised in Blender and lets old clay runs coexist with canonical runs.
     """
-    if proxy_style not in {"clay", "canonical", "skeleton"}:
-        raise ValueError("proxy_style must be clay, canonical, or skeleton")
+    if proxy_style not in {"clay", "canonical", "skeleton", "storyhuman"}:
+        raise ValueError("proxy_style must be clay, canonical, skeleton, or storyhuman")
     assets = []
     for entity in spec["entities"]:
         eid = str(entity["id"])
@@ -163,6 +186,13 @@ def asset_registry_for(spec: Mapping[str, Any], proxy_style: str, asset_paths: M
             source_kind = "canonical_glb"
             dimensions = [0.95, 0.55, 2.55]
             parts = ["imported_glb"]
+        elif kind == "character" and proxy_style == "storyhuman":
+            source_kind = "storyhuman_procedural_v1"
+            dimensions = [0.95, 0.55, 2.55]
+            parts = [
+                "head", "hair", "neck", "rounded_torso", "pelvis", "capsule_limbs",
+                "shoulders", "elbows", "knees", "hands", "rounded_feet",
+            ]
         elif kind == "character" and proxy_style in {"canonical", "skeleton"}:
             source_kind = "procedural_skeleton_v1" if proxy_style == "skeleton" else "canonical_procedural_v3"
             dimensions = [0.95, 0.55, 2.55]
@@ -1223,15 +1253,92 @@ def indoor_market_event_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
     return revised
 
 
+def indoor_market_storyhuman_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_028 for rounded-human staging and grounded cart contact."""
+    revised = indoor_market_event_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    # The rounded human must stand behind the handle, not overlap the cart
+    # platform; helper depth is moved into the readable shared action lane.
+    for point in tracks["customer"].get("points", []):
+        point["position"][1] = -1.45
+    for point in tracks["helper"].get("points", []):
+        point["position"][1] = 0.20
+    # Object roots are origins, so the cart wheels/base are built from z=0.
+    # Boxes keep their authored x/y offsets and are parent-coupled to it.
+    for point in tracks["handcart"].get("points", []):
+        point["position"][2] = 0.0
+    for target_id in ("box_a", "box_b"):
+        for point in tracks[target_id].get("points", []):
+            point["position"][2] = 0.72
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["role"] = "front master showing a distinct pusher behind the grounded handcart, helper and vendor"
+        elif camera_id == "lateral":
+            camera["role"] = "cart-side profile showing the handle, grounded wheels, boxes and pusher behind"
+        elif camera_id == "elevated":
+            camera["role"] = "wide overhead view showing customer-to-handle relation, helper lane and cart path"
+    revised["revision"] = {
+        "id": "revision_028",
+        "parent_revision": "revision_027",
+        "reason": "Storyhuman VLM found the pusher visually embedded in the cart and the cart floating; separate the pusher behind the handle, move helper into the action lane, and ground the cart/boxes from root z=0",
+        "preserved": ["rounded articulated human proxy", "all entity IDs", "K0-K4 event frames", "cart-box parent coupling", "four camera responsibilities", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_storyhuman_readability_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_029 with separated helper and explicit paper landing."""
+    revised = indoor_market_storyhuman_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    customer_points = tracks["customer"].get("points", [])
+    helper_points = tracks["helper"].get("points", [])
+    for index, point in enumerate(helper_points):
+        # Keep helper in a distinct rear lane and offset x from the customer
+        # during the exchange rather than allowing a perspective overlap.
+        point["position"][1] = 1.0
+        if index < len(customer_points):
+            point["position"][0] = float(customer_points[index]["position"][0]) - 0.80
+    paper_points = {
+        "paper_a": [(-4.0, -0.45, 1.45), (-2.8, -0.45, 1.45), (-2.0, -0.30, 2.80), (0.0, 0.20, 2.00), (2.6, 1.30, 0.05)],
+        "paper_b": [(-3.6, -0.10, 1.50), (-2.4, -0.10, 1.50), (-1.8, -0.05, 3.00), (0.30, 0.40, 2.10), (2.9, 1.40, 0.06)],
+    }
+    for target_id, positions in paper_points.items():
+        for point, position in zip(tracks[target_id].get("points", []), positions):
+            point["position"] = list(position)
+    revised["revision"] = {
+        "id": "revision_029",
+        "parent_revision": "revision_028",
+        "reason": "VLM still saw customer/helper overlap and an ambiguous two-sheet event; place helper in a separated rear lane and make both paper origins, flutter arcs, and counter-side landings explicit",
+        "preserved": ["rounded articulated human proxy", "grounded cart and root coupling", "all entity IDs", "K0-K4 event frames", "four camera responsibilities", "shared world"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
+    identity_bible = {}
+    if str(spec.get("scene_id")) == "indoor_market_exchange":
+        identity_bible = {
+            "vendor": "the same middle-aged woman in a dark blue apron and cream shirt in every view",
+            "customer": "the same adult man in a rust-red jacket and dark trousers in every view",
+            "helper": "the same adult woman in a mustard work vest and dark trousers in every view",
+            "handcart": "the same small silver two-wheel handcart with one fixed handle in every view",
+            "box_a": "the same large brown cardboard box on the left side of the handcart in every view",
+            "box_b": "the same smaller brown cardboard box on the right side of the handcart in every view",
+        }
+    elif str(spec.get("scene_id")) == "plaza_dance_circle":
+        identity_bible = {
+            "person_a": "the same adult dancer in a navy jacket and dark trousers in every view",
+            "backpack": "the same orange backpack fixed to the dancer torso in every view",
+        }
     subjects = []
     for entity in spec["entities"]:
         entity_id = str(entity["id"])
         if entity["kind"] == "character":
-            description = "natural live-action human actor with stable identity, realistic anatomy, coherent clothing, hair, hands and face"
+            description = identity_bible.get(entity_id, "natural live-action human actor with stable identity, realistic anatomy, coherent clothing, hair, hands and face")
         else:
-            description = "believable real-world prop with coherent material, scale and surface details"
+            description = identity_bible.get(entity_id, "believable real-world prop with coherent material, scale and surface details")
         subjects.append({"entity_id": entity_id, "description": description})
     return {
         "schema_version": "appearance-profile-1.0",
@@ -1245,6 +1352,7 @@ def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
             "clay, white cylinders, primitive limbs, labels, guide lines or storyboard overlays",
             "identity drift, face drift, clothing drift or texture flicker",
             "unrealistic plastic skin, broken anatomy, floating props or inconsistent materials",
+            "cross-view identity or prop drift between the independently rendered reference-video tasks",
         ],
     }
 
@@ -1324,7 +1432,7 @@ def _blender_script() -> str:
         parser = argparse.ArgumentParser()
         parser.add_argument("--world-state", required=True)
         parser.add_argument("--output-dir", required=True)
-        parser.add_argument("--render-style", default="clay", choices=["clay", "canonical", "skeleton", "diagnostic"])
+        parser.add_argument("--render-style", default="clay", choices=["clay", "canonical", "storyhuman", "skeleton", "diagnostic"])
         parser.add_argument("--resolution", default="640x360")
         parser.add_argument("--motion-bvh")
         parser.add_argument("--motion-bvh-alt")
@@ -1445,6 +1553,13 @@ def _blender_script() -> str:
             obj.data.materials.append(material)
             return obj
 
+        def smooth_mesh(obj):
+            """Make procedural proxy surfaces read as rounded forms."""
+            if getattr(obj, "type", None) == "MESH":
+                for polygon in obj.data.polygons:
+                    polygon.use_smooth = True
+            return obj
+
         def safe_arm_angle(limb, angle):
             # Upper-arm centers are not solved shoulder joints.  Prevent the
             # inward swing from entering the head/torso corridor while keeping
@@ -1559,6 +1674,40 @@ def _blender_script() -> str:
                 upper_leg = parent_local(add_cylinder(eid + "__upper_leg." + side, (0.18 * sign, 0, 0.98), 0.17, 0.62, leg_mat), root, (0.18 * sign, 0, 0.98))
                 lower_leg = parent_local(add_cylinder(eid + "__lower_leg." + side, (0.18 * sign, 0, 0.42), 0.14, 0.55, body_mat), root, (0.18 * sign, 0, 0.42))
                 foot = parent_local(add_cube(eid + "__foot." + side, (0.18 * sign, -0.13, 0.12), (0.16, 0.28, 0.11), leg_mat, 0.05), root, (0.18 * sign, -0.13, 0.12))
+                legs[(eid, "left_leg" if side == "L" else "right_leg")] = {"upper": upper_leg, "lower": lower_leg, "foot": foot}
+
+        def add_storyhuman_humanoid(eid, root):
+            """Materialize a rounded, articulated StoryBlender-style proxy.
+
+            This remains a neutral planning proxy, not a claim of photorealism:
+            the silhouette has an actual head/neck, torso/pelvis volume,
+            shoulder/elbow/knee joints, capsule-like limbs, hands and shoes.
+            Every part is still attached to the authored entity root.
+            """
+            if eid.endswith("_a"):
+                skin_mat, outfit_mat, leg_mat = light, role_a, dark
+            elif eid.endswith("_b"):
+                skin_mat, outfit_mat, leg_mat = light, role_b, dark
+            else:
+                skin_mat, outfit_mat, leg_mat = light, role_c, dark
+            torso = smooth_mesh(parent_local(add_sphere(eid + "__story_torso", (0, 0, 1.78), (0.43, 0.27, 0.56), outfit_mat), root, (0, 0, 1.78)))
+            smooth_mesh(parent_local(add_sphere(eid + "__story_chest", (0, -0.03, 2.02), (0.39, 0.25, 0.30), outfit_mat), root, (0, -0.03, 2.02)))
+            smooth_mesh(parent_local(add_sphere(eid + "__story_pelvis", (0, 0, 1.27), (0.36, 0.25, 0.24), leg_mat), root, (0, 0, 1.27)))
+            smooth_mesh(parent_local(add_cylinder(eid + "__story_neck", (0, 0, 2.36), 0.13, 0.18, skin_mat), root, (0, 0, 2.36)))
+            smooth_mesh(parent_local(add_sphere(eid + "__story_head", (0, 0, 2.72), (0.29, 0.27, 0.34), skin_mat), root, (0, 0, 2.72)))
+            smooth_mesh(parent_local(add_sphere(eid + "__story_hair", (0, 0.04, 2.91), (0.30, 0.28, 0.17), dark), root, (0, 0.04, 2.91)))
+            for side, sign in (("L", 1.0), ("R", -1.0)):
+                shoulder_x = 0.45 * sign
+                smooth_mesh(parent_local(add_sphere(eid + "__story_shoulder." + side, (shoulder_x, 0, 2.14), (0.17, 0.17, 0.17), outfit_mat), root, (shoulder_x, 0, 2.14)))
+                upper = smooth_mesh(parent_local(add_cylinder(eid + "__story_upper_arm." + side, (shoulder_x, 0, 1.87), 0.145, 0.56, skin_mat), root, (shoulder_x, 0, 1.87)))
+                lower = smooth_mesh(parent_local(add_cylinder(eid + "__story_lower_arm." + side, (0, 0, -0.43), 0.125, 0.50, skin_mat), upper, (0, 0, -0.43)))
+                smooth_mesh(parent_local(add_sphere(eid + "__story_elbow." + side, (0, 0, -0.72), (0.14, 0.14, 0.14), skin_mat), upper, (0, 0, -0.72)))
+                smooth_mesh(parent_local(add_sphere(eid + "__story_hand." + side, (0, 0, -0.73), (0.14, 0.13, 0.15), skin_mat), lower, (0, 0, -0.73)))
+                arms[(eid, "left_arm" if side == "L" else "right_arm")] = upper
+                upper_leg = smooth_mesh(parent_local(add_cylinder(eid + "__story_upper_leg." + side, (0.18 * sign, 0, 0.98), 0.18, 0.62, leg_mat), root, (0.18 * sign, 0, 0.98)))
+                lower_leg = smooth_mesh(parent_local(add_cylinder(eid + "__story_lower_leg." + side, (0.18 * sign, 0, 0.42), 0.145, 0.55, leg_mat), root, (0.18 * sign, 0, 0.42)))
+                smooth_mesh(parent_local(add_sphere(eid + "__story_knee." + side, (0.18 * sign, 0, 0.67), (0.17, 0.16, 0.16), leg_mat), root, (0.18 * sign, 0, 0.67)))
+                foot = parent_local(add_cube(eid + "__story_foot." + side, (0.18 * sign, -0.15, 0.12), (0.18, 0.30, 0.12), dark, 0.10), root, (0.18 * sign, -0.15, 0.12))
                 legs[(eid, "left_leg" if side == "L" else "right_leg")] = {"upper": upper_leg, "lower": lower_leg, "foot": foot}
 
         def interp(points, frame):
@@ -1681,6 +1830,25 @@ def _blender_script() -> str:
         roots, arms, legs, skeleton_parts = {}, {}, {}, {}
         rigged_armatures = {}
         asset_log = []
+        coupling_rules = {}
+        entity_ids = {str(entity.get("id")) for entity in scene_plan["entities"]}
+        if {"backpack", "person_a"}.issubset(entity_ids):
+            coupling_rules["backpack"] = "person_a"
+        if {"box_a", "handcart"}.issubset(entity_ids):
+            coupling_rules["box_a"] = "handcart"
+        if {"box_b", "handcart"}.issubset(entity_ids):
+            coupling_rules["box_b"] = "handcart"
+        if {"luggage", "traveler"}.issubset(entity_ids):
+            coupling_rules["luggage"] = "traveler"
+        if {"suitcase", "traveler"}.issubset(entity_ids):
+            coupling_rules["suitcase"] = "traveler"
+        for entity in scene_plan["entities"]:
+            roots[str(entity["id"])] = add_root(str(entity["id"]))
+        for child_id, parent_id in coupling_rules.items():
+            # Parent at the root level while retaining local offsets derived
+            # from the authored world tracks below.
+            roots[child_id].parent = roots[parent_id]
+            roots[child_id].matrix_parent_inverse = mathutils.Matrix.Identity(4)
 
         # A single shared neutral floor/backdrop makes spatial relationships visible.
         add_cube("ground", (0, 0, -0.18), (9.0, 7.0, 0.18), dark, 0.03)
@@ -1690,11 +1858,10 @@ def _blender_script() -> str:
 
         for entity in scene_plan["entities"]:
             eid, kind = entity["id"], entity["kind"]
-            root = add_root(eid)
-            roots[eid] = root
+            root = roots[eid]
             registry_asset = next((item for item in asset_registry.get("assets", []) if item.get("asset_id") == eid), None)
             if kind == "character":
-                imported_glb = try_import_canonical_glb(eid, root, registry_asset)
+                imported_glb = None if args.render_style == "storyhuman" else try_import_canonical_glb(eid, root, registry_asset)
                 if imported_glb:
                     add_rigged_role_marker(eid, root)
                     armature = next((obj for obj in bpy.context.scene.objects if obj.name.startswith(eid + "__glb__") and obj.type == "ARMATURE"), None)
@@ -1708,6 +1875,8 @@ def _blender_script() -> str:
                         rigged_armatures[eid] = armature
                 elif args.render_style == "skeleton":
                     add_skeleton_humanoid(eid, root)
+                elif args.render_style == "storyhuman":
+                    add_storyhuman_humanoid(eid, root)
                 elif args.render_style == "canonical":
                     add_canonical_humanoid(eid, root)
                 else:
@@ -1778,9 +1947,18 @@ def _blender_script() -> str:
             asset_log.append({"asset_id": eid, "kind": kind, "source_kind": (registry_asset or {}).get("source_kind", "unknown"), "parts": len([obj for obj in bpy.context.scene.objects if obj.name.startswith(eid + "__")]), "shared_world_instance": True})
             for frame in range(frame_count):
                 pos, rot = interp(points, frame)
-                root.location = pos
                 root.rotation_mode = "XYZ"
-                root.rotation_euler = rot
+                if eid in coupling_rules:
+                    parent_points = tracks[coupling_rules[eid]]
+                    parent_pos, parent_rot = interp(parent_points, frame)
+                    parent_matrix = mathutils.Matrix.Translation(Vector(parent_pos)) @ mathutils.Euler(parent_rot, "XYZ").to_matrix().to_4x4()
+                    world_matrix = mathutils.Matrix.Translation(Vector(pos)) @ mathutils.Euler(rot, "XYZ").to_matrix().to_4x4()
+                    local_matrix = parent_matrix.inverted() @ world_matrix
+                    root.location = local_matrix.translation
+                    root.rotation_euler = local_matrix.to_euler("XYZ")
+                else:
+                    root.location = pos
+                    root.rotation_euler = rot
                 root.keyframe_insert(data_path="location", frame=frame)
                 root.keyframe_insert(data_path="rotation_euler", frame=frame)
 
@@ -2146,14 +2324,26 @@ def _blender_script() -> str:
                 pos, rot = interp(tracks[entity["id"]], frame)
                 entities[entity["id"]] = {"position": pos, "rotation": rot}
             state_log.append({"frame": frame, "entities": entities})
+        coupling_log = []
+        for child_id, parent_id in coupling_rules.items():
+            offsets = []
+            for frame in range(frame_count):
+                child_pos, child_rot = interp(tracks[child_id], frame)
+                parent_pos, parent_rot = interp(tracks[parent_id], frame)
+                parent_matrix = mathutils.Matrix.Translation(Vector(parent_pos)) @ mathutils.Euler(parent_rot, "XYZ").to_matrix().to_4x4()
+                child_matrix = mathutils.Matrix.Translation(Vector(child_pos)) @ mathutils.Euler(child_rot, "XYZ").to_matrix().to_4x4()
+                local_matrix = parent_matrix.inverted() @ child_matrix
+                offsets.append({"frame": frame, "position": [float(value) for value in local_matrix.translation], "rotation": [float(value) for value in local_matrix.to_euler("XYZ")]})
+            coupling_log.append({"child_id": child_id, "parent_id": parent_id, "mode": "root_parent_local_track", "frames": offsets})
         (out / "state_log.json").write_text(json.dumps(state_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "applied_state_log.json").write_text(json.dumps(state_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        (out / "coupling_log.json").write_text(json.dumps(coupling_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "camera_log.json").write_text(json.dumps(camera_logs, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "asset_log.json").write_text(json.dumps(asset_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "motion_log.json").write_text(json.dumps(motion_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "arm_pose_log.json").write_text(json.dumps(arm_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "skeleton_pose_log.json").write_text(json.dumps(skeleton_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        (out / "render_manifest.json").write_text(json.dumps({"schema_version": "pipeline-v2-render-manifest-1.0", "world_state_hash": world_hash, "proxy_style": args.render_style, "asset_registry": str(registry_path.name) if registry_path.is_file() else None, "frame_count": frame_count, "fps": fps, "resolution": [width, height], "motion_sources": bvh_metadata, "videos": videos}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        (out / "render_manifest.json").write_text(json.dumps({"schema_version": "pipeline-v2-render-manifest-1.0", "world_state_hash": world_hash, "proxy_style": args.render_style, "asset_registry": str(registry_path.name) if registry_path.is_file() else None, "couplings": coupling_rules, "frame_count": frame_count, "fps": fps, "resolution": [width, height], "motion_sources": bvh_metadata, "videos": videos}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         bpy.context.scene.camera = bpy.data.objects[world_state["camera_trajectory_plan"]["cameras"][0]["id"]]
         bpy.ops.wm.save_as_mainfile(filepath=str(out / "shared_world.blend"))
         print("PIPELINE_V2_BLENDER_OK")
@@ -2363,7 +2553,7 @@ def verify_asset_materialization(*, registry_path: Path, asset_log_path: Path, p
     missing = sorted(set(expected) - set(actual))
     duplicate_ids = len(asset_log) != len(actual)
     canonical_failures = []
-    if proxy_style in {"canonical", "skeleton"}:
+    if proxy_style in {"canonical", "skeleton", "storyhuman"}:
         for asset_id, item in expected.items():
             if item.get("kind") == "character":
                 observed = actual.get(asset_id, {})
@@ -2380,10 +2570,27 @@ def verify_asset_materialization(*, registry_path: Path, asset_log_path: Path, p
     }
 
 
+def verify_coupling_materialization(*, spec: Mapping[str, Any], coupling_log_path: Path, frame_count: int) -> dict[str, Any]:
+    """Verify that authored parent relations were materialized for every frame."""
+    expected = coupling_rules_for(spec)
+    if not expected:
+        return {"check_id": "object.coupling_materialization", "category": "object_trajectory", "status": "skipped", "message": "scene has no authored parent coupling rule", "evidence": {}}
+    if not coupling_log_path.is_file() or coupling_log_path.stat().st_size == 0:
+        return {"check_id": "object.coupling_materialization", "category": "object_trajectory", "status": "failed", "message": "coupling log is missing", "evidence": {"expected": expected}}
+    rows = json.loads(coupling_log_path.read_text(encoding="utf-8"))
+    actual = {str(row.get("child_id")): str(row.get("parent_id")) for row in rows if isinstance(row, Mapping)}
+    malformed = []
+    for row in rows:
+        if not isinstance(row, Mapping) or not isinstance(row.get("frames"), list) or len(row["frames"]) != frame_count:
+            malformed.append(row.get("child_id") if isinstance(row, Mapping) else "non_object")
+    passed = actual == expected and not malformed
+    return {"check_id": "object.coupling_materialization", "category": "object_trajectory", "status": "passed" if passed else "failed", "message": "authored parent coupling is materialized across the full timeline" if passed else "authored parent coupling is incomplete", "evidence": {"expected": expected, "actual": actual, "malformed": malformed, "frame_count": frame_count}}
+
+
 def verify_motion_materialization(*, motion_path: Path, motion_log_path: Path, proxy_style: str) -> dict[str, Any]:
     """Verify that the canonical motion sidecar was consumed by Blender."""
-    if proxy_style != "canonical":
-        return {"check_id": "motion.canonical_materialization", "category": "character_trajectory", "status": "skipped", "message": "canonical motion sidecar is only required for canonical Proxy renders", "evidence": {}}
+    if proxy_style not in {"canonical", "storyhuman"}:
+        return {"check_id": "motion.canonical_materialization", "category": "character_trajectory", "status": "skipped", "message": "canonical motion sidecar is only required for canonical or storyhuman Proxy renders", "evidence": {}}
     if not motion_path.is_file() or not motion_log_path.is_file():
         return {"check_id": "motion.canonical_materialization", "category": "character_trajectory", "status": "failed", "message": "canonical motion sidecar or Blender motion log is missing", "evidence": {"motion_path": str(motion_path), "motion_log_path": str(motion_log_path)}}
     profile = json.loads(motion_path.read_text(encoding="utf-8"))
@@ -2407,8 +2614,8 @@ def verify_motion_materialization(*, motion_path: Path, motion_log_path: Path, p
 
 def verify_arm_collision_constraints(*, gesture_path: Path, arm_pose_path: Path, proxy_style: str) -> dict[str, Any]:
     """Verify that applied arm poses stay outside the head corridor."""
-    if proxy_style != "canonical":
-        return {"check_id": "character.arm_head_clearance", "category": "character_trajectory", "status": "skipped", "message": "canonical arm clearance is only required for canonical Proxy renders", "evidence": {}}
+    if proxy_style not in {"canonical", "storyhuman"}:
+        return {"check_id": "character.arm_head_clearance", "category": "character_trajectory", "status": "skipped", "message": "canonical arm clearance is only required for canonical or storyhuman Proxy renders", "evidence": {}}
     if not gesture_path.is_file() or not arm_pose_path.is_file():
         return {"check_id": "character.arm_head_clearance", "category": "character_trajectory", "status": "failed", "message": "gesture track or arm pose log is missing", "evidence": {}}
     expected = {(str(item.get("target_id")), str(item.get("limb"))) for item in json.loads(gesture_path.read_text(encoding="utf-8")).get("gesture_tracks", []) if isinstance(item, Mapping)}
@@ -2578,6 +2785,10 @@ def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, mode
         verifier.setdefault("checks", []).append(asset_check)
         if asset_check["status"] == "failed":
             verifier["verdict"] = "fail"
+        coupling_check = verify_coupling_materialization(spec=spec, coupling_log_path=sandbox_dir / "coupling_log.json", frame_count=world.frame_count)
+        verifier.setdefault("checks", []).append(coupling_check)
+        if coupling_check["status"] == "failed":
+            verifier["verdict"] = "fail"
         motion_check = verify_motion_materialization(motion_path=motion_path, motion_log_path=sandbox_dir / "motion_log.json", proxy_style=proxy_style)
         verifier.setdefault("checks", []).append(motion_check)
         if motion_check["status"] == "failed":
@@ -2686,7 +2897,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "runs" / "results")
     parser.add_argument("--blender", type=Path, default=Path(r"D:\blender\blender.exe"))
     parser.add_argument("--model", default="Doubao-Seedance-2.0")
-    parser.add_argument("--proxy-style", choices=["clay", "canonical", "skeleton"], default="clay")
+    parser.add_argument("--proxy-style", choices=["clay", "canonical", "storyhuman", "skeleton"], default="clay")
     parser.add_argument("--asset-dir", type=Path, help="optional directory containing <entity_id>.glb canonical assets")
     parser.add_argument("--readability-revision", action="store_true", help="apply the next Director revision requested by VLM; preserves target identities/roles and entity action order while widening coverage")
     parser.add_argument("--storyblender-revision", action="store_true", help="apply Stage-A StoryBlender-style camera/layout reflection without changing authored entity or gesture tracks")
@@ -2711,6 +2922,8 @@ def main() -> int:
     parser.add_argument("--indoor-market-readability-revision", action="store_true", help="apply revision_025 for counter/cart grounding and vendor-side coverage")
     parser.add_argument("--indoor-market-counter-revision", action="store_true", help="apply revision_026 with table-like counter and distant overhead coverage")
     parser.add_argument("--indoor-market-event-revision", action="store_true", help="apply revision_027 with explicit vendor/pause/gesture/flutter beats")
+    parser.add_argument("--indoor-market-storyhuman-revision", action="store_true", help="apply revision_028 with rounded-human staging and grounded cart contact")
+    parser.add_argument("--indoor-market-storyhuman-readability-revision", action="store_true", help="apply revision_029 with separated helper lane and explicit paper landing")
     parser.add_argument("--motion-bvh", type=Path, help="real BVH clip for the lead motion branch")
     parser.add_argument("--motion-bvh-alt", type=Path, help="optional second real BVH clip concatenated after the first")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
@@ -2771,6 +2984,10 @@ def main() -> int:
         selected = [indoor_market_counter_revision(spec) for spec in selected]
     if args.indoor_market_event_revision:
         selected = [indoor_market_event_revision(spec) for spec in selected]
+    if args.indoor_market_storyhuman_revision:
+        selected = [indoor_market_storyhuman_revision(spec) for spec in selected]
+    if args.indoor_market_storyhuman_readability_revision:
+        selected = [indoor_market_storyhuman_readability_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
