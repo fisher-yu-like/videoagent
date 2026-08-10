@@ -1,0 +1,22 @@
+{
+  "schema_version": "rig-map-1.0",
+  "asset_id": "human_female_v1",
+  "unified_to_asset": {
+    "root": "root",
+    "pelvis": "pelvis",
+    "spine": "spine",
+    "head": "head",
+    "upper_arm.L": "upper_arm.L",
+    "forearm.L": "forearm.L",
+    "hand.L": "hand.L",
+    "upper_arm.R": "upper_arm.R",
+    "forearm.R": "forearm.R",
+    "hand.R": "hand.R",
+    "upper_leg.L": "upper_leg.L",
+    "lower_leg.L": "lower_leg.L",
+    "foot.L": "foot.L",
+    "upper_leg.R": "upper_leg.R",
+    "lower_leg.R": "lower_leg.R",
+    "foot.R": "foot.R"
+  }
+}

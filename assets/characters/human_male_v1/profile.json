@@ -1,0 +1,12 @@
+{
+  "schema_version": "character-asset-profile-1.0",
+  "asset_id": "human_male_v1",
+  "display_name": "CesiumMan proxy probe",
+  "gender_label": "male_proxy_label",
+  "is_photoreal": false,
+  "unit_scale": 1.0,
+  "up_axis": "Y",
+  "forward_axis": "-Z",
+  "default_pose": "rest_pose",
+  "source_version": "CesiumMan glTF sample"
+}

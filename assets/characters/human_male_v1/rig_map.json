@@ -1,0 +1,22 @@
+{
+  "schema_version": "rig-map-1.0",
+  "asset_id": "human_male_v1",
+  "unified_to_asset": {
+    "root": "Skeleton_torso_joint_1",
+    "pelvis": "Skeleton_torso_joint_1",
+    "spine": "Skeleton_torso_joint_2",
+    "head": "Skeleton_neck_joint_2",
+    "upper_arm.L": "Skeleton_arm_joint_L__4_",
+    "forearm.L": "Skeleton_arm_joint_L__3_",
+    "hand.L": "Skeleton_arm_joint_L__2_",
+    "upper_arm.R": "Skeleton_arm_joint_R",
+    "forearm.R": "Skeleton_arm_joint_R__2_",
+    "hand.R": "Skeleton_arm_joint_R__3_",
+    "upper_leg.L": "leg_joint_L_1",
+    "lower_leg.L": "leg_joint_L_2",
+    "foot.L": "leg_joint_L_3",
+    "upper_leg.R": "leg_joint_R_1",
+    "lower_leg.R": "leg_joint_R_2",
+    "foot.R": "leg_joint_R_3"
+  }
+}

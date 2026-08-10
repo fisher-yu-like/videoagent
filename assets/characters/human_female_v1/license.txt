@@ -1,0 +1,1 @@
+No model is installed for human_female_v1. A real licensed GLB and its attribution must be added before this asset can be materialized. The catalog fails closed while it is absent.

@@ -1,0 +1,1 @@
+CesiumMan glTF sample asset. Source and license attribution are recorded in assets/canonical_humanoid/README.md. Upstream notice: CC-BY 4.0 with Cesium trademark limitations. This local copy is used only as a Proxy probe.

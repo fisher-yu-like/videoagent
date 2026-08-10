@@ -1,0 +1,12 @@
+{
+  "schema_version": "character-asset-profile-1.0",
+  "asset_id": "human_female_v1",
+  "display_name": "licensed female humanoid slot",
+  "gender_label": "female",
+  "is_photoreal": false,
+  "unit_scale": 1.0,
+  "up_axis": "Z",
+  "forward_axis": "-Y",
+  "default_pose": "rest_pose",
+  "source_version": "asset not installed"
+}
