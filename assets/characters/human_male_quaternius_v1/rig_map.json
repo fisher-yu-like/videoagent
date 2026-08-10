@@ -1,6 +1,6 @@
 {
   "schema_version": "rig-map-1.0",
-  "asset_id": "human_female_v1",
+  "asset_id": "human_male_quaternius_v1",
   "unified_to_asset": {
     "root": "root",
     "pelvis": "pelvis",

@@ -86,3 +86,31 @@ Seedance/Kling 的 API 需要相应环境变量和可访问的 reference URL。�
 ## 版本控制范围
 
 仓库只提交源码、配置、测试、示例和文档。`runs/`、MP4、Blend、模型权重、缓存、临时上传和本地密钥均被 `.gitignore` 排除；真实实验通过文档中的路径、manifest 和哈希复现，而不是把大文件塞进 Git。
+## Fixed character asset branch (optional)
+
+The new `--proxy-style asset_humanoid` branch instantiates versioned rigged GLB characters in the existing shared Blender world. It keeps the current trajectory, object-coupling, camera-log and ProxyVerifier contracts; the older `clay`, `canonical`, `storyhuman` and `skeleton` branches remain available.
+
+The current worktree has both catalog entries. The female asset was derived from the free CC0 Quaternius Standard package and its model/catalog SHA-256 are recorded in `assets/characters/human_female_v1/`.
+
+The matching male asset is `human_male_quaternius_v1`; the older `human_male_v1` CesiumMan entry remains only as an immutable historical probe and is not used for the new market revision.
+
+```text
+assets/characters/human_male_v1/model.glb
+assets/characters/human_female_v1/model.glb
+```
+
+Run with `--skip-seedance` first. A missing or hash-mismatched asset fails closed as `asset_missing`; the pipeline never substitutes one gender for another. Passing deterministic checks still requires manual/VLM Proxy approval, and it does not guarantee cross-task identity consistency from a backend that receives one reference video per camera. See [FIXED_ASSET_HUMANOID_RUN_20260810.md](docs/FIXED_ASSET_HUMANOID_RUN_20260810.md) and the current pipeline record for the asset Proxy result and fallback full-chain evidence.
+
+## New multi-camera prompt experiment
+
+`warehouse_loading_maneuver` is a separate four-camera experiment. It uses one shared Blender world, a grounded handcart/box coupling, a worker pause and hand signal, a trailing assistant, and visibly moving master/lateral/reverse/elevated cameras. Run the latest Proxy-only revision with:
+
+```powershell
+\.venv\Scripts\python.exe scripts\run_complex_scene_suite.py `
+  --scene-id warehouse_loading_maneuver `
+  --warehouse-loading-paper-revision `
+  --proxy-style asset_humanoid --proxy-review vlm --skip-seedance `
+  --blender D:\blender\blender.exe
+```
+
+The run writes four MP4s plus `state_log.json`, `camera_log.json`, `asset_log.json`, `coupling_log.json`, `render_manifest.json`, the VLM feedback, and an immutable `scene_summary.json` under `runs/results/`. Seedance is intentionally blocked until the Proxy VLM gate approves. The current 2026-08-11 warehouse runs are recorded in [CURRENT_PIPELINE_AND_RESULTS.md](docs/CURRENT_PIPELINE_AND_RESULTS.md); their real VLM verdict is `revision_requested`, so no final-video API task was submitted for this prompt.

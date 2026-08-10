@@ -43,3 +43,10 @@ def test_build_blender_command_accepts_storyhuman_proxy_style() -> None:
         "blender.exe", "script.py", "state.json", "out", render_style="storyhuman"
     )
     assert command[command.index("--render-style") + 1] == "storyhuman"
+
+
+def test_build_blender_command_accepts_asset_humanoid_proxy_style() -> None:
+    command = build_blender_command(
+        "blender.exe", "script.py", "state.json", "out", render_style="asset_humanoid"
+    )
+    assert command[command.index("--render-style") + 1] == "asset_humanoid"

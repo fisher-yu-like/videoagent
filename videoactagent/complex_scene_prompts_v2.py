@@ -75,7 +75,7 @@ PLAZA_DANCE = {
         "Use four synchronized camera responsibilities: master orbit, lateral follow, reverse continuity, and elevated wide."
     ),
     "entities": [
-        _entity("person_a", "character", "adult_dancer_proxy", "human_male_v1"),
+        _entity("person_a", "character", "adult_dancer_proxy", "human_male_quaternius_v1"),
         _entity("person_b", "character", "street_musician_proxy", "human_female_v1"),
         _entity("person_c", "character", "crossing_passerby_proxy", "human_female_v1"),
         _entity("backpack", "object", "backpack_proxy"),
@@ -134,7 +134,7 @@ PARK_BADMINTON = {
         "reverse player view, and high diagonal wide coverage without cuts."
     ),
     "entities": [
-        _entity("person_a", "character", "left_player_proxy", "human_male_v1"), _entity("person_b", "character", "right_player_proxy", "human_female_v1"),
+        _entity("person_a", "character", "left_player_proxy", "human_male_quaternius_v1"), _entity("person_b", "character", "right_player_proxy", "human_female_v1"),
         _entity("spectator", "character", "spectator_proxy", "human_female_v1"), _entity("racket_a", "object", "racket_proxy"),
         _entity("racket_b", "object", "racket_proxy"), _entity("shuttlecock", "object", "shuttlecock_proxy"),
         _entity("net", "object", "net_proxy"), _entity("bench", "object", "bench_proxy"),
@@ -190,7 +190,7 @@ INDOOR_MARKET = {
         "vendor view, and overhead layout without cuts or layout changes."
     ),
     "entities": [
-        _entity("vendor", "character", "vendor_proxy", "human_female_v1"), _entity("customer", "character", "customer_proxy", "human_male_v1"), _entity("helper", "character", "helper_proxy", "human_female_v1"),
+        _entity("vendor", "character", "vendor_proxy", "human_female_v1"), _entity("customer", "character", "customer_proxy", "human_male_quaternius_v1"), _entity("helper", "character", "helper_proxy", "human_female_v1"),
         _entity("handcart", "object", "handcart_proxy"), _entity("box_a", "object", "box_proxy"), _entity("box_b", "object", "box_proxy"),
         _entity("paper_a", "object", "paper_sheet_proxy"), _entity("paper_b", "object", "paper_sheet_proxy"), _entity("counter", "object", "counter_proxy"),
     ],
@@ -234,7 +234,74 @@ INDOOR_MARKET = {
 }
 
 
-SCENES = [PLAZA_DANCE, PARK_BADMINTON, INDOOR_MARKET]
+WAREHOUSE_LOADING = {
+    "scene_id": "warehouse_loading_maneuver",
+    "title": "Warehouse loading maneuver",
+    "prompt": (
+        "One continuous five-second loading-bay maneuver in one shared world. A worker grips a loaded handcart and rolls it "
+        "from left to right along a marked floor lane; the cart wheels stay grounded and two boxes remain coupled to the cart. "
+        "At the braking point the worker stops the cart, raises one hand to signal the supervisor, then resumes the push. An "
+        "assistant walks behind the cart, turns toward the receiving counter, and points to the drop-off area. The braking event "
+        "causes two lightweight packing slips to lift from the top box, drift in a short irregular flutter, and settle beside the "
+        "counter; they do not teleport and the boxes never leave the cart. Four synchronized cameras use a pronounced dolly-in "
+        "master, a cart-side tracking shot, a reverse arc toward the counter, and a descending overhead pull-in, with continuous "
+        "look-at changes and no cuts."
+    ),
+    "entities": [
+        _entity("vendor", "character", "supervisor_proxy", "human_female_v1"),
+        _entity("customer", "character", "worker_proxy", "human_male_quaternius_v1"),
+        _entity("helper", "character", "assistant_proxy", "human_female_v1"),
+        _entity("handcart", "object", "loading_cart_proxy"),
+        _entity("box_a", "object", "large_box_proxy"),
+        _entity("box_b", "object", "small_box_proxy"),
+        _entity("paper_a", "object", "packing_slip_proxy"),
+        _entity("paper_b", "object", "packing_slip_proxy"),
+        _entity("counter", "object", "receiving_counter_proxy"),
+    ],
+    "tracks": [
+        {"target_id": "vendor", "kind": "character", "points": [_point(0, (1.8, 1.0, 0), 3.14), _point(30, (1.8, 1.0, 0), 3.14), _point(60, (1.8, 1.0, 0), 3.0), _point(90, (1.8, 1.0, 0), 3.0), _point(119, (1.8, 1.0, 0), 3.0)]},
+        {"target_id": "customer", "kind": "character", "points": [_point(0, (-4.0, -0.8, 0), 0.0), _point(30, (-2.8, -0.8, 0), 0.0), _point(60, (-1.8, -0.8, 0), 0.15), _point(90, (-1.8, -0.8, 0), 0.15), _point(119, (1.5, -0.8, 0), 0.2)]},
+        {"target_id": "helper", "kind": "character", "points": [_point(0, (-3.4, 1.1, 0), -1.2), _point(30, (-2.6, 1.0, 0), -1.0), _point(60, (-1.8, 1.0, 0), -0.8), _point(90, (-0.2, 0.7, 0), -0.45), _point(119, (0.8, 0.5, 0), -0.25)]},
+        {"target_id": "handcart", "kind": "object", "points": [_point(0, (-3.8, -0.8, 0)), _point(30, (-2.6, -0.8, 0)), _point(60, (-1.6, -0.8, 0)), _point(90, (-1.6, -0.8, 0)), _point(119, (1.7, -0.8, 0))]},
+        {"target_id": "box_a", "kind": "object", "points": [_point(0, (-3.8, -0.8, 0.72)), _point(30, (-2.6, -0.8, 0.72)), _point(60, (-1.6, -0.8, 0.72)), _point(90, (-1.6, -0.8, 0.72)), _point(119, (1.7, -0.8, 0.72))]},
+        {"target_id": "box_b", "kind": "object", "points": [_point(0, (-3.8, -0.1, 0.72)), _point(30, (-2.6, -0.1, 0.72)), _point(60, (-1.6, -0.1, 0.72)), _point(90, (-1.6, -0.1, 0.72)), _point(119, (1.7, -0.1, 0.72))]},
+        {"target_id": "paper_a", "kind": "object", "points": [_point(0, (-3.4, -0.45, 1.18)), _point(30, (-2.2, -0.45, 1.18)), _point(60, (-1.3, -0.35, 1.65)), _point(90, (-0.3, 0.0, 1.05)), _point(119, (0.9, 0.5, 0.06))]},
+        {"target_id": "paper_b", "kind": "object", "points": [_point(0, (-3.2, -0.1, 1.20)), _point(30, (-2.0, -0.1, 1.20)), _point(60, (-1.0, -0.1, 1.85)), _point(90, (0.0, 0.2, 1.10)), _point(119, (1.1, 0.6, 0.08))]},
+        {"target_id": "counter", "kind": "object", "points": [_point(0, (1.8, 1.0, 0)), _point(30, (1.8, 1.0, 0)), _point(60, (1.8, 1.0, 0)), _point(90, (1.8, 1.0, 0)), _point(119, (1.8, 1.0, 0))]},
+    ],
+    "cameras": [
+        _camera("master", "pronounced dolly-in from loading-bay wide to the handcart brake and counter", "handcart", (0, -12, 4.0), (0, -8.0, 3.6), (1.0, -4.5, 3.0)),
+        _camera("lateral", "cart-side tracking shot matching the left-to-right wheel travel", "handcart", (-10, -2.5, 3.2), (-6, -1.5, 3.0), (-1.5, -0.6, 2.8)),
+        _camera("reverse", "reverse arc that moves from behind the worker toward the receiving counter", "counter", (8, 7, 4.4), (5, 4, 3.8), (2.5, 1.5, 3.1)),
+        _camera("elevated", "descending crane pull-in showing cart lane, assistant turn and paper landing", "handcart", (0, 8, 12), (1.5, 5, 9), (1.5, 0.5, 6.0)),
+    ],
+    "action_phases": [
+        "K0: worker grips loaded cart; supervisor, assistant, counter, boxes and packing slips are visible",
+        "K1: cart rolls left-to-right with continuous wheel contact and assistant follows behind",
+        "K2: cart brakes and holds; worker raises one hand before the receiving exchange",
+        "K3: assistant turns and points; slips lift from the top box, flutter briefly and begin to descend",
+        "K4: worker resumes to the counter; boxes remain coupled and both slips rest beside the counter",
+    ],
+    "physical_events": [
+        {"id": "cart_brake_signal", "frame": 60, "type": "grounded_brake_and_gesture", "participants": ["customer", "handcart"]},
+        {"id": "packing_slip_release", "frame": 66, "type": "source_connected_flutter", "participants": ["paper_a", "paper_b", "box_a", "handcart"]},
+    ],
+    "gesture_tracks": [
+        {"target_id": "customer", "limb": "right_arm", "points": [(0, 0.0), (48, 0.0), (60, 1.2), (84, 1.2), (96, 0.0), (119, 0.0)]},
+        {"target_id": "helper", "limb": "left_arm", "points": [(0, 0.0), (60, 0.0), (78, 1.0), (96, 1.0), (108, 0.0), (119, 0.0)]},
+    ],
+    "appearance_prompt": (
+        "Appearance-only edit for one continuous five-second loading-bay maneuver. Preserve exactly three people, one handcart, "
+        "two coupled boxes, two packing slips and one receiving counter; preserve the left-to-right cart travel, true brake pause, "
+        "worker hand signal, assistant turn/point, source-connected slip flutter and final landing, plus all four moving camera roles. "
+        "Replace the proxy with natural live-action people and believable loading-bay materials. No cuts, no extra people, no duplicate "
+        "cart or boxes, no mannequin geometry, no guide lines or storyboard overlays."
+    ),
+    "planner": _planner("motion_or_action", "human_action_proxy", ["grounded cart roll", "brake pause", "worker hand signal", "assistant turn", "source-connected packing-slip flutter", "four moving camera paths"], ["wheels stay grounded", "boxes remain coupled", "pause precedes signal", "slips originate on box", "no teleportation", "camera positions and look-at continuity are auditable"]),
+}
+
+
+SCENES = [PLAZA_DANCE, PARK_BADMINTON, INDOOR_MARKET, WAREHOUSE_LOADING]
 _BY_ID = {scene["scene_id"]: scene for scene in SCENES}
 
 

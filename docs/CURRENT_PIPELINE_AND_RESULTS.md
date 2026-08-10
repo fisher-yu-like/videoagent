@@ -356,6 +356,26 @@ Seedance 使用 approved revision_029 Proxy，4 个独立 reference-video task�
 
 ### 4.18 Seedance camera-lock / identity-anchor / camera-first 修复实验 / 2026-08-10
 
+### 4.19 固定人物资产库 / asset_humanoid 实现与真实探针 / 2026-08-10
+
+本阶段新增固定人物资产目录和统一骨骼映射：
+
+- `videoactagent/asset_catalog.py`：版本化 catalog、SHA-256、profile/rig/license sidecar 和 `asset_missing` fail-closed；
+- `videoactagent/rig_mapping.py`：统一 16 骨骼名称，允许 CesiumMan 的 root/pelvis 有意别名，其余重复映射失败；
+- SceneSpec 角色增加 `asset_id`，但编译到严格 `pipeline_v2.WorldState` 时只保留原有 `id/kind/asset` 字段；
+- 新增隔离的 `asset_humanoid` Blender 分支，所有机位使用同一 catalog asset hash，并输出 asset/camera/motion/state 日志；旧分支保持不变；
+- ProxyVerifier 新增 `asset.catalog_materialization` 和 `asset.shared_world_identity` 检查。
+
+真实预检：`asset_humanoid` 官方 `indoor_market_exchange` 需要 `human_male_v1` 和 `human_female_v1`，当前女性 GLB 不存在，因此真实运行结果为 `asset_missing`，API=0；没有用男性模型冒充女性。
+
+真实 male-only 接口探针：
+
+`runs/results/asset_humanoid_male_probe_20260810/indoor_market_asset_humanoid_male_probe_20260810_064817/`
+
+该探针将三个角色显式绑定到现有 CesiumMan Proxy，仅用于验证固定资产分支。Blender 实际生成四个 MP4；asset catalog、rig hash、shared-world identity、人物/物体轨迹、四个 CameraTrajectoryPlan、媒体哈希和 blackdetect 均通过，Proxy VLM/人工审查保持 pending；Seedance=0。该结果不能被描述为男女双资产或真人质量结果。
+
+固定资产男女双角色全链路尚未启动，原因是缺少真实、可许可的 `assets/characters/human_female_v1/model.glb`。补齐该文件并更新 catalog SHA-256/license 后，才能继续四机位 Proxy 审批和后端全链路实验。
+
 本轮保持 revision_029 approved storyhuman Proxy 不变，连续做四种真实后端条件化对照，旧 endpoint 均未覆盖：
 
 1. `e2e_seedance_storyhuman_camera_prompt_20260810`：每个 camera_id 使用 camera-specific structural-lock prompt；submit=4，query=130（含 continuation），download=4。
@@ -366,3 +386,153 @@ Seedance 使用 approved revision_029 Proxy，4 个独立 reference-video task�
 四轮所有已下载 MP4 都通过真实文件、ffprobe、时长/帧数/fps 和 blackdetect；但最终 VLM 四轮均为 `revision_requested`。最后一轮 VLM 仍观察到四路近似 front-facing、customer/helper 角色混淆、纸张早于 cart 出现、elevated 不是 overhead、lateral/reverse 不是 authored coverage。
 
 Blender `camera_log.json` 已记录四个 authored/applied camera 的不同位置和 look-at rotation，因此本轮根因不在 Proxy 相机轨迹日志或上传完整性，而在当前网关对独立 Seedance reference-video task 的跨任务共享世界/身份/机位约束不足。详细 prompt、task、SHA-256、媒体报告和四个最后视频见 [SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md](SEEDANCE_MULTI_CAMERA_LOCK_RUN_20260810.md)。在接入原生 multiview/显式 camera-control 后端前，不再用同一接口重复提交来搜索“通过”结果。
+### 4.20 Fixed-asset branch and real full-chain regression / 2026-08-10
+
+This round first ran a real fail-closed preflight for `asset_humanoid`, then kept the existing `storyhuman` branch intact for the end-to-end regression. No male model was used as a female substitute, and no new task was submitted while waiting on an existing task.
+
+- Fixed-asset preflight: `asset_humanoid` `indoor_market_exchange` requires `human_male_v1` and `human_female_v1`. The female GLB is currently absent, so the truthful result is `asset_missing`; Seedance submit/query/download are all 0.
+- Male-only interface probe: [asset_humanoid_male_probe_20260810](../runs/results/asset_humanoid_male_probe_20260810/). Real Blender four-camera rendering, catalog SHA, rig-map, shared-world identity, trajectory logs, media and blackdetect checks passed. This is only an interface probe, not a male/female or realism acceptance result.
+- Existing-branch full-chain regression: [fixed_asset_fallback_fullchain_20260810](../runs/results/fixed_asset_fallback_fullchain_20260810/). `storyhuman` Proxy and four independent reference-video tasks were used: `submit=4, query=126, download=4`. Proxy VLM approved once; all four Seedance MP4s were downloaded and passed real ffprobe, duration, frame-count, FPS and blackdetect checks.
+- Final VLM was called once and returned `revision_requested`. The failure is not a corrupt media file: the four independent Seedance tasks did not preserve shared people, cart, boxes, papers and market layout. Therefore “four MP4s downloaded” is not reported as “multi-camera consistency passed”.
+
+The fixed-asset male/female full chain remains blocked until a licensed `assets/characters/human_female_v1/model.glb` is installed and its catalog SHA/license sidecars are updated. Existing revisions and the fallback regression directory remain immutable.
+
+### 4.24 revision_030: asset contact and role-specific action fix / 2026-08-10
+
+The latest Quaternius run reduced the remaining Proxy blocker to two structural points: the customer was not visibly gripping the moving cart in lateral views, and the helper's raised cue could be confused with the customer's pause/raise-hand event. This is not an appearance-only issue.
+
+The new immutable `revision_030` is derived from `revision_029` and changes only the shared-world structure:
+
+- the cart handle is a horizontal bar at the authored hand height instead of a vertical post;
+- the customer keeps the right-arm pause cue and remains in the cart's rear lane;
+- the helper's cue is moved to the left arm while its separated rear lane and root track are preserved;
+- entity IDs, cart-box parent coupling, frame indices and all four camera responsibilities remain unchanged.
+
+The implementation is in `scripts/run_complex_scene_suite.py` behind `--indoor-market-asset-contact-revision`. The two regression tests were written before the implementation, observed failing, and now pass. A real Blender/VLM Proxy run is still required; no Seedance task has been submitted for `revision_030` yet.
+
+### 4.25 asset_humanoid visual cleanup / 2026-08-10
+
+The first `revision_030` render showed a remaining proxy-only readability defect: the imported character role marker was a long colored strip across each torso. It visually hid the arms and was easily mistaken for a scene prop. The marker is now a small shoulder accent, and the cart handle is shifted to `x=-0.35` with a `0.75m` half-width so the customer's authored right hand falls inside the grip span during the push. This is a new structural change and requires a fresh immutable run; the previous `revision_030` output remains preserved as evidence.
+
+The new command flag is `--indoor-market-asset-visual-cleanup-revision`, which materializes `revision_031` with `parent_revision=revision_030`. The prior run's VLM rejection is not retroactively changed.
+
+### 4.26 revision_032: connected exchange staging / 2026-08-10
+
+The truthful VLM result for `revision_031` no longer complained about the torso marker, but rejected the shared-world staging: the cart/customer entered the master from far outside the vendor frame, and reverse/elevated views were too wide to show the exchange. `revision_032` therefore moves the vendor and counter into the cart's end lane, moves paper landing points next to the counter, retargets all four authored cameras to the handcart, and tightens reverse/elevated positions and lenses. It preserves the four camera IDs and all entity root/action tracks that are not directly part of staging.
+
+The new entry point is `--indoor-market-exchange-staging-revision`. The `revision_031` output remains immutable; no Seedance submission has been made for either rejected Proxy.
+
+### 4.27 revision_033: action/physics readability repair / 2026-08-10
+
+`revision_032` made the exchange spatially connected, but its truthful VLM review still rejected three structural details: short/hidden hand gestures, weak visible pusher contact, and oversized rigid paper planes; it also read the payload as one box. `revision_033` extends the customer and helper gesture intervals, adds rotated lower-height paper arcs with smaller sheet geometry, reframes the side camera around the grip and wheels, and makes `box_b` smaller/darker so both boxes are distinguishable. This remains a Proxy-stage structural revision; no final-video prompt is used to hide these defects.
+
+### 4.28 revision_034: identity and grounding repair / 2026-08-10
+
+The truthful VLM result for `revision_033` still reported unstable role identity in the opening view, distant/ambiguous vendor staging, and weak wheel/source contact. `revision_034` adds stable role-specific vest accents (customer/helper/vendor), shortens only the empty approach while retaining left-to-right cart motion and event frames, moves the vendor/counter into the cart lane, lowers the paper lift to start on the payload, enlarges grounded wheels, and tightens the master/reverse/elevated cameras. This is another immutable Proxy revision; all previous rejected outputs remain unchanged and Seedance count remains zero until approval.
+
+### 4.29 revision_035: helper turn and visible paper settle / 2026-08-10
+
+The `revision_034` VLM review accepted the broad layout and identity accents but still rejected the helper's turn/gesture and the paper sheets disappearing or landing under occlusion. `revision_035` moves the helper into a middle lane with an explicit yaw turn and shorter left-arm cue, places the two papers on a visible landing zone beside (not under) the counter, and lowers the elevated camera. It is still a structural Proxy revision; no backend request is allowed until this gate passes.
+
+### 4.30 revision_036: remove head-obscuring proxy blocks / 2026-08-10
+
+The truthful `revision_035` review exposed a new regression introduced by the role-clothing experiment: large colored blocks covered the imported characters' heads and made the customer/helper identity unreadable. `revision_036` removes those torso blocks, keeps only the small shoulder accents, moves final paper positions into a front ground zone, and lowers the elevated camera to preserve head/hand visibility. This is the current Proxy candidate; the `revision_035` output remains immutable.
+
+### 4.31 revision_037: shared cart-parented hand IK / 2026-08-10
+
+The truthful `revision_036` review isolated the remaining central failure: the customer and cart root paths were numerically aligned, but the imported right hand still was not visibly constrained to the moving handle. The Blender asset branch now creates `customer__push_grip_target` parented to the shared `handcart` root, a pole target parented to the customer root, and a two-bone IK constraint on the mapped right forearm. The applied contract is logged in `sandbox/push_ik_log.json`. `revision_037` is the immutable scene revision that exercises this constraint; no final-video prompt is used to compensate for missing contact.
+
+### 4.32 revision_038: IK influence window for the authored pause / 2026-08-10
+
+The real `revision_037` Proxy run proved the IK was materialized (`push_ik_log.json` and the Blender constraint are present), but the always-on constraint overrode the customer's raised-hand event. The constraint now has keyed influence `1.0` during travel and `0.0` only from frames 36-84, then restores contact before the resumed path. `revision_038` records this as a separate immutable revision.
+
+### 4.33 revision_039: counter/vendor world-floor grounding / 2026-08-10
+
+The real `revision_038` review found that the market counter was still elevated by its authored root `z=1.0`, so the vendor/counter became background or occluding geometry. `revision_039` lowers both roots to `z=0`, brings the stall into the cart lane, and refocuses master/reverse cameras. This is a structural Director/Blender correction; the prior Proxy output is preserved and no backend call is made before the new gate.
+
+### 4.34 revision_040: explicit pause and shared paper landing / 2026-08-10
+
+The truthful `revision_039` review accepted grounded staging but found that the customer still moved through the raised-hand beat and the two paper sheets ended in different visual zones. `revision_040` holds customer/cart/boxes at K2-K3, resumes the left-to-right push only afterward, and places both sheets in one counter-side landing zone. The revision remains Proxy-gated and preserves all previous output directories.
+
+### 4.35 real Prompt -> approved Proxy -> Seedance endpoint run / 2026-08-10
+
+The standalone `revision_040` Proxy run at `runs/results/asset_humanoid_market_20260810_revision040/complex_scene_suite_20260810_162939/indoor_market_exchange_20260810_162939/` passed the deterministic checks and received a real VLM `approve` (one call). A second full-chain rerender produced a stochastic VLM `revision_requested` before any API call; it is recorded separately at `runs/results/asset_humanoid_market_20260810_e2e_revision040/` and was not used for backend submission. To avoid changing the approved bundle, it was copied immutably to `runs/results/asset_humanoid_market_20260810_e2e_approved_revision040/indoor_market_exchange_approved_revision040/` and submitted directly.
+
+Four independent reference-video tasks were submitted, one per camera and one URL per request:
+
+| camera_id | task ID | submit | query | download | MP4 SHA-256 |
+|---|---|---:|---:|---:|---|
+| master | `task-sv3br6076f9wn49` | 1 | 31 | 1 | `dadae1f90d27c41b2b95bf5658d04da4ced3091064d559a9b480979c695d4dcd` |
+| lateral | `task-pp348cm4n4dmg6x` | 1 | 31 | 1 | `741a290f0a3582fc8e595d44147bd114f1b2f71151d286e0d83494ee2f1d9c6a` |
+| reverse | `task-bhhn5ylew99xls4` | 1 | 31 | 1 | `5e5af088a20f6664edb60b943fe8a69090b710110e5c1b3aa74febc16eb36e52` |
+| elevated | `task-bkmszl54tobvmds` | 1 | 31 | 1 | `c2091b9344df2d79d002fe12145aa15b885d55f7e402245d4b36e1fb22d2df41` |
+
+All four downloaded MP4s are real `1280x720`, `24/1` FPS, 121 frames, about 5.06-5.09 seconds, and `blackdetect=0`. The reports are in `final_video_verifier_report.json` and `final_video_verifier/<camera_id>.json` under the endpoint directory. The aggregate deterministic verdict is `pending_review` because visual identity/action checks are deliberately unknown until VLM/human review.
+
+The final VLM was called once and returned `revision_requested`: the four independent Seedance outputs changed the environment, counter/cart design, people and box arrangements between cameras, so shared-world multi-view consistency did not pass. This is a truthful end-to-end generation result, not a claim of successful multi-view consistency. No task was retried or resubmitted; total backend calls were `submit=4, query=124 (120 initial + 4 continuation queries), download=4`.
+
+### 4.36 verification status / 2026-08-10
+
+The relevant regression suite (`test_complex_scene_suite.py`, Blender sandbox and appearance/backend tests) passes `89 tests`. `py_compile`, `compileall` and `git diff --check` also pass. The entire repository suite was run once but is not a clean baseline: `663 passed, 196 failed, 21 errors, 7 skipped`; the failures/errors are in pre-existing VACE/trajectory fixture collections whose real prerequisite bundles are absent in this worktree. They are not reported as passing, and no fake fixture was created.
+
+### 4.37 new warehouse_loading_maneuver prompt / 2026-08-11
+
+The market endpoint exposed two limitations that should be tested separately: its action was too dense, and the camera motion was subtle. A new independent prompt `warehouse_loading_maneuver` has been added to `videoactagent/complex_scene_prompts_v2.py` without changing prior scene specs or runs.
+
+The new case explicitly plans a grounded handcart roll with a true brake/pause before the worker's signal, two boxes parent-coupled to the cart, an assistant walk-behind/turn/point action, two packing slips originating on the top box and settling beside the receiving counter, plus a master dolly-in, lateral follow, reverse arc and descending overhead pull-in with strongly changing positions and continuous look-at targets.
+
+The first run will use the fixed Quaternius male/female assets, shared-world IK grip constraint and full four-camera Proxy verifier. Seedance remains blocked until this new Proxy receives a real visual approval.
+
+### 4.38 warehouse_loading_maneuver real Proxy experiments / 2026-08-11
+
+This was a new end-to-end prompt experiment. It was intentionally run through the existing Director -> WorldState -> Blender sandbox -> four-camera Proxy -> ProxyVerifier/VLM gate, with `--skip-seedance` so no backend request could hide a structural failure. The four applied camera paths are real and non-static; the camera log records distinct start/end positions for every camera. Example for the final attempt: master `[0,-14,4.5] -> [1,-6.5,3.8]`, lateral `[-11,-3.5,3.5] -> [-4.5,-1.5,3.0]`, reverse `[9,8,5.0] -> [5.2,2.8,3.2]`, elevated `[0,8,9] -> [1.5,1.5,6.0]`.
+
+Immutable run directories and truthful VLM decisions:
+
+| revision | real Proxy bundle | VLM result | API calls | main finding |
+|---|---|---|---:|---|
+| base | `runs/results/warehouse_loading_20260811_proxy/complex_scene_suite_20260810_172812/warehouse_loading_maneuver_20260810_172812/` | `revision_requested` | VLM 1, Seedance 0 | reverse camera entered the counter projection; slip event and action order were unclear |
+| `revision_041` | `runs/results/warehouse_loading_20260811_revision041_proxy/complex_scene_suite_20260810_181031/warehouse_loading_maneuver_20260810_181031/` | `revision_requested` | VLM 1, Seedance 0 | reverse view still counter-dominant; helper lane and slip flight not readable |
+| `revision_042` | `runs/results/warehouse_loading_20260811_revision042_proxy/complex_scene_suite_20260810_181831/warehouse_loading_maneuver_20260810_181831/` | `revision_requested` | VLM 1, Seedance 0 | counter/characters/cart intersections and weak grounding remained |
+| `revision_043` | `runs/results/warehouse_loading_20260811_revision043_proxy/complex_scene_suite_20260810_182225/warehouse_loading_maneuver_20260810_182225/` | `revision_requested` | VLM 1, Seedance 0 | layout and character staging became readable; remaining blocker was the paper representation |
+| `revision_044` | `runs/results/warehouse_loading_20260811_revision044_proxy/complex_scene_suite_20260810_183101/warehouse_loading_maneuver_20260810_183101/` | `revision_requested` | VLM 1, Seedance 0 | thin-sheet attempt became a large rigid/triangular-looking object; paper source/landing still not physically legible |
+
+All five runs produced four real MP4 Proxy files each. Deterministic checks passed for world hash, manifest metadata, entity/frame contracts, authored character/object/camera trajectories, coupling logs, catalog asset materialization, shared-world identity, ffprobe and black-frame checks. The visual gate did not pass, so no Appearance-only backend bundle or Seedance task was created. This is deliberate: the remaining errors are Director/Blender Proxy errors, not final-video prompt errors.
+
+One reproducibility fix was required during the run. Blender's background process could read the Quaternius GLB but could not read the nested male `rig_map.json` runtime file in this environment. The catalog now embeds the verified rig map in `asset_registry.json` and the generated Blender program consumes that hash-bound embedded mapping, retaining the original sidecar for provenance. This avoids a filesystem-runtime false failure without weakening the asset hash checks.
+
+The current next action is not a Seedance call. The paper event needs a dedicated flat-sheet/parent-release implementation (or a simpler new prompt without tiny airborne papers) and one fresh VLM gate. The previous four revisions remain immutable evidence; none was overwritten.
+
+Verification after this worktree change: `tests/test_complex_scene_suite.py` = `85 passed`; `py_compile`, `compileall` and `git diff --check` passed. This is code/regression evidence only and does not override the four real VLM `revision_requested` decisions.
+### 4.21 免费女性资产注册与真实 `asset_humanoid` Proxy / 2026-08-10
+
+用户提供了 `Universal Base Characters[Standard].zip`。压缩包内的 `Superhero_Female_FullBody.gltf`、`.bin` 和纹理已被提取；随包许可证明确为 CC0 1.0。Blender 5.1.2 将 glTF 转换为 `assets/characters/human_female_v1/model.glb`，模型 SHA-256 为 `82d7cc937235d32af6b53bcedf4968f3e20663140c03fe0124ba902b1473c427`，统一 16 骨骼映射全部通过。该模型是风格化 Proxy，不是最终真人资产。
+
+首轮真实渲染目录：
+`runs/results/asset_humanoid_market_20260810_retry2/complex_scene_suite_20260810_142818/indoor_market_exchange_20260810_142818/`
+
+- Blender 四机位 MP4、asset catalog、rig hash、shared-world identity、轨迹/相机日志、ffprobe 和 blackdetect 均通过。
+- Proxy VLM 调用 1 次，结果为 `revision_requested`；问题集中在 vendor 被 counter 遮挡、customer/helper 与 cart 的推行关系不清、纸张 lift/flutter/settle 不可读，以及 elevated/reverse 覆盖不足。
+- Seedance/Kling 调用 0 次，严格遵守 Proxy gate。
+
+首轮还暴露并修复了一个真实代码缺陷：`asset_humanoid` 虽然读取了女性 `rig_map.json`，但手臂/腿动作仍使用 CesiumMan 的旧骨骼名，导致 `applied_angles` 为空并使 Blender 失败。现在生成脚本按每个 catalog asset 的统一映射驱动，并在映射缺失时 fail-closed；回归测试为 `80 passed, 1 skipped`。
+
+该失败证据保留在 `runs/results/asset_humanoid_market_20260810_retry/`，没有覆盖；修复后的下一轮才进入 VLM 审核。
+
+当前结论：免费女性资产已经可用，不能再把所有角色强行标成男性；但 `asset_humanoid` Proxy 仍未通过 VLM，不能提交后端。下一步应新建 revision 修复场景 staging、人物与推车接触和机位可读性，而不是用女性 prompt 掩盖 Proxy 结构问题。
+### 4.22 男女同包模型与圆头问题定位 / 2026-08-10
+
+对 `asset_humanoid_market_20260810_revision029` 的真实单帧检查确认：前景圆头来自旧 `human_male_v1` CesiumMan 探针本身，不是女性 GLB 导入失败，也不是程序化 sphere fallback。为保持男女模型风格一致，已从同一免费 CC0 包转换并注册 `human_male_quaternius_v1`，不覆盖旧 `human_male_v1` 和历史 run；market/customer 及其他 male scene entities 的新 revision 使用新资产。
+
+新男女资产：
+- female: `human_female_v1`, model SHA `82d7cc937235d32af6b53bcedf4968f3e20663140c03fe0124ba902b1473c427`
+- male: `human_male_quaternius_v1`, model SHA `63245034d5877f938a6e74ebb2ac991ee9ca3e11985d04f2fe0b31e14f26ea38`
+- 两者均为同一 Quaternius Standard 包的风格化 humanoid Proxy，16 个统一骨骼映射通过；不应描述为真人或 photoreal 资产。
+
+新真实 Proxy 目录：
+`runs/results/asset_humanoid_market_20260810_quaternius029/complex_scene_suite_20260810_144813/indoor_market_exchange_20260810_144813/`
+
+四机位 deterministic asset/trajectory/media checks 全部通过，Proxy VLM 调用 1 次，结果仍为 `revision_requested`，但反馈已从场景布局问题缩小到两项：customer 的 pause/raise-hand 身份不够明确，以及 customer 与 handcart handle 没有持续可读的接触。纸张事件和四机位覆盖已基本可读。Seedance/Kling 调用 0 次，未越过 Proxy gate。
+### 4.23 资产动作映射修复后的中间回归 / 2026-08-10
+
+`runs/results/asset_humanoid_market_20260810_revision029/complex_scene_suite_20260810_143705/indoor_market_exchange_20260810_143705/` 使用女性 Quaternius GLB、旧 CesiumMan male probe 和 revision_029 staging。真实四机位渲染成功，Proxy VLM 调用 1 次，反馈从场景布局缩小为人物 T-pose/动作阶段、推车接触和纸张 flutter 可读性；Seedance/Kling 为 0。随后将 male 角色切换到同包 Quaternius 模型，结果记录在 4.22。

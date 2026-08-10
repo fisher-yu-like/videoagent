@@ -192,6 +192,62 @@ def _check(checks: list[dict[str, Any]], check_id: str, category: str, status: s
     })
 
 
+def verify_asset_catalog_materialization(*, registry_path: Path | str, asset_log_path: Path | str, proxy_style: str) -> dict[str, Any]:
+    """Verify that every asset_humanoid character consumed its catalog asset."""
+    if proxy_style != "asset_humanoid":
+        return {"check_id": "asset.catalog_materialization", "category": "scene_structure", "status": "skipped", "message": "catalog assets are only required for asset_humanoid", "evidence": {}}
+    registry = _read_json(Path(registry_path), "asset registry")
+    asset_log = _read_json(Path(asset_log_path), "asset log")
+    expected = {
+        str(item.get("asset_id")): item for item in registry.get("assets", [])
+        if isinstance(item, Mapping) and item.get("kind") == "character"
+    } if isinstance(registry, Mapping) else {}
+    rows = [item for item in asset_log if isinstance(item, Mapping)] if isinstance(asset_log, list) else []
+    actual = {str(item.get("asset_id")): item for item in rows if item.get("kind") == "character"}
+    missing = sorted(set(expected) - set(actual))
+    duplicate_ids = len([item for item in rows if item.get("kind") == "character"]) != len(actual)
+    failures = []
+    for entity_id, item in expected.items():
+        observed = actual.get(entity_id, {})
+        if item.get("source_kind") != "asset_catalog_glb":
+            failures.append({"entity_id": entity_id, "error": "registry_source_kind"})
+            continue
+        if observed.get("source_asset_sha256") != item.get("source_asset_sha256") or not observed.get("rig_map_sha256"):
+            failures.append({"entity_id": entity_id, "error": "hash_or_rig_mapping"})
+        if observed.get("shared_world_instance") is not True or int(observed.get("parts", 0)) < 1:
+            failures.append({"entity_id": entity_id, "error": "instance_missing"})
+    passed = bool(expected) and not missing and not duplicate_ids and not failures
+    return {
+        "check_id": "asset.catalog_materialization",
+        "category": "scene_structure",
+        "status": "passed" if passed else "failed",
+        "message": "catalog assets and rig hashes were consumed once" if passed else "catalog asset materialization is incomplete",
+        "evidence": {"expected": sorted(expected), "actual": sorted(actual), "missing": missing, "duplicate_ids": duplicate_ids, "failures": failures},
+    }
+
+
+def verify_shared_world_identity(*, asset_log_path: Path | str, camera_log_path: Path | str, expected_camera_count: int) -> dict[str, Any]:
+    """Ensure every authored camera references the same catalog asset hashes."""
+    asset_log = _read_json(Path(asset_log_path), "asset log")
+    camera_log = _read_json(Path(camera_log_path), "camera log")
+    rows = [item for item in asset_log if isinstance(item, Mapping) and item.get("kind") == "character"] if isinstance(asset_log, list) else []
+    expected_hashes = {str(item.get("catalog_asset_id")): str(item.get("source_asset_sha256")) for item in rows if item.get("catalog_asset_id") and item.get("source_asset_sha256")}
+    cameras = [item for item in camera_log if isinstance(item, Mapping)] if isinstance(camera_log, list) else []
+    mismatches = []
+    for camera in cameras:
+        observed = camera.get("shared_asset_hashes")
+        if observed != expected_hashes:
+            mismatches.append({"camera_id": camera.get("camera_id"), "observed": observed, "expected": expected_hashes})
+    passed = bool(expected_hashes) and len(cameras) == int(expected_camera_count) and not mismatches
+    return {
+        "check_id": "asset.shared_world_identity",
+        "category": "scene_structure",
+        "status": "passed" if passed else "failed",
+        "message": "all cameras reference one shared asset hash set" if passed else "camera asset hash sets differ or are incomplete",
+        "evidence": {"expected_camera_count": expected_camera_count, "actual_camera_count": len(cameras), "expected_hashes": expected_hashes, "mismatches": mismatches},
+    }
+
+
 def _director_plan_check(world: WorldState, plan: Mapping[str, Any], checks: list[dict[str, Any]]) -> None:
     required = {
         "schema_version", "scene_plan", "physical_state_plan",

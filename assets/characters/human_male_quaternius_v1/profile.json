@@ -1,8 +1,8 @@
 {
   "schema_version": "character-asset-profile-1.0",
-  "asset_id": "human_female_v1",
-  "display_name": "Quaternius Universal Base Characters Superhero Female",
-  "gender_label": "female",
+  "asset_id": "human_male_quaternius_v1",
+  "display_name": "Quaternius Universal Base Characters Superhero Male",
+  "gender_label": "male",
   "is_photoreal": false,
   "unit_scale": 1.0,
   "up_axis": "Z",

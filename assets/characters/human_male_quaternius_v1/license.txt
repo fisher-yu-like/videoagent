@@ -1,0 +1,10 @@
+This asset is from the free Universal Base Characters Standard package by Quaternius.
+
+License: CC0 1.0 Universal (Public Domain Dedication)
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Project provenance:
+- Source archive: Universal Base Characters[Standard].zip
+- Source archive SHA-256: fdbf1804c90dfc1ea03e992bff7da2dfd1a79318e13270a660180f9308455f40
+- Selected source: Superhero_Male_FullBody.gltf plus its adjacent .bin/textures
+- Project conversion: Blender glTF import and GLB export; no mesh or animation edits

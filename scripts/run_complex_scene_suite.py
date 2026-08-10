@@ -32,9 +32,10 @@ from pipeline_v2.blender_sandbox import run_blender_sandbox
 from pipeline_v2.appearance_prompt import compile_appearance_prompt
 from pipeline_v2.backend_adapter import prepare_backend_adapter, write_backend_adapter_bundle
 from pipeline_v2.final_video_verifier import aggregate_final_video_reports, verify_final_video, write_final_video_report
-from pipeline_v2.proxy_verifier import verify_proxy
+from pipeline_v2.proxy_verifier import verify_asset_catalog_materialization, verify_proxy, verify_shared_world_identity
 from pipeline_v2.vlm_feedback import request_vlm_feedback
 from pipeline_v2.state import SCHEMA_VERSION, WorldState
+from videoactagent.asset_catalog import AssetCatalogError, AssetSpec, load_catalog
 from videoactagent.backends.jd import (
     build_seedance_reference_video,
     build_seedance_t2v,
@@ -55,6 +56,7 @@ from videoactagent.seedance_upload import (
 
 
 SEEDANCE_SUBMISSION_BUDGET = 3
+PROXY_STYLE_CHOICES = ("clay", "canonical", "storyhuman", "skeleton", "asset_humanoid", "diagnostic")
 SUCCESS_STATUSES = {"success", "succeeded", "completed", "done"}
 FAILURE_STATUSES = {"failed", "failure", "error", "cancelled", "canceled", "expired"}
 FFPROBE = Path(r"D:\ACLOS\Cross\recorder-release\ffprobe.exe")
@@ -67,6 +69,10 @@ def sha256_file(path: Path | str) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def render_style_choices() -> tuple[str, ...]:
+    return PROXY_STYLE_CHOICES
 
 
 def output_dir_for(root: Path | str, scene_id: str, run_id: str) -> Path:
@@ -174,21 +180,31 @@ def coupling_rules_for(spec: Mapping[str, Any]) -> dict[str, str]:
     return rules
 
 
-def asset_registry_for(spec: Mapping[str, Any], proxy_style: str, asset_paths: Mapping[str, str] | None = None) -> dict[str, Any]:
+def asset_registry_for(
+    spec: Mapping[str, Any],
+    proxy_style: str,
+    asset_paths: Mapping[str, str] | None = None,
+    asset_catalog_records: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
     """Create a deterministic sidecar registry without changing WorldState.
 
     The strict pipeline_v2 schema intentionally remains unchanged.  This
     registry is the StoryBlender-inspired source of truth for how an entity is
     materialised in Blender and lets old clay runs coexist with canonical runs.
     """
-    if proxy_style not in {"clay", "canonical", "skeleton", "storyhuman"}:
-        raise ValueError("proxy_style must be clay, canonical, skeleton, or storyhuman")
+    if proxy_style not in PROXY_STYLE_CHOICES:
+        raise ValueError("proxy_style must be one of: " + ", ".join(PROXY_STYLE_CHOICES))
     assets = []
     for entity in spec["entities"]:
         eid = str(entity["id"])
         kind = str(entity["kind"])
         asset_path = (asset_paths or {}).get(eid)
-        if kind == "character" and proxy_style == "canonical" and asset_path:
+        catalog_record = (asset_catalog_records or {}).get(eid, {})
+        if kind == "character" and proxy_style == "asset_humanoid" and asset_path:
+            source_kind = "asset_catalog_glb"
+            dimensions = [0.95, 0.55, 2.55]
+            parts = ["imported_glb", "rigged_armature"]
+        elif kind == "character" and proxy_style == "canonical" and asset_path:
             source_kind = "canonical_glb"
             dimensions = [0.95, 0.55, 2.55]
             parts = ["imported_glb"]
@@ -225,6 +241,11 @@ def asset_registry_for(spec: Mapping[str, Any], proxy_style: str, asset_paths: M
         }
         if asset_path:
             payload["path"] = asset_path
+        if proxy_style == "asset_humanoid" and kind == "character":
+            payload["catalog_asset_id"] = str(entity.get("asset_id", ""))
+            payload["source_asset_sha256"] = str(catalog_record.get("source_sha256", ""))
+            payload["rig_map_sha256"] = str(catalog_record.get("rig_map_sha256", ""))
+            payload["rig_map"] = dict(catalog_record.get("rig_map", {}))
         payload["asset_sha256"] = hashlib.sha256(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
@@ -1321,6 +1342,564 @@ def indoor_market_storyhuman_readability_revision(spec: Mapping[str, Any]) -> di
     return revised
 
 
+def indoor_market_asset_contact_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_030 with a graspable cart handle and role-specific cues.
+
+    This revision is intentionally structural.  The VLM found that the
+    Quaternius customer and the cart were separated in the side views, and
+    that the helper's raised gesture could be confused with the customer's.
+    Keep the authored root paths and event frames, but make the handle a
+    horizontal grip at the customer's hand height and move the helper's cue
+    to the opposite arm.
+    """
+    revised = indoor_market_storyhuman_readability_revision(spec)
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    helper = gestures.pop(("helper", "right_arm"), None)
+    if helper is not None:
+        helper["limb"] = "left_arm"
+        gestures[("helper", "left_arm")] = helper
+    # Rebuild in the original list order with the helper's identity-specific
+    # left-arm cue.  The customer's right-hand cue remains unchanged.
+    revised["gesture_tracks"] = list(gestures.values())
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    # Keep the customer directly behind the horizontal handle and the helper
+    # in the separated rear lane.  These are world-space roots shared by all
+    # four cameras, so the contact is not a per-view annotation.
+    for point in tracks["customer"].get("points", []):
+        point["position"][1] = -1.45
+    for point in tracks["helper"].get("points", []):
+        point["position"][1] = 1.0
+    revised["revision"] = {
+        "id": "revision_030",
+        "parent_revision": "revision_029",
+        "reason": "VLM found the customer separated from the cart and the helper gesture ambiguous; use a horizontal graspable handle at hand height, preserve customer right-hand signal, and move the helper cue to the left arm",
+        "preserved": ["same Quaternius male/female assets", "all root tracks", "cart-box coupling", "K0-K4 frame indices", "four camera responsibilities", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_asset_visual_cleanup_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create immutable revision_031 after the first revision_030 render.
+
+    The world/action contract is inherited unchanged; only the imported
+    asset's role accent and the handle geometry are materialized by the
+    Blender asset branch.
+    """
+    revised = indoor_market_asset_contact_revision(spec)
+    revised["revision"] = {
+        "id": "revision_031",
+        "parent_revision": "revision_030",
+        "reason": "remove the torso marker that hid arm action, retain a small shoulder role accent, and keep the shifted horizontal cart grip aligned with the customer's hand span",
+        "preserved": list(revised["revision"].get("preserved", [])),
+    }
+    return revised
+
+
+def indoor_market_exchange_staging_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_032 with one connected exchange space and tighter views."""
+    revised = indoor_market_asset_visual_cleanup_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    for target_id in ("vendor", "counter"):
+        for point in tracks[target_id].get("points", []):
+            point["position"] = [2.1, 0.9, float(point["position"][2])]
+    paper_landing = {
+        "paper_a": [1.65, 0.55, 0.05],
+        "paper_b": [1.85, 0.65, 0.06],
+    }
+    for target_id, position in paper_landing.items():
+        points = tracks[target_id].get("points", [])
+        if points:
+            points[-1]["position"] = list(position)
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["target"] = "handcart"
+            camera["role"] = "front exchange master keeping the moving customer, horizontal grip, helper and vendor in one connected plane"
+            camera["lens_mm"] = 42.0
+        elif camera_id == "lateral":
+            camera["target"] = "handcart"
+            camera["role"] = "cart-side medium view showing the customer's hand on the grip and the vendor at the end of the path"
+            camera["lens_mm"] = 42.0
+        elif camera_id == "reverse":
+            camera["target"] = "handcart"
+            camera["points"] = [
+                {"frame": frame, "position": [8.0, -6.0, 4.0], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 40.0
+            camera["role"] = "reverse medium exchange view with cart, customer, helper and vendor all inside the authored interaction space"
+        elif camera_id == "elevated":
+            camera["target"] = "handcart"
+            camera["points"] = [
+                {"frame": frame, "position": [1.5, -4.5, 8.0], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 40.0
+            camera["role"] = "tight elevated exchange view preserving the cart, both characters, vendor and paper landing"
+    revised["revision"] = {
+        "id": "revision_032",
+        "parent_revision": "revision_031",
+        "reason": "VLM found the vendor/counter disconnected from the cart and reverse/elevated cameras too wide; stage one connected exchange space, move paper landings beside the counter, and tighten all authored coverage around the cart target",
+        "preserved": ["same Quaternius male/female assets", "customer/helper root tracks", "cart-box coupling", "K0-K4 frame indices", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_action_physics_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_033 with longer action beats and granular paper motion."""
+    revised = indoor_market_exchange_staging_revision(spec)
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("customer", "right_arm")]["points"] = [(0, 0.0), (24, 0.0), (36, 1.25), (84, 1.25), (96, 0.0), (119, 0.0)]
+    gestures[("helper", "left_arm")]["points"] = [(0, 0.0), (48, 0.0), (60, 1.0), (90, 1.0), (102, 0.0), (119, 0.0)]
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    paper_tracks = {
+        "paper_a": [
+            ([-4.0, -0.45, 1.45], [0.0, 0.0, 0.0]),
+            ([-2.8, -0.45, 1.45], [0.0, 0.0, 0.0]),
+            ([-2.0, -0.30, 2.10], [0.45, 0.20, 0.80]),
+            ([0.0, 0.20, 1.15], [-0.60, -0.30, -0.70]),
+            ([1.65, 0.55, 0.05], [0.10, 0.0, 0.25]),
+        ],
+        "paper_b": [
+            ([-3.6, -0.10, 1.50], [0.0, 0.0, 0.0]),
+            ([-2.4, -0.10, 1.50], [0.0, 0.0, 0.0]),
+            ([-1.8, -0.05, 2.30], [-0.35, 0.25, -0.55]),
+            ([0.30, 0.40, 1.20], [0.55, -0.20, 0.65]),
+            ([1.85, 0.65, 0.06], [-0.10, 0.0, -0.25]),
+        ],
+    }
+    for target_id, entries in paper_tracks.items():
+        for point, (position, rotation) in zip(tracks[target_id].get("points", []), entries):
+            point["position"] = list(position)
+            point["rotation"] = list(rotation)
+    for camera in revised.get("cameras", []):
+        if str(camera.get("camera_id")) == "lateral":
+            camera["points"] = [
+                {"frame": frame, "position": [-6.0, -7.0, 3.2], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 44.0
+            camera["role"] = "front-side medium view showing the customer hand, horizontal grip, wheel contact, two boxes and vendor"
+    revised["revision"] = {
+        "id": "revision_033",
+        "parent_revision": "revision_032",
+        "reason": "VLM found short or hidden gesture beats, weak pusher contact, oversized rigid paper planes and an indistinct payload; extend identity-specific gestures, add small rotated flutter arcs, reframe the side camera on the grip, and use two visibly different boxes",
+        "preserved": ["same Quaternius male/female assets", "connected exchange staging", "cart-box coupling", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_identity_grounding_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_034 with stable role clothing and grounded staging."""
+    revised = indoor_market_action_physics_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    # Shorten only the empty approach while preserving the left-to-right order
+    # and all authored event frames, so the vendor is visible from K0 onward.
+    root_x = {
+        "customer": [-3.0, -2.0, -2.0, 0.2, 1.2],
+        "helper": [-3.8, -2.8, -2.8, -0.6, 0.4],
+        "handcart": [-2.8, -1.8, -1.8, 0.4, 1.4],
+        "box_a": [-2.8, -1.8, -1.8, 0.4, 1.4],
+        "box_b": [-2.8, -1.8, -1.8, 0.4, 1.4],
+    }
+    for target_id, xs in root_x.items():
+        for point, x in zip(tracks[target_id].get("points", []), xs):
+            point["position"][0] = float(x)
+    for target_id in ("vendor", "counter"):
+        for point in tracks[target_id].get("points", []):
+            point["position"] = [1.3, 0.1, float(point["position"][2])]
+    paper_positions = {
+        "paper_a": [
+            ([-2.4, -0.45, 1.15], [0.0, 0.0, 0.0]),
+            ([-1.4, -0.45, 1.15], [0.0, 0.0, 0.0]),
+            ([-0.8, -0.30, 1.70], [0.45, 0.20, 0.80]),
+            ([0.4, 0.20, 1.10], [-0.60, -0.30, -0.70]),
+            ([1.35, 0.20, 0.05], [0.10, 0.0, 0.25]),
+        ],
+        "paper_b": [
+            ([-2.0, -0.10, 1.18], [0.0, 0.0, 0.0]),
+            ([-1.0, -0.10, 1.18], [0.0, 0.0, 0.0]),
+            ([-0.6, -0.05, 1.85], [-0.35, 0.25, -0.55]),
+            ([0.6, 0.40, 1.15], [0.55, -0.20, 0.65]),
+            ([1.50, 0.25, 0.06], [-0.10, 0.0, -0.25]),
+        ],
+    }
+    for target_id, entries in paper_positions.items():
+        for point, (position, rotation) in zip(tracks[target_id].get("points", []), entries):
+            point["position"] = list(position)
+            point["rotation"] = list(rotation)
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["points"] = [
+                {"frame": frame, "position": [0.0, -7.0, 3.4], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 32.0
+        elif camera_id == "reverse":
+            camera["points"] = [
+                {"frame": frame, "position": [6.0, -5.0, 3.5], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 36.0
+        elif camera_id == "elevated":
+            camera["points"] = [
+                {"frame": frame, "position": [1.5, -4.0, 7.0], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 36.0
+    revised["revision"] = {
+        "id": "revision_034",
+        "parent_revision": "revision_033",
+        "reason": "VLM found role identity and exchange staging unstable from the opening frame; shorten the empty approach, add role-specific clothing accents, bring vendor/counter into the cart lane, lower the paper lift, and tighten the four authored views while preserving left-to-right motion",
+        "preserved": ["same Quaternius male/female assets", "customer/helper gesture phases", "cart-box coupling", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_helper_settle_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_035 with a visible helper turn and paper landing zone."""
+    revised = indoor_market_identity_grounding_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    helper_points = tracks["helper"].get("points", [])
+    helper_yaw = [0.0, 0.0, 0.0, -0.85, -0.85]
+    for point, yaw in zip(helper_points, helper_yaw):
+        point["rotation"][2] = yaw
+        point["position"][1] = 0.45
+    gestures = {(str(item.get("target_id")), str(item.get("limb"))): item for item in revised.get("gesture_tracks", [])}
+    gestures[("helper", "left_arm")]["points"] = [(0, 0.0), (60, 0.0), (78, 1.15), (96, 1.15), (108, 0.0), (119, 0.0)]
+    landing = {
+        "paper_a": [0.8, 0.75, 0.05],
+        "paper_b": [1.0, 0.85, 0.06],
+    }
+    for target_id, position in landing.items():
+        points = tracks[target_id].get("points", [])
+        if points:
+            points[-1]["position"] = list(position)
+            points[-1]["rotation"] = [0.0, 0.0, 0.35 if target_id == "paper_a" else -0.35]
+    for camera in revised.get("cameras", []):
+        if str(camera.get("camera_id")) == "elevated":
+            camera["points"] = [
+                {"frame": frame, "position": [1.2, -3.5, 6.0], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 42.0
+            camera["role"] = "lower elevated exchange view preserving helper turn and two visible papers settling beside the counter"
+    revised["revision"] = {
+        "id": "revision_035",
+        "parent_revision": "revision_034",
+        "reason": "VLM found the helper gesture open-ended and the paper landing hidden; move helper into a readable middle lane with an explicit turn, shorten the left-arm cue, place both sheets on a visible ground landing zone, and lower the elevated camera",
+        "preserved": ["role-specific clothing accents", "shortened cart approach", "cart-box coupling", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_proxy_cleanup_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_036 after removing a proxy-only head obstruction."""
+    revised = indoor_market_helper_settle_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    landing = {"paper_a": [1.0, -0.35, 0.05], "paper_b": [1.2, -0.45, 0.06]}
+    for target_id, position in landing.items():
+        points = tracks[target_id].get("points", [])
+        if points:
+            points[-1]["position"] = list(position)
+    for camera in revised.get("cameras", []):
+        if str(camera.get("camera_id")) == "elevated":
+            camera["points"] = [
+                {"frame": frame, "position": [1.0, -3.0, 5.2], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 44.0
+            camera["role"] = "lower elevated view with unobstructed heads, cart grip and visible papers settling beside the counter"
+    revised["revision"] = {
+        "id": "revision_036",
+        "parent_revision": "revision_035",
+        "reason": "VLM found colored role blocks covering character heads and the paper landing hidden; remove the proxy-only torso vest blocks, retain only small shoulder accents, place papers in the front ground landing zone, and lower the elevated camera again",
+        "preserved": ["role-specific asset IDs", "customer/helper trajectories and turn", "cart-box coupling", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_push_ik_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_037 using a shared cart-parented customer hand IK target."""
+    revised = indoor_market_proxy_cleanup_revision(spec)
+    revised["revision"] = {
+        "id": "revision_037",
+        "parent_revision": "revision_036",
+        "reason": "VLM repeatedly found the customer beside rather than pushing the cart; bind the imported customer's right forearm with a two-bone IK target parented to the shared handcart while preserving the authored pause/raise/resume trajectory",
+        "preserved": ["head-unobscured proxy", "role shoulder accents", "paper landing zone", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_push_ik_gesture_window_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_038 with IK contact outside the authored raise window."""
+    revised = indoor_market_push_ik_revision(spec)
+    revised["revision"] = {
+        "id": "revision_038",
+        "parent_revision": "revision_037",
+        "reason": "the push IK correctly held the hand on the cart but overrode the pause/raise beat; use an explicit constraint influence window so contact is active during travel and released only during the authored gesture",
+        "preserved": ["shared cart-parented IK target", "head-unobscured proxy", "paper landing zone", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_counter_grounding_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_039 with a grounded, visible vendor counter."""
+    revised = indoor_market_push_ik_gesture_window_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    for target_id in ("vendor", "counter"):
+        for point in tracks[target_id].get("points", []):
+            point["position"] = [0.8, 0.3, 0.0]
+    for camera in revised.get("cameras", []):
+        camera_id = str(camera.get("camera_id"))
+        if camera_id == "master":
+            camera["points"] = [
+                {"frame": frame, "position": [0.0, -6.5, 3.2], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 36.0
+            camera["role"] = "front market exchange view with grounded counter, vendor behind it, pusher and helper all separated"
+        elif camera_id == "reverse":
+            camera["points"] = [
+                {"frame": frame, "position": [5.0, -4.5, 3.2], "rotation": [0.0, 0.0, 0.0]}
+                for frame in (0, 30, 60, 90, 119)
+            ]
+            camera["lens_mm"] = 40.0
+            camera["role"] = "reverse market exchange view preserving counter/vendor sightline and cart travel"
+    revised["revision"] = {
+        "id": "revision_039",
+        "parent_revision": "revision_038",
+        "reason": "VLM found the counter floating as background geometry and the vendor/helper roles obscured; lower vendor and counter roots to the world floor, bring the stall into the cart lane, and refocus master/reverse sightlines on the grounded exchange",
+        "preserved": ["IK contact window", "customer/helper trajectories", "paper landing zone", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def indoor_market_pause_landing_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_040 with a real hold before the resumed push."""
+    revised = indoor_market_counter_grounding_revision(spec)
+    tracks = {str(track.get("target_id")): track for track in revised.get("tracks", [])}
+    # K2 and K3 share one root position: the 36-84 IK release is now a true
+    # pause, and the left-to-right cart resumes only after the hand signal.
+    for target_id in ("customer", "handcart", "box_a", "box_b"):
+        points = tracks[target_id].get("points", [])
+        if len(points) >= 4:
+            points[3]["position"] = list(points[2]["position"])
+    for target_id, position in {"paper_a": [0.6, 0.55, 0.08], "paper_b": [0.9, 0.65, 0.08]}.items():
+        points = tracks[target_id].get("points", [])
+        if points:
+            points[-1]["position"] = list(position)
+            points[-1]["rotation"] = [0.0, 0.0, 0.25 if target_id == "paper_a" else -0.25]
+    revised["revision"] = {
+        "id": "revision_040",
+        "parent_revision": "revision_039",
+        "reason": "VLM found the customer moving through the raised-hand beat and the two papers ending in different visual zones; hold customer/cart/boxes at the exchange pause until K3, resume the push afterward, and place both sheets in one visible counter-side landing zone",
+        "preserved": ["counter/vendor world-floor grounding", "IK influence window", "role shoulder accents", "four camera IDs", "shared world"],
+    }
+    return revised
+
+
+def warehouse_loading_readability_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_041 with an exterior reverse coverage path and readable slip flight.
+
+    The first warehouse Proxy run was physically authored but failed the visual
+    gate: the reverse camera ended inside the counter's projection, and the
+    five sparse slip keyframes made the flutter read as a jump.  This revision
+    changes only those Director-level staging choices; character/object
+    identities, cart coupling, pause timing, and the four-camera contract stay
+    intact.
+    """
+    revised = copy.deepcopy(spec)
+    camera = next(item for item in revised["cameras"] if item["camera_id"] == "reverse")
+    camera["points"] = [
+        {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, 0.0]}
+        for frame, position in zip(
+            (0, 30, 60, 90, 119),
+            ((9.0, 8.0, 5.0), (7.8, 6.0, 4.5), (6.8, 4.6, 4.0), (5.9, 3.6, 3.6), (5.2, 2.8, 3.2)),
+        )
+    ]
+    camera["role"] = "exterior reverse three-quarter coverage of the cart brake, assistant turn and counter handoff"
+    camera["lens_mm"] = 34.0
+    shared_frames = (0, 24, 48, 60, 66, 72, 84, 90, 102, 119)
+
+    def resample(points: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(points, key=lambda item: int(item["frame"]))
+        result = []
+        for frame in shared_frames:
+            if frame <= int(ordered[0]["frame"]):
+                source = ordered[0]
+                result.append({"frame": frame, "position": list(source["position"]), "rotation": list(source.get("rotation", [0.0, 0.0, 0.0]))})
+                continue
+            if frame >= int(ordered[-1]["frame"]):
+                source = ordered[-1]
+                result.append({"frame": frame, "position": list(source["position"]), "rotation": list(source.get("rotation", [0.0, 0.0, 0.0]))})
+                continue
+            for left, right in zip(ordered, ordered[1:]):
+                left_frame = int(left["frame"])
+                right_frame = int(right["frame"])
+                if left_frame <= frame <= right_frame:
+                    alpha = (frame - left_frame) / float(right_frame - left_frame)
+                    position = [float(a) + alpha * (float(b) - float(a)) for a, b in zip(left["position"], right["position"])]
+                    left_rotation = left.get("rotation", [0.0, 0.0, 0.0])
+                    right_rotation = right.get("rotation", [0.0, 0.0, 0.0])
+                    rotation = [float(a) + alpha * (float(b) - float(a)) for a, b in zip(left_rotation, right_rotation)]
+                    result.append({"frame": frame, "position": position, "rotation": rotation})
+                    break
+        return result
+
+    for authored_camera in revised["cameras"]:
+        authored_camera["points"] = resample(authored_camera["points"])
+    tracks = {str(track["target_id"]): track for track in revised["tracks"]}
+    for track in revised["tracks"]:
+        track["points"] = resample(track["points"])
+
+    def point(frame: int, position: tuple[float, float, float], yaw: float = 0.0) -> dict[str, Any]:
+        return {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, yaw]}
+
+    tracks["paper_a"]["points"] = [
+        point(0, (-3.4, -0.45, 1.18)),
+        point(24, (-2.84, -0.45, 1.18)),
+        point(48, (-1.95, -0.45, 1.18)),
+        point(60, (-1.6, -0.45, 1.18)),
+        point(66, (-1.35, -0.40, 1.50), 0.25),
+        point(72, (-1.05, -0.15, 1.78), -0.35),
+        point(84, (-0.45, -0.30, 1.43), 0.45),
+        point(90, (-0.15, -0.05, 1.12), -0.15),
+        point(102, (0.35, 0.25, 0.78), -0.25),
+        point(119, (0.9, 0.5, 0.06), 0.25),
+    ]
+    tracks["paper_b"]["points"] = [
+        point(0, (-3.2, -0.10, 1.20)),
+        point(24, (-2.64, -0.10, 1.20)),
+        point(48, (-1.85, -0.10, 1.20)),
+        point(60, (-1.6, -0.10, 1.20)),
+        point(66, (-1.25, 0.05, 1.58), -0.30),
+        point(72, (-0.90, 0.30, 1.96), 0.40),
+        point(84, (-0.20, 0.05, 1.56), -0.45),
+        point(90, (0.10, 0.20, 1.18), 0.20),
+        point(102, (0.55, 0.38, 0.82), 0.30),
+        point(119, (1.1, 0.6, 0.08), -0.25),
+    ]
+    revised["appearance_prompt"] = str(revised["appearance_prompt"]) + (
+        " The slips must remain visibly attached to the top-box source until the brake release, "
+        "then follow a continuous, irregular, gravity-driven flutter with several visible changes of height and heading before landing."
+    )
+    revised["revision"] = {
+        "id": "revision_041",
+        "parent_revision": None,
+        "reason": "Proxy VLM found the reverse camera occluded by the receiving counter and the sparse packing-slip keyframes unreadable; move the reverse camera along an exterior three-quarter arc and densify the source-connected slip flight without changing the authored pause, coupling, or entity set",
+        "preserved": ["shared world", "four camera IDs", "cart/box coupling", "grounded wheels", "worker pause and signal order", "assistant trajectory"],
+    }
+    return revised
+
+
+def warehouse_loading_coverage_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_042 with cart-targeted reverse coverage and assistant lane separation."""
+    revised = warehouse_loading_readability_revision(spec)
+    reverse = next(item for item in revised["cameras"] if item["camera_id"] == "reverse")
+    reverse["target"] = "handcart"
+    reverse["role"] = "wide exterior reverse three-quarter coverage keeping the cart, worker, assistant and counter in one readable handoff lane"
+    reverse["lens_mm"] = 30.0
+    helper = next(track for track in revised["tracks"] if track["target_id"] == "helper")
+    frames = [int(point["frame"]) for point in helper["points"]]
+    positions = [
+        (-3.25, 0.45, 0.0), (-2.85, 0.42, 0.0), (-2.25, 0.38, 0.0),
+        (-1.85, 0.34, 0.0), (-1.55, 0.30, 0.0), (-1.20, 0.25, 0.0),
+        (-0.65, 0.20, 0.0), (-0.25, 0.15, 0.0), (0.35, 0.05, 0.0), (0.85, 0.0, 0.0),
+    ]
+    rotations = [-0.55, -0.50, -0.45, -0.40, -0.35, -0.30, -0.20, -0.15, -0.10, -0.05]
+    helper["points"] = [
+        {"frame": frame, "position": list(position), "rotation": [0.0, 0.0, rotation]}
+        for frame, position, rotation in zip(frames, positions, rotations)
+    ]
+    revised["gesture_tracks"] = [
+        {"target_id": "customer", "limb": "right_arm", "points": [(0, 0.0), (48, 0.0), (60, 1.1), (84, 1.1), (96, 0.0), (119, 0.0)]},
+        {"target_id": "helper", "limb": "left_arm", "points": [(0, 0.0), (60, 0.0), (78, 0.65), (96, 0.65), (108, 0.0), (119, 0.0)]},
+    ]
+    revised["revision"] = {
+        "id": "revision_042",
+        "parent_revision": "revision_041",
+        "reason": "VLM still found the counter dominant in reverse coverage and the assistant spatially detached; target the reverse camera at the moving cart, widen the lens, move the assistant into a single trailing action lane, and reduce the pointing amplitude while preserving the source-connected slip and brake order",
+        "preserved": ["revision_041 exterior camera path", "shared world", "cart/box coupling", "grounded wheels", "worker pause and signal order", "packing-slip frames"],
+    }
+    return revised
+
+
+def warehouse_loading_physics_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_043 with non-intersecting pusher/vendor staging and wider action coverage."""
+    revised = warehouse_loading_coverage_revision(spec)
+    tracks = {str(track["target_id"]): track for track in revised["tracks"]}
+    cart_x = [float(point["position"][0]) for point in tracks["handcart"]["points"]]
+    customer = tracks["customer"]
+    for point, x in zip(customer["points"], cart_x):
+        point["position"] = [x - 0.9, -0.8, 0.0]
+        point["rotation"] = [0.0, 0.0, 0.1 if x > -2.0 else 0.0]
+    vendor = tracks["vendor"]
+    for point in vendor["points"]:
+        point["position"] = [1.8, 1.8, 0.0]
+        point["rotation"] = [0.0, 0.0, 3.14]
+
+    def widen(camera_id: str, anchors: tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]], lens: float, role: str) -> None:
+        camera = next(item for item in revised["cameras"] if item["camera_id"] == camera_id)
+        for point in camera["points"]:
+            frame = int(point["frame"])
+            if frame <= 60:
+                alpha = frame / 60.0
+                left, right = anchors[0], anchors[1]
+            else:
+                alpha = (frame - 60) / 59.0
+                left, right = anchors[1], anchors[2]
+            point["position"] = [float(a) + alpha * (float(b) - float(a)) for a, b in zip(left, right)]
+        camera["lens_mm"] = lens
+        camera["role"] = role
+
+    widen("master", ((0.0, -14.0, 4.5), (0.0, -10.0, 4.0), (1.0, -6.5, 3.8)), 32.0, "wide master proving the separated pusher, grounded cart lane, counter and assistant before the brake")
+    widen("lateral", ((-11.0, -3.5, 3.5), (-8.0, -2.5, 3.2), (-4.5, -1.5, 3.0)), 34.0, "cart-side tracking view keeping the pusher behind the horizontal grip and both boxes on the wheel line")
+    widen("elevated", ((0.0, 8.0, 9.0), (1.0, 5.0, 7.5), (1.5, 1.5, 6.0)), 30.0, "lower diagonal crane view proving the cart lane, trailing assistant, receiving counter and slip landing")
+    revised["appearance_prompt"] = str(revised["appearance_prompt"]) + (
+        " Keep the worker's torso behind the cart handle with one hand visibly gripping it; keep the supervisor behind the receiving table, "
+        "and show the assistant as a separate trailing person rather than intersecting the cart or boxes."
+    )
+    revised["revision"] = {
+        "id": "revision_043",
+        "parent_revision": "revision_042",
+        "reason": "VLM found character-cart intersections, an isolated receiving table, weak wheel grounding and over-tight master/lateral/elevated coverage; separate the pusher and supervisor in depth and widen the three views at the Director/Proxy layer",
+        "preserved": ["revision_042 cart-targeted reverse", "shared world", "cart/box coupling", "source-connected slip frames", "brake/pause/signal order", "trailing assistant lane"],
+    }
+    return revised
+
+
+def warehouse_loading_paper_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_044 with flat, visibly tilted paper-sheet poses."""
+    revised = warehouse_loading_physics_revision(spec)
+    tracks = {str(track["target_id"]): track for track in revised["tracks"]}
+    paper_a_rotations = [
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+        (0.4, -0.25, 0.25), (-0.65, 0.35, -0.35), (0.75, -0.30, 0.45),
+        (-0.50, 0.25, -0.15), (0.25, -0.15, -0.25), (0.0, 0.0, 0.25),
+    ]
+    paper_b_rotations = [
+        (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0),
+        (-0.45, 0.30, -0.30), (0.70, -0.40, 0.40), (-0.80, 0.25, -0.45),
+        (0.55, -0.20, 0.20), (-0.30, 0.18, 0.30), (0.0, 0.0, -0.25),
+    ]
+    for target_id, rotations in (("paper_a", paper_a_rotations), ("paper_b", paper_b_rotations)):
+        points = tracks[target_id]["points"]
+        for point, rotation in zip(points, rotations):
+            point["rotation"] = list(rotation)
+    revised["appearance_prompt"] = str(revised["appearance_prompt"]) + (
+        " The two packing slips are thin rectangular paper sheets with visible flat faces and changing tilt, not cubes, colored markers, or floating UI dots."
+    )
+    revised["revision"] = {
+        "id": "revision_044",
+        "parent_revision": "revision_043",
+        "reason": "VLM isolated the remaining failure to the packing-slip representation; use larger thin sheet proxies with explicit pitch/roll flutter and keep source, airborne and landing frames unchanged",
+        "preserved": ["revision_043 separated staging", "cart-targeted reverse", "shared world", "cart/box coupling", "brake/pause/signal order", "assistant lane"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
     identity_bible = {}
@@ -1427,6 +2006,34 @@ def copy_canonical_assets(*, spec: Mapping[str, Any], scene_output: Path, asset_
     return copied
 
 
+def materialize_catalog_assets(*, spec: Mapping[str, Any], scene_output: Path) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+    """Materialize every character asset declared by SceneSpec, fail closed."""
+    catalog_path = PROJECT_ROOT / "assets" / "characters" / "catalog.json"
+    catalog = load_catalog(catalog_path, repository_root=PROJECT_ROOT)
+    asset_paths: dict[str, str] = {}
+    records: dict[str, dict[str, Any]] = {}
+    destination_root = scene_output / "assets" / "characters"
+    for entity in spec.get("entities", []):
+        if not isinstance(entity, Mapping) or entity.get("kind") != "character":
+            continue
+        entity_id = str(entity["id"])
+        asset_id = str(entity.get("asset_id", ""))
+        if not asset_id:
+            raise AssetCatalogError(f"character entity has no asset_id: {entity_id}")
+        model_path = catalog.materialize(asset_id, destination_root)
+        asset = catalog.require(asset_id)
+        asset_paths[entity_id] = (Path("assets") / "characters" / asset_id / "model.glb").as_posix()
+        records[entity_id] = {
+            "entity_id": entity_id,
+            "catalog_asset_id": asset_id,
+            "source_sha256": asset.source_sha256,
+            "rig_map_sha256": sha256_file(asset.rig_map_path),
+            "rig_map": json.loads(asset.rig_map_path.read_text(encoding="utf-8")),
+            "materialized_model": str(model_path.relative_to(scene_output).as_posix()),
+        }
+    return asset_paths, records
+
+
 def prepare_appearance_and_adapter(*, scene_output: Path, spec: Mapping[str, Any], world: WorldState, proxy_manifest: Mapping[str, Any]) -> dict[str, Any]:
     """Compile and hash-bind the appearance prompt after Proxy approval."""
     appearance_dir = scene_output / "appearance"
@@ -1469,7 +2076,7 @@ def _blender_script() -> str:
         parser = argparse.ArgumentParser()
         parser.add_argument("--world-state", required=True)
         parser.add_argument("--output-dir", required=True)
-        parser.add_argument("--render-style", default="clay", choices=["clay", "canonical", "storyhuman", "skeleton", "diagnostic"])
+        parser.add_argument("--render-style", default="clay", choices=["clay", "canonical", "storyhuman", "skeleton", "asset_humanoid", "diagnostic"])
         parser.add_argument("--resolution", default="640x360")
         parser.add_argument("--motion-bvh")
         parser.add_argument("--motion-bvh-alt")
@@ -1479,6 +2086,11 @@ def _blender_script() -> str:
         world_state = json.loads(Path(args.world_state).read_text(encoding="utf-8"))
         registry_path = Path(args.world_state).resolve().parent / "asset_registry.json"
         asset_registry = json.loads(registry_path.read_text(encoding="utf-8")) if registry_path.is_file() else {"assets": []}
+        shared_asset_hashes = {
+            str(item.get("catalog_asset_id")): str(item.get("source_asset_sha256"))
+            for item in asset_registry.get("assets", [])
+            if isinstance(item, dict) and item.get("source_kind") == "asset_catalog_glb"
+        }
         gesture_path = Path(args.world_state).resolve().parent / "gesture_tracks.json"
         gesture_tracks = json.loads(gesture_path.read_text(encoding="utf-8")).get("gesture_tracks", []) if gesture_path.is_file() else []
         motion_path = Path(args.world_state).resolve().parent / "motion_tracks.json"
@@ -1620,7 +2232,7 @@ def _blender_script() -> str:
 
         def try_import_canonical_glb(eid, root, registry_asset):
             """Import a supplied GLB once and attach its top-level objects to root."""
-            if not isinstance(registry_asset, dict) or registry_asset.get("source_kind") != "canonical_glb":
+            if not isinstance(registry_asset, dict) or registry_asset.get("source_kind") not in {"canonical_glb", "asset_catalog_glb"}:
                 return False
             raw_path = registry_asset.get("path")
             if not isinstance(raw_path, str):
@@ -1670,8 +2282,11 @@ def _blender_script() -> str:
 
         def add_rigged_role_marker(eid, root):
             """Add a small role-color waist marker without replacing the mesh."""
-            material = role_a if eid.endswith("_a") else role_b if eid.endswith("_b") else role_c
-            parent_local(add_cube(eid + "__role_marker", (0.0, -0.50, 1.55), (0.46, 0.035, 0.08), material, 0.03), root, (0.0, -0.50, 1.55))
+            material = role_b if eid == "customer" else role_a if eid == "helper" else role_c if eid == "vendor" else role_a if eid.endswith("_a") else role_b if eid.endswith("_b") else role_c
+            # Keep a tiny shoulder accent for role readability.  The previous
+            # torso-spanning strip was mistaken for a prop/occluder and hid
+            # the actual arm/hand action from the VLM.
+            parent_local(add_cube(eid + "__role_marker", (0.42, -0.04, 2.15), (0.08, 0.04, 0.08), material, 0.03), root, (0.42, -0.04, 2.15))
 
         def add_canonical_humanoid(eid, root):
             """Materialize one readable articulated human silhouette.
@@ -1866,6 +2481,7 @@ def _blender_script() -> str:
             tracks[track["target_id"]] = track["points"]
         roots, arms, legs, skeleton_parts = {}, {}, {}, {}
         rigged_armatures = {}
+        rigged_bone_maps = {}
         asset_log = []
         coupling_rules = {}
         entity_ids = {str(entity.get("id")) for entity in scene_plan["entities"]}
@@ -1897,6 +2513,18 @@ def _blender_script() -> str:
             eid, kind = entity["id"], entity["kind"]
             root = roots[eid]
             registry_asset = next((item for item in asset_registry.get("assets", []) if item.get("asset_id") == eid), None)
+            if args.render_style == "asset_humanoid" and kind == "character":
+                embedded_rig_map = (registry_asset or {}).get("rig_map")
+                if isinstance(embedded_rig_map, dict):
+                    rig_map = embedded_rig_map
+                else:
+                    rig_map_path = (Path(args.world_state).resolve().parent / "assets" / "characters" / str((registry_asset or {}).get("catalog_asset_id", "")) / "rig_map.json").resolve()
+                    if not rig_map_path.is_file():
+                        raise RuntimeError("asset_humanoid rig_map.json is missing: " + str(rig_map_path))
+                    rig_map = json.loads(rig_map_path.read_text(encoding="utf-8"))
+                if not isinstance(rig_map.get("unified_to_asset"), dict):
+                    raise RuntimeError("asset_humanoid rig_map.json is invalid")
+                rigged_bone_maps[str(eid)] = dict(rig_map["unified_to_asset"])
             if kind == "character":
                 imported_glb = None if args.render_style == "storyhuman" else try_import_canonical_glb(eid, root, registry_asset)
                 if imported_glb:
@@ -1952,19 +2580,26 @@ def _blender_script() -> str:
                 parent_local(add_cylinder(eid + "__post_r", (2.55, 0, 0.55), 0.04, 1.1, light), root, (2.55, 0, 0.55))
             elif eid == "handcart":
                 parent_local(add_cube(eid + "__base", (0, 0, 0.38), (0.9, 0.55, 0.14), dark), root, (0, 0, 0.38))
-                parent_local(add_cube(eid + "__handle", (0, -0.55, 1.0), (0.08, 0.08, 0.65), light), root, (0, -0.55, 1.0))
+                # A horizontal bar is a visible grip.  The previous vertical
+                # post could not be contacted by the customer's hand and was
+                # read as a floating pole in lateral/reverse views.
+                parent_local(add_cube(eid + "__handle", (-0.35, -0.55, 1.0), (0.75, 0.08, 0.08), light), root, (-0.35, -0.55, 1.0))
                 for wheel_x in (-0.65, 0.65):
-                    wheel = parent_local(add_cylinder(eid + "__wheel" + str(wheel_x), (wheel_x, 0, 0.22), 0.22, 0.12, light), root, (wheel_x, 0, 0.22))
+                    wheel = parent_local(add_cylinder(eid + "__wheel" + str(wheel_x), (wheel_x, 0, 0.30), 0.30, 0.12, light), root, (wheel_x, 0, 0.30))
                     # Blender cylinders are born with their axis on Z.  A
                     # cart wheel must stand on the floor and roll around X;
                     # the old horizontal discs made the cart read as floating.
                     wheel.rotation_euler[0] = math.radians(90.0)
             elif eid.startswith("box_"):
-                parent_local(add_cube(eid + "__body", (0, 0, 0.38), (0.38, 0.38, 0.38), light), root, (0, 0, 0.38))
+                if eid == "box_b":
+                    parent_local(add_cube(eid + "__body", (0, 0, 0.30), (0.28, 0.28, 0.30), dark), root, (0, 0, 0.30))
+                else:
+                    parent_local(add_cube(eid + "__body", (0, 0, 0.38), (0.38, 0.38, 0.38), light), root, (0, 0, 0.38))
             elif eid.startswith("paper_"):
-                parent_local(add_cube(eid + "__sheet", (0, 0, 0), (0.42, 0.30, 0.025), light, 0.01), root, (0, 0, 0))
+                slip_scale = (0.62, 0.42, 0.006) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)
+                parent_local(add_cube(eid + "__sheet", (0, 0, 0), slip_scale, light, 0.01), root, (0, 0, 0))
             elif eid == "counter":
-                if scene_plan["scene_id"] == "indoor_market_exchange":
+                if scene_plan["scene_id"] in {"indoor_market_exchange", "warehouse_loading_maneuver"}:
                     # A solid cube was read as a character torso in VLM
                     # frames.  Use a visibly open table silhouette instead.
                     parent_local(add_cube(eid + "__top", (0, 0, 1.25), (1.05, 0.48, 0.12), dark, 0.05), root, (0, 0, 1.25))
@@ -1981,7 +2616,7 @@ def _blender_script() -> str:
             points = tracks.get(eid)
             if points is None:
                 raise RuntimeError("missing authored track for " + eid)
-            asset_log.append({"asset_id": eid, "kind": kind, "source_kind": (registry_asset or {}).get("source_kind", "unknown"), "parts": len([obj for obj in bpy.context.scene.objects if obj.name.startswith(eid + "__")]), "shared_world_instance": True})
+            asset_log.append({"asset_id": eid, "kind": kind, "source_kind": (registry_asset or {}).get("source_kind", "unknown"), "catalog_asset_id": (registry_asset or {}).get("catalog_asset_id"), "source_asset_sha256": (registry_asset or {}).get("source_asset_sha256"), "rig_map_sha256": (registry_asset or {}).get("rig_map_sha256"), "parts": len([obj for obj in bpy.context.scene.objects if obj.name.startswith(eid + "__")]), "shared_world_instance": True})
             for frame in range(frame_count):
                 pos, rot = interp(points, frame)
                 root.rotation_mode = "XYZ"
@@ -1998,6 +2633,47 @@ def _blender_script() -> str:
                     root.rotation_euler = rot
                 root.keyframe_insert(data_path="location", frame=frame)
                 root.keyframe_insert(data_path="rotation_euler", frame=frame)
+
+        # Bind the catalog customer's right hand to the moving handcart with
+        # a real two-bone IK constraint.  A static authored joint-angle track
+        # can look numerically correct while leaving the hand beside the grip;
+        # this shared target follows the cart root in every camera.
+        push_ik_log = []
+        if args.render_style == "asset_humanoid" and "customer" in rigged_armatures and "customer" in roots and "handcart" in roots:
+            grip_target = bpy.data.objects.new("customer__push_grip_target", None)
+            bpy.context.collection.objects.link(grip_target)
+            grip_target.parent = roots["handcart"]
+            grip_target.location = (-0.65, -0.55, 1.05)
+            grip_target.empty_display_type = "SPHERE"
+            grip_target.empty_display_size = 0.05
+            grip_target.hide_render = True
+            grip_pole = bpy.data.objects.new("customer__push_grip_pole", None)
+            bpy.context.collection.objects.link(grip_pole)
+            grip_pole.parent = roots["customer"]
+            grip_pole.location = (0.0, 0.80, 1.70)
+            grip_pole.empty_display_type = "CUBE"
+            grip_pole.empty_display_size = 0.05
+            grip_pole.hide_render = True
+            customer_armature = rigged_armatures["customer"]
+            customer_map = rigged_bone_maps.get("customer", {})
+            lowerarm_name = customer_map.get("lower_arm.R") or customer_map.get("forearm.R")
+            if not lowerarm_name:
+                raise RuntimeError("customer push IK mapping has no lower_arm.R/forearm.R")
+            lowerarm = customer_armature.pose.bones.get(lowerarm_name)
+            if lowerarm is None:
+                raise RuntimeError("customer push IK target bone is missing: " + str(lowerarm_name))
+            constraint = lowerarm.constraints.new("IK")
+            constraint.name = "customer__push_grip_ik"
+            constraint.target = grip_target
+            constraint.pole_target = grip_pole
+            constraint.chain_count = 2
+            constraint.use_stretch = False
+            # Let the authored pause/raise gesture interrupt the push only in
+            # its explicit event window; contact is restored before and after.
+            for frame, influence in ((0, 1.0), (30, 1.0), (36, 0.0), (84, 0.0), (96, 1.0), (119, 1.0)):
+                constraint.influence = influence
+                constraint.keyframe_insert(data_path="influence", frame=frame)
+            push_ik_log.append({"target_id": "customer", "limb": "right_arm", "target": grip_target.name, "pole": grip_pole.name, "bone": lowerarm_name, "chain_count": 2, "parent_entity": "handcart", "shared_world": True})
 
         # Optional real-motion branch.  The BVH armatures are hidden source
         # rigs; only their local rotations are retargeted onto the lead
@@ -2150,6 +2826,30 @@ def _blender_script() -> str:
                 raise RuntimeError("BVH retarget mapped no CesiumMan leg bones")
             scene.frame_set(0)
 
+        # Rigged catalog assets often import in a T-pose.  Materialize a
+        # deterministic arms-down rest pose for every frame before applying
+        # authored gesture deltas; otherwise characters without a left-arm
+        # gesture remain in T-pose and the action is not visually readable.
+        for target_id, rigged in rigged_armatures.items():
+            bone_map = rigged_bone_maps.get(str(target_id), {})
+            arm_bones = {
+                "left_arm": (bone_map.get("upper_arm.L"), bone_map.get("forearm.L")),
+                "right_arm": (bone_map.get("upper_arm.R"), bone_map.get("forearm.R")),
+            }
+            for limb, (upper_name, forearm_name) in arm_bones.items():
+                upper = rigged.pose.bones.get(upper_name) if upper_name else None
+                forearm = rigged.pose.bones.get(forearm_name) if forearm_name else None
+                if upper is None or forearm is None:
+                    raise RuntimeError(f"rigged asset rest pose mapping did not resolve {target_id}:{limb}")
+                base_angle = -0.85 if limb == "left_arm" else 0.85
+                for frame in range(frame_count):
+                    upper.rotation_mode = "XYZ"
+                    forearm.rotation_mode = "XYZ"
+                    upper.rotation_euler = (0.0, 0.0, base_angle)
+                    forearm.rotation_euler = (0.0, 0.0, 0.0)
+                    upper.keyframe_insert(data_path="rotation_euler", frame=frame)
+                    forearm.keyframe_insert(data_path="rotation_euler", frame=frame)
+
         arm_pose_log = []
         for gesture in gesture_tracks:
             arm = arms.get((gesture["target_id"], gesture["limb"]))
@@ -2187,17 +2887,26 @@ def _blender_script() -> str:
                     arm.keyframe_insert(data_path="rotation_euler", frame=frame)
                     arm.keyframe_insert(data_path="location", frame=frame)
                 else:
+                    bone_map = rigged_bone_maps.get(str(gesture["target_id"]))
                     rigged_bone_names = {
                         "left_arm": ("Skeleton_arm_joint_L__4_", "Skeleton_arm_joint_L__3_"),
                         "right_arm": ("Skeleton_arm_joint_R", "Skeleton_arm_joint_R__2_"),
                     }
+                    if bone_map:
+                        rigged_bone_names = {
+                            "left_arm": (bone_map.get("upper_arm.L"), bone_map.get("forearm.L")),
+                            "right_arm": (bone_map.get("upper_arm.R"), bone_map.get("forearm.R")),
+                        }
                     pose_bones = [rigged.pose.bones.get(name) for name in rigged_bone_names.get(gesture["limb"], ())]
                     pose_bones = [pose_bone for pose_bone in pose_bones if pose_bone is not None]
                     if not pose_bones:
-                        continue
+                        raise RuntimeError(f"rigged asset bone mapping did not resolve {gesture['target_id']}:{gesture['limb']}")
                     for bone_index, pose_bone in enumerate(pose_bones):
                         pose_bone.rotation_mode = "XYZ"
-                        pose_bone.rotation_euler[0] = float(angle) * (1.0 if bone_index == 0 else 0.65)
+                        base_angle = -0.85 if gesture["limb"] == "left_arm" else 0.85
+                        direction = 1.0 if gesture["limb"] == "left_arm" else -1.0
+                        pose_angle = base_angle + direction * float(angle) if bone_index == 0 else direction * float(angle) * 0.35
+                        pose_bone.rotation_euler[2] = pose_angle
                         pose_bone.keyframe_insert(data_path="rotation_euler", frame=frame)
                 applied_angles.append(float(angle))
             shoulder_x = 0.44 if gesture["limb"] == "left_arm" else -0.44
@@ -2243,10 +2952,16 @@ def _blender_script() -> str:
                         for part in parts.values():
                             part.keyframe_insert(data_path="rotation_euler", frame=frame)
                     else:
+                        bone_map = rigged_bone_maps.get(target_id)
                         rigged_bone_names = {
                             "left_leg": "leg_joint_L_1",
                             "right_leg": "leg_joint_R_1",
                         }
+                        if bone_map:
+                            rigged_bone_names = {
+                                "left_leg": bone_map.get("upper_leg.L"),
+                                "right_leg": bone_map.get("upper_leg.R"),
+                            }
                         pose_bone = rigged.pose.bones.get(rigged_bone_names.get(limb_name, ""))
                         if pose_bone is not None:
                             pose_bone.rotation_mode = "XYZ"
@@ -2344,7 +3059,7 @@ def _blender_script() -> str:
                 applied.append({"frame": frame, "position": [float(x) for x in cam.location], "rotation": [float(x) for x in cam.rotation_euler]})
                 cam.keyframe_insert(data_path="location", frame=frame)
                 cam.keyframe_insert(data_path="rotation_euler", frame=frame)
-            camera_logs.append({"camera_id": cid, "target_id": camera_plan["target"]["object_id"], "authored": authored, "applied": applied})
+            camera_logs.append({"camera_id": cid, "target_id": camera_plan["target"]["object_id"], "shared_asset_hashes": shared_asset_hashes, "authored": authored, "applied": applied})
             scene.camera = cam
             filename = cid + ".mp4"
             scene.render.filepath = str(out / filename)
@@ -2379,6 +3094,7 @@ def _blender_script() -> str:
         (out / "asset_log.json").write_text(json.dumps(asset_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "motion_log.json").write_text(json.dumps(motion_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "arm_pose_log.json").write_text(json.dumps(arm_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        (out / "push_ik_log.json").write_text(json.dumps(push_ik_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "skeleton_pose_log.json").write_text(json.dumps(skeleton_pose_log, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         (out / "render_manifest.json").write_text(json.dumps({"schema_version": "pipeline-v2-render-manifest-1.0", "world_state_hash": world_hash, "proxy_style": args.render_style, "asset_registry": str(registry_path.name) if registry_path.is_file() else None, "couplings": coupling_rules, "frame_count": frame_count, "fps": fps, "resolution": [width, height], "motion_sources": bvh_metadata, "videos": videos}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         bpy.context.scene.camera = bpy.data.objects[world_state["camera_trajectory_plan"]["cameras"][0]["id"]]
@@ -2608,12 +3324,16 @@ def verify_asset_materialization(*, registry_path: Path, asset_log_path: Path, p
     missing = sorted(set(expected) - set(actual))
     duplicate_ids = len(asset_log) != len(actual)
     canonical_failures = []
-    if proxy_style in {"canonical", "skeleton", "storyhuman"}:
+    if proxy_style in {"canonical", "skeleton", "storyhuman", "asset_humanoid"}:
         for asset_id, item in expected.items():
             if item.get("kind") == "character":
                 observed = actual.get(asset_id, {})
-                required_parts = 1 if item.get("source_kind") == "canonical_glb" else 12
-                if observed.get("source_kind") != item.get("source_kind") or int(observed.get("parts", 0)) < required_parts:
+                required_parts = 1 if item.get("source_kind") in {"canonical_glb", "asset_catalog_glb"} else 12
+                source_ok = observed.get("source_kind") == item.get("source_kind")
+                catalog_hash_ok = True
+                if item.get("source_kind") == "asset_catalog_glb":
+                    catalog_hash_ok = observed.get("source_asset_sha256") == item.get("source_asset_sha256") and bool(observed.get("rig_map_sha256"))
+                if not source_ok or not catalog_hash_ok or int(observed.get("parts", 0)) < required_parts:
                     canonical_failures.append(asset_id)
     passed = not missing and not duplicate_ids and not canonical_failures
     return {
@@ -2813,9 +3533,18 @@ def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, mode
     world = compile_scene_world(spec)
     world_path = scene_output / "world_state.json"
     _write_json(world_path, world.to_dict())
-    copied_assets = copy_canonical_assets(spec=spec, scene_output=scene_output, asset_dir=asset_dir)
+    catalog_records: dict[str, dict[str, Any]] = {}
+    try:
+        if proxy_style == "asset_humanoid":
+            copied_assets, catalog_records = materialize_catalog_assets(spec=spec, scene_output=scene_output)
+        else:
+            copied_assets = copy_canonical_assets(spec=spec, scene_output=scene_output, asset_dir=asset_dir)
+    except AssetCatalogError as exc:
+        failure = {"scene_id": spec["scene_id"], "status": "asset_missing", "stage": "asset_catalog", "error": str(exc), "scene_output": str(scene_output), "api_calls": {"submit": 0, "query": 0, "download": 0}}
+        _write_json(scene_output / "failure.json", failure)
+        return failure
     asset_registry_path = scene_output / "asset_registry.json"
-    _write_json(asset_registry_path, asset_registry_for(spec, proxy_style, copied_assets))
+    _write_json(asset_registry_path, asset_registry_for(spec, proxy_style, copied_assets, catalog_records))
     layout_path = scene_output / "scene_layout.json"
     _write_json(layout_path, scene_layout_for(spec))
     planner_path = scene_output / "physical_state_planner.json"
@@ -2845,6 +3574,14 @@ def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, mode
         asset_check = verify_asset_materialization(registry_path=asset_registry_path, asset_log_path=sandbox_dir / "asset_log.json", proxy_style=proxy_style)
         verifier.setdefault("checks", []).append(asset_check)
         if asset_check["status"] == "failed":
+            verifier["verdict"] = "fail"
+        catalog_check = verify_asset_catalog_materialization(registry_path=asset_registry_path, asset_log_path=sandbox_dir / "asset_log.json", proxy_style=proxy_style)
+        verifier.setdefault("checks", []).append(catalog_check)
+        if catalog_check["status"] == "failed":
+            verifier["verdict"] = "fail"
+        shared_identity_check = verify_shared_world_identity(asset_log_path=sandbox_dir / "asset_log.json", camera_log_path=sandbox_dir / "camera_log.json", expected_camera_count=world.camera_count) if proxy_style == "asset_humanoid" else {"check_id": "asset.shared_world_identity", "category": "scene_structure", "status": "skipped", "message": "shared catalog identity is only required for asset_humanoid", "evidence": {}}
+        verifier.setdefault("checks", []).append(shared_identity_check)
+        if shared_identity_check["status"] == "failed":
             verifier["verdict"] = "fail"
         coupling_check = verify_coupling_materialization(spec=spec, coupling_log_path=sandbox_dir / "coupling_log.json", frame_count=world.frame_count)
         verifier.setdefault("checks", []).append(coupling_check)
@@ -2958,7 +3695,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=PROJECT_ROOT / "runs" / "results")
     parser.add_argument("--blender", type=Path, default=Path(r"D:\blender\blender.exe"))
     parser.add_argument("--model", default="Doubao-Seedance-2.0")
-    parser.add_argument("--proxy-style", choices=["clay", "canonical", "storyhuman", "skeleton"], default="clay")
+    parser.add_argument("--proxy-style", choices=render_style_choices(), default="clay")
     parser.add_argument("--asset-dir", type=Path, help="optional directory containing <entity_id>.glb canonical assets")
     parser.add_argument("--readability-revision", action="store_true", help="apply the next Director revision requested by VLM; preserves target identities/roles and entity action order while widening coverage")
     parser.add_argument("--storyblender-revision", action="store_true", help="apply Stage-A StoryBlender-style camera/layout reflection without changing authored entity or gesture tracks")
@@ -2985,6 +3722,21 @@ def main() -> int:
     parser.add_argument("--indoor-market-event-revision", action="store_true", help="apply revision_027 with explicit vendor/pause/gesture/flutter beats")
     parser.add_argument("--indoor-market-storyhuman-revision", action="store_true", help="apply revision_028 with rounded-human staging and grounded cart contact")
     parser.add_argument("--indoor-market-storyhuman-readability-revision", action="store_true", help="apply revision_029 with separated helper lane and explicit paper landing")
+    parser.add_argument("--indoor-market-asset-contact-revision", action="store_true", help="apply revision_030 with a graspable horizontal cart handle and identity-specific helper gesture")
+    parser.add_argument("--indoor-market-asset-visual-cleanup-revision", action="store_true", help="apply revision_031 with a small role accent and shifted cart grip")
+    parser.add_argument("--indoor-market-exchange-staging-revision", action="store_true", help="apply revision_032 with connected market staging and tighter camera coverage")
+    parser.add_argument("--indoor-market-action-physics-revision", action="store_true", help="apply revision_033 with readable gesture beats, fluttering papers and distinct boxes")
+    parser.add_argument("--indoor-market-identity-grounding-revision", action="store_true", help="apply revision_034 with stable role clothing and grounded exchange staging")
+    parser.add_argument("--indoor-market-helper-settle-revision", action="store_true", help="apply revision_035 with a readable helper turn and visible paper landing")
+    parser.add_argument("--indoor-market-proxy-cleanup-revision", action="store_true", help="apply revision_036 without head-obscuring proxy blocks")
+    parser.add_argument("--indoor-market-push-ik-revision", action="store_true", help="apply revision_037 with a shared cart-parented customer hand IK target")
+    parser.add_argument("--indoor-market-push-ik-gesture-window-revision", action="store_true", help="apply revision_038 with IK contact outside the authored raise window")
+    parser.add_argument("--indoor-market-counter-grounding-revision", action="store_true", help="apply revision_039 with a grounded vendor counter and refocused exchange views")
+    parser.add_argument("--indoor-market-pause-landing-revision", action="store_true", help="apply revision_040 with a true customer pause and shared paper landing zone")
+    parser.add_argument("--warehouse-loading-readability-revision", action="store_true", help="apply revision_041 with exterior reverse coverage and dense source-connected packing-slip motion")
+    parser.add_argument("--warehouse-loading-coverage-revision", action="store_true", help="apply revision_042 with cart-targeted reverse coverage and a trailing assistant lane")
+    parser.add_argument("--warehouse-loading-physics-revision", action="store_true", help="apply revision_043 with separated pusher/supervisor staging and wider coverage")
+    parser.add_argument("--warehouse-loading-paper-revision", action="store_true", help="apply revision_044 with flat tilted packing-slip proxies")
     parser.add_argument("--motion-bvh", type=Path, help="real BVH clip for the lead motion branch")
     parser.add_argument("--motion-bvh-alt", type=Path, help="optional second real BVH clip concatenated after the first")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
@@ -3049,6 +3801,36 @@ def main() -> int:
         selected = [indoor_market_storyhuman_revision(spec) for spec in selected]
     if args.indoor_market_storyhuman_readability_revision:
         selected = [indoor_market_storyhuman_readability_revision(spec) for spec in selected]
+    if args.indoor_market_asset_contact_revision:
+        selected = [indoor_market_asset_contact_revision(spec) for spec in selected]
+    if args.indoor_market_asset_visual_cleanup_revision:
+        selected = [indoor_market_asset_visual_cleanup_revision(spec) for spec in selected]
+    if args.indoor_market_exchange_staging_revision:
+        selected = [indoor_market_exchange_staging_revision(spec) for spec in selected]
+    if args.indoor_market_action_physics_revision:
+        selected = [indoor_market_action_physics_revision(spec) for spec in selected]
+    if args.indoor_market_identity_grounding_revision:
+        selected = [indoor_market_identity_grounding_revision(spec) for spec in selected]
+    if args.indoor_market_helper_settle_revision:
+        selected = [indoor_market_helper_settle_revision(spec) for spec in selected]
+    if args.indoor_market_proxy_cleanup_revision:
+        selected = [indoor_market_proxy_cleanup_revision(spec) for spec in selected]
+    if args.indoor_market_push_ik_revision:
+        selected = [indoor_market_push_ik_revision(spec) for spec in selected]
+    if args.indoor_market_push_ik_gesture_window_revision:
+        selected = [indoor_market_push_ik_gesture_window_revision(spec) for spec in selected]
+    if args.indoor_market_counter_grounding_revision:
+        selected = [indoor_market_counter_grounding_revision(spec) for spec in selected]
+    if args.indoor_market_pause_landing_revision:
+        selected = [indoor_market_pause_landing_revision(spec) for spec in selected]
+    if args.warehouse_loading_readability_revision:
+        selected = [warehouse_loading_readability_revision(spec) for spec in selected]
+    if args.warehouse_loading_coverage_revision:
+        selected = [warehouse_loading_coverage_revision(spec) for spec in selected]
+    if args.warehouse_loading_physics_revision:
+        selected = [warehouse_loading_physics_revision(spec) for spec in selected]
+    if args.warehouse_loading_paper_revision:
+        selected = [warehouse_loading_paper_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

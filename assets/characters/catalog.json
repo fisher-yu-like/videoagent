@@ -2,6 +2,15 @@
   "schema_version": "character-asset-catalog-1.0",
   "assets": [
     {
+      "asset_id": "human_male_quaternius_v1",
+      "kind": "rigged_humanoid",
+      "model_path": "assets/characters/human_male_quaternius_v1/model.glb",
+      "profile_path": "assets/characters/human_male_quaternius_v1/profile.json",
+      "rig_map_path": "assets/characters/human_male_quaternius_v1/rig_map.json",
+      "license_path": "assets/characters/human_male_quaternius_v1/license.txt",
+      "source_sha256": "63245034d5877f938a6e74ebb2ac991ee9ca3e11985d04f2fe0b31e14f26ea38"
+    },
+    {
       "asset_id": "human_male_v1",
       "kind": "rigged_humanoid",
       "model_path": "assets/canonical_humanoid/CesiumMan.glb",
@@ -17,7 +26,7 @@
       "profile_path": "assets/characters/human_female_v1/profile.json",
       "rig_map_path": "assets/characters/human_female_v1/rig_map.json",
       "license_path": "assets/characters/human_female_v1/license.txt",
-      "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      "source_sha256": "82d7cc937235d32af6b53bcedf4968f3e20663140c03fe0124ba902b1473c427"
     }
   ]
 }

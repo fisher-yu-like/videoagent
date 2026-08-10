@@ -7,7 +7,7 @@ from pathlib import Path
 def test_three_scenes_have_explicit_tracks_and_granular_actions():
     from videoactagent.complex_scene_prompts_v2 import SCENES
 
-    assert len(SCENES) == 3
+    assert len(SCENES) >= 3
     for scene in SCENES:
         assert len(scene["entities"]) >= 5
         assert len(scene["cameras"]) == 4
@@ -19,6 +19,45 @@ def test_three_scenes_have_explicit_tracks_and_granular_actions():
             frames = [point["frame"] for point in points]
             assert frames == sorted(set(frames))
             assert frames[-1] < 120
+
+
+def test_warehouse_loading_prompt_has_causal_physics_and_nontrivial_camera_paths():
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("warehouse_loading_maneuver")
+    assert "braking" in spec["prompt"].lower()
+    assert "wheels" in spec["prompt"].lower()
+    assert "packing slips" in spec["prompt"].lower()
+    assert len(spec["cameras"]) == 4
+    for camera in spec["cameras"]:
+        positions = [tuple(point["position"]) for point in camera["points"]]
+        assert len(set(positions)) >= 4
+        assert any(float(point["position"][1]) != float(positions[0][1]) for point in camera["points"][1:])
+    tracks = {track["target_id"]: track for track in spec["tracks"]}
+    assert tracks["customer"]["points"][2]["position"] == tracks["customer"]["points"][3]["position"]
+    assert tracks["handcart"]["points"][2]["position"] == tracks["handcart"]["points"][3]["position"]
+    assert tracks["paper_a"]["points"][0]["position"][2] > 0.8
+    assert tracks["paper_a"]["points"][-1]["position"][2] < 0.2
+
+
+def test_warehouse_loading_revision_keeps_reverse_camera_outside_counter_and_makes_slips_readable():
+    from scripts.run_complex_scene_suite import warehouse_loading_readability_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_readability_revision(scene_spec("warehouse_loading_maneuver"))
+    assert spec["revision"]["id"] == "revision_041"
+    reverse = next(camera for camera in spec["cameras"] if camera["camera_id"] == "reverse")
+    # The reverse view is a coverage camera, not an interior-counter shot.
+    assert all(point["position"][0] >= 4.0 and point["position"][1] >= 2.5 for point in reverse["points"])
+    tracks = {track["target_id"]: track for track in spec["tracks"]}
+    for paper_id in ("paper_a", "paper_b"):
+        points = tracks[paper_id]["points"]
+        assert len(points) >= 8
+        assert max(point["position"][2] for point in points) > 1.5
+        assert any(point["position"][2] < 0.2 for point in points[-2:])
+    expected_frames = {point["frame"] for point in tracks["paper_a"]["points"]}
+    assert all({point["frame"] for point in track["points"]} == expected_frames for track in tracks.values())
+    assert all({point["frame"] for point in camera["points"]} == expected_frames for camera in spec["cameras"])
 
 
 def test_seedance_prompt_forbids_proxy_geometry_and_preserves_action_order():
@@ -113,6 +152,64 @@ def test_generated_blender_script_has_canonical_branch_and_preserves_camera_log(
     assert "gesture_tracks.json" in script
     assert 'add_cube("backdrop", (0, 12.0, 3.0)' in script
     assert 'camera_logs.append' in script
+
+
+def test_warehouse_proxy_uses_larger_visible_packing_slip_geometry():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'scene_plan["scene_id"] == "warehouse_loading_maneuver"' in script
+    assert '(0.62, 0.42, 0.006)' in script
+
+
+def test_asset_humanoid_embeds_rig_map_for_blender_runtime_access():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'registry_asset or {}).get("rig_map")' in script
+    assert 'embedded_rig_map' in script
+
+
+def test_warehouse_counter_proxy_is_open_table_not_occluding_solid_block():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'scene_plan["scene_id"] in {"indoor_market_exchange", "warehouse_loading_maneuver"}' in script
+
+
+def test_warehouse_coverage_revision_targets_cart_and_keeps_assistant_in_action_lane():
+    from scripts.run_complex_scene_suite import warehouse_loading_coverage_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_coverage_revision(scene_spec("warehouse_loading_maneuver"))
+    assert spec["revision"]["id"] == "revision_042"
+    reverse = next(camera for camera in spec["cameras"] if camera["camera_id"] == "reverse")
+    assert reverse["target"] == "handcart"
+    helper = next(track for track in spec["tracks"] if track["target_id"] == "helper")
+    assert all(-0.1 <= point["position"][1] <= 0.5 for point in helper["points"])
+
+
+def test_warehouse_physics_revision_separates_pusher_from_cart_and_vendor_from_counter():
+    from scripts.run_complex_scene_suite import warehouse_loading_physics_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_physics_revision(scene_spec("warehouse_loading_maneuver"))
+    assert spec["revision"]["id"] == "revision_043"
+    tracks = {track["target_id"]: track for track in spec["tracks"]}
+    for customer_point, cart_point in zip(tracks["customer"]["points"], tracks["handcart"]["points"]):
+        assert float(cart_point["position"][0]) - float(customer_point["position"][0]) >= 0.75
+    assert all(float(point["position"][1]) >= 1.6 for point in tracks["vendor"]["points"])
+
+
+def test_warehouse_paper_revision_uses_tilted_flat_slip_poses():
+    from scripts.run_complex_scene_suite import warehouse_loading_paper_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_paper_revision(scene_spec("warehouse_loading_maneuver"))
+    assert spec["revision"]["id"] == "revision_044"
+    tracks = {track["target_id"]: track for track in spec["tracks"]}
+    assert any(abs(float(point["rotation"][0])) > 0.2 or abs(float(point["rotation"][1])) > 0.2 for point in tracks["paper_a"]["points"])
+    assert any(abs(float(point["rotation"][0])) > 0.2 or abs(float(point["rotation"][1])) > 0.2 for point in tracks["paper_b"]["points"])
 
 
 def test_canonical_motion_profile_contains_leg_tracks_and_foot_contacts():
@@ -224,7 +321,7 @@ def test_generated_blender_script_contains_isolated_skeleton_branch():
     from scripts.run_complex_scene_suite import _blender_script
 
     script = _blender_script()
-    assert 'choices=["clay", "canonical", "storyhuman", "skeleton", "diagnostic"]' in script
+    assert 'choices=["clay", "canonical", "storyhuman", "skeleton", "asset_humanoid", "diagnostic"]' in script
     assert "skeleton_motion.json" in script
     assert "procedural_skeleton_v1" in script
     assert "skeleton_pose_log.json" in script
@@ -713,6 +810,186 @@ def test_storyhuman_market_readability_revision_separates_helper_and_paper_landi
     assert tracks["paper_b"]["points"][-1]["position"][:2] == [2.9, 1.4]
 
 
+def test_indoor_market_asset_contact_revision_makes_push_and_identity_beats_explicit():
+    from scripts.run_complex_scene_suite import indoor_market_asset_contact_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_asset_contact_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_030"
+    assert revised["revision"]["parent_revision"] == "revision_029"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(float(point["position"][1]) <= -1.3 for point in tracks["customer"]["points"])
+    assert all(float(point["position"][1]) >= 0.7 for point in tracks["helper"]["points"])
+    gestures = {(item["target_id"], item["limb"]): item for item in revised["gesture_tracks"]}
+    assert ("helper", "left_arm") in gestures
+    assert ("helper", "right_arm") not in gestures
+
+
+def test_asset_humanoid_cart_handle_is_horizontal_for_grip_contact():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'eid + "__handle", (-0.35, -0.55, 1.0), (0.75, 0.08, 0.08)' in script
+
+
+def test_asset_humanoid_role_marker_is_small_and_does_not_cross_torso():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert 'add_cube(eid + "__role_marker", (0.42, -0.04, 2.15), (0.08, 0.04, 0.08)' in script
+    assert '(0.0, -0.50, 1.55), (0.46, 0.035, 0.08)' not in script
+
+
+def test_indoor_market_asset_visual_cleanup_is_new_revision():
+    from scripts.run_complex_scene_suite import indoor_market_asset_visual_cleanup_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_asset_visual_cleanup_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_031"
+    assert revised["revision"]["parent_revision"] == "revision_030"
+    assert "torso marker" in revised["revision"]["reason"]
+
+
+def test_indoor_market_exchange_staging_revision_connects_vendor_and_camera_coverage():
+    from scripts.run_complex_scene_suite import indoor_market_exchange_staging_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_exchange_staging_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_032"
+    assert revised["revision"]["parent_revision"] == "revision_031"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert tracks["vendor"]["points"][0]["position"][:2] == [2.1, 0.9]
+    assert tracks["counter"]["points"][0]["position"][:2] == [2.1, 0.9]
+    cameras = {item["camera_id"]: item for item in revised["cameras"]}
+    assert cameras["master"]["target"] == "handcart"
+    assert cameras["reverse"]["target"] == "handcart"
+    assert cameras["elevated"]["points"][0]["position"][2] <= 9.0
+
+
+def test_indoor_market_action_physics_revision_expands_beats_and_paper_flutter():
+    from scripts.run_complex_scene_suite import indoor_market_action_physics_revision, _blender_script
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_action_physics_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_033"
+    assert revised["revision"]["parent_revision"] == "revision_032"
+    gestures = {(item["target_id"], item["limb"]): item for item in revised["gesture_tracks"]}
+    assert (84, 1.25) in gestures[("customer", "right_arm")]["points"]
+    assert (90, 1.0) in gestures[("helper", "left_arm")]["points"]
+    papers = {item["target_id"]: item for item in revised["tracks"]}
+    assert any(any(abs(float(value)) > 0.1 for value in point["rotation"]) for point in papers["paper_a"]["points"])
+    script = _blender_script()
+    assert 'eid + "__body", (0, 0, 0.30), (0.28, 0.28, 0.30)' in script
+    assert 'slip_scale = (0.62, 0.42, 0.006) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)' in script
+
+
+def test_indoor_market_identity_grounding_revision_adds_role_clothing_and_source_contact():
+    from scripts.run_complex_scene_suite import indoor_market_identity_grounding_revision, _blender_script
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_identity_grounding_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_034"
+    assert revised["revision"]["parent_revision"] == "revision_033"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert tracks["vendor"]["points"][0]["position"][:2] == [1.3, 0.1]
+    assert tracks["counter"]["points"][0]["position"][:2] == [1.3, 0.1]
+    assert tracks["paper_a"]["points"][0]["position"][2] <= 1.2
+    cameras = {item["camera_id"]: item for item in revised["cameras"]}
+    assert cameras["master"]["lens_mm"] <= 34.0
+    script = _blender_script()
+    # The later head-obstruction fix removes torso clothing blocks; identity
+    # is retained by asset IDs and small shoulder accents instead.
+    assert 'eid + "__role_vest"' not in script
+    assert 'eid + "__wheel" + str(wheel_x), (wheel_x, 0, 0.30)' in script
+
+
+def test_indoor_market_helper_settle_revision_makes_helper_turn_and_paper_land_visible():
+    from scripts.run_complex_scene_suite import indoor_market_helper_settle_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_helper_settle_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_035"
+    assert revised["revision"]["parent_revision"] == "revision_034"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    helper_rotations = [float(point["rotation"][2]) for point in tracks["helper"]["points"]]
+    assert max(abs(value) for value in helper_rotations) >= 0.7
+    assert tracks["paper_a"]["points"][-1]["position"][:2] == [0.8, 0.75]
+    cameras = {item["camera_id"]: item for item in revised["cameras"]}
+    assert cameras["elevated"]["points"][0]["position"][2] <= 6.5
+
+
+def test_indoor_market_proxy_cleanup_removes_head_obscuring_role_blocks():
+    from scripts.run_complex_scene_suite import indoor_market_proxy_cleanup_revision, _blender_script
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_proxy_cleanup_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_036"
+    assert revised["revision"]["parent_revision"] == "revision_035"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert tracks["paper_a"]["points"][-1]["position"][:2] == [1.0, -0.35]
+    assert tracks["paper_b"]["points"][-1]["position"][:2] == [1.2, -0.45]
+    script = _blender_script()
+    assert 'eid + "__role_vest"' not in script
+
+
+def test_asset_humanoid_push_ik_binds_customer_hand_to_shared_cart_target():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert "push_grip_target" in script
+    assert "push_grip_pole" in script
+    assert "chain_count = 2" in script
+    assert "push_ik_log.json" in script
+    assert 'customer__push_grip_ik' in script
+    assert 'keyframe_insert(data_path="influence"' in script
+
+
+def test_indoor_market_push_ik_revision_is_immutable_and_declares_contact_contract():
+    from scripts.run_complex_scene_suite import indoor_market_push_ik_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_push_ik_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_037"
+    assert revised["revision"]["parent_revision"] == "revision_036"
+    assert "IK" in revised["revision"]["reason"]
+
+
+def test_indoor_market_push_ik_gesture_window_revision_restores_pause_raise_beat():
+    from scripts.run_complex_scene_suite import indoor_market_push_ik_gesture_window_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_push_ik_gesture_window_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_038"
+    assert revised["revision"]["parent_revision"] == "revision_037"
+    assert "influence window" in revised["revision"]["reason"]
+
+
+def test_indoor_market_counter_grounding_revision_lowers_stall_to_world_floor():
+    from scripts.run_complex_scene_suite import indoor_market_counter_grounding_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_counter_grounding_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_039"
+    assert revised["revision"]["parent_revision"] == "revision_038"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert all(float(point["position"][2]) == 0.0 for point in tracks["counter"]["points"])
+    assert all(float(point["position"][2]) == 0.0 for point in tracks["vendor"]["points"])
+
+
+def test_indoor_market_pause_landing_revision_holds_customer_before_resume():
+    from scripts.run_complex_scene_suite import indoor_market_pause_landing_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    revised = indoor_market_pause_landing_revision(scene_spec("indoor_market_exchange"))
+    assert revised["revision"]["id"] == "revision_040"
+    assert revised["revision"]["parent_revision"] == "revision_039"
+    tracks = {item["target_id"]: item for item in revised["tracks"]}
+    assert tracks["customer"]["points"][2]["position"][0] == tracks["customer"]["points"][3]["position"][0]
+    assert tracks["handcart"]["points"][2]["position"][0] == tracks["handcart"]["points"][3]["position"][0]
+    assert tracks["paper_a"]["points"][-1]["position"][:2] == [0.6, 0.55]
+    assert tracks["paper_b"]["points"][-1]["position"][:2] == [0.9, 0.65]
+
+
 def test_seedance_camera_prompt_locks_role_and_entity_coverage():
     from scripts.run_complex_scene_suite import seedance_camera_prompt_for
     from videoactagent.complex_scene_prompts_v2 import scene_spec
@@ -730,7 +1007,7 @@ def test_all_character_entities_have_explicit_asset_ids():
     for spec in iter_scene_specs():
         characters = [entity for entity in spec["entities"] if entity["kind"] == "character"]
         assert characters
-        assert all(entity.get("asset_id") in {"human_male_v1", "human_female_v1"} for entity in characters)
+        assert all(entity.get("asset_id") in {"human_male_v1", "human_male_quaternius_v1", "human_female_v1"} for entity in characters)
 
 
 def test_asset_ids_do_not_change_tracks_or_cameras():
@@ -739,3 +1016,35 @@ def test_asset_ids_do_not_change_tracks_or_cameras():
     spec = scene_spec("indoor_market_exchange")
     assert [track["target_id"] for track in spec["tracks"]]
     assert [camera["camera_id"] for camera in spec["cameras"]] == ["master", "lateral", "reverse", "elevated"]
+
+
+def test_blender_script_contains_asset_humanoid_branch_and_logs():
+    from scripts.run_complex_scene_suite import _blender_script
+
+    script = _blender_script()
+    assert '"asset_humanoid"' in script
+    assert "asset_log.json" in script
+    assert "rig_map.json" in script
+    assert "rigged_bone_maps" in script
+    assert "upper_arm.L" in script
+
+
+def test_existing_proxy_choices_remain_available():
+    from scripts.run_complex_scene_suite import render_style_choices
+
+    assert {"clay", "canonical", "storyhuman", "skeleton", "asset_humanoid"} <= set(render_style_choices())
+
+
+def test_asset_humanoid_registry_preserves_catalog_ids_and_hashes():
+    from scripts.run_complex_scene_suite import asset_registry_for
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = scene_spec("indoor_market_exchange")
+    characters = [entity for entity in spec["entities"] if entity["kind"] == "character"]
+    paths = {entity["id"]: f"assets/characters/{entity['asset_id']}/model.glb" for entity in characters}
+    records = {entity["id"]: {"source_sha256": "a" * 64, "rig_map_sha256": "b" * 64} for entity in characters}
+    registry = asset_registry_for(spec, "asset_humanoid", paths, records)
+    person = next(item for item in registry["assets"] if item["asset_id"] == "vendor")
+    assert person["source_kind"] == "asset_catalog_glb"
+    assert person["catalog_asset_id"] == "human_female_v1"
+    assert person["source_asset_sha256"] == "a" * 64

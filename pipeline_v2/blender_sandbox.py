@@ -27,8 +27,8 @@ def build_blender_command(
     motion_bvh: Path | str | None = None,
     motion_bvh_alt: Path | str | None = None,
 ) -> list[str]:
-    if render_style not in {"clay", "canonical", "skeleton", "storyhuman", "diagnostic"}:
-        raise SandboxError("render_style must be clay, canonical, skeleton, storyhuman, or diagnostic")
+    if render_style not in {"clay", "canonical", "skeleton", "storyhuman", "asset_humanoid", "diagnostic"}:
+        raise SandboxError("render_style must be clay, canonical, skeleton, storyhuman, asset_humanoid, or diagnostic")
     if len(resolution) != 2 or any(type(item) is not int or item <= 0 for item in resolution):
         raise SandboxError("resolution must contain two positive integers")
     command = [
