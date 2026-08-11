@@ -304,16 +304,27 @@ def canonical_motion_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
         moving = total_distance > 0.45
         side_step_lead = target_id == "person_a" and revision_number >= 20
         swing = 0.0 if side_step_lead else (0.34 if moving else 0.16)
-        phase = [0.0, swing, -swing, swing * 0.8, 0.0]
-        left = [{"frame": int(point["frame"]), "angle": float(value)} for point, value in zip(points, phase)]
-        right = [{"frame": int(point["frame"]), "angle": float(-value)} for point, value in zip(points, phase)]
+        # Use every authored root frame.  The old five-sample adapter silently
+        # dropped dense warehouse frames 72-119, leaving both feet airborne at
+        # the pause/end and making a grounded push look like teleportation.
+        def planar_distance(left_point: Mapping[str, Any], right_point: Mapping[str, Any]) -> float:
+            return math.sqrt(sum((float(left_point["position"][axis]) - float(right_point["position"][axis])) ** 2 for axis in range(2)))
+
+        phase_values = []
         contacts = []
         for index, point in enumerate(points):
+            same_prev = index > 0 and planar_distance(points[index - 1], point) < 1e-6
+            same_next = index + 1 < len(points) and planar_distance(point, points[index + 1]) < 1e-6
+            hold = same_prev or same_next
+            value = 0.0 if (not moving or hold or index in {0, len(points) - 1}) else (swing if index % 2 else -swing)
+            phase_values.append(value)
             contacts.append({
                 "frame": int(point["frame"]),
-                "left": bool(index in {0, 2, 4}),
-                "right": bool(index in {0, 1, 3}),
+                "left": bool(hold or index in {0, len(points) - 1} or index % 2 == 0),
+                "right": bool(hold or index in {0, len(points) - 1} or index % 2 == 1),
             })
+        left = [{"frame": int(point["frame"]), "angle": float(value)} for point, value in zip(points, phase_values)]
+        right = [{"frame": int(point["frame"]), "angle": float(-value)} for point, value in zip(points, phase_values)]
         characters.append({
             "target_id": target_id,
             "root_track_frames": [int(point["frame"]) for point in points],
@@ -1900,6 +1911,44 @@ def warehouse_loading_paper_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
     return revised
 
 
+def warehouse_loading_paper_contact_revision(spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Create revision_045 with small source-connected slips and a clear counter-side landing."""
+    revised = warehouse_loading_paper_revision(spec)
+    tracks = {str(track["target_id"]): track for track in revised["tracks"]}
+    paper_paths = {
+        "paper_a": [
+            (-3.40, -0.45, 1.18), (-2.84, -0.45, 1.18), (-1.95, -0.45, 1.18),
+            (-1.60, -0.45, 1.18), (-1.48, -0.25, 1.38), (-1.18, 0.55, 1.42),
+            (-0.55, 0.78, 1.05), (0.05, 0.82, 0.58), (0.55, 0.68, 0.22), (0.85, 0.55, 0.06),
+        ],
+        "paper_b": [
+            (-3.20, -0.10, 1.20), (-2.64, -0.10, 1.20), (-1.85, -0.10, 1.20),
+            (-1.60, -0.10, 1.20), (-1.35, 0.10, 1.46), (-1.00, 0.72, 1.56),
+            (-0.35, 0.92, 1.10), (0.25, 0.95, 0.62), (0.82, 0.78, 0.24), (1.10, 0.62, 0.08),
+        ],
+    }
+    paper_rotations = {
+        "paper_a": [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.18, -0.12, 0.15), (-0.22, 0.15, -0.18), (0.16, -0.12, 0.12), (-0.12, 0.08, -0.10), (0.08, -0.05, 0.08), (0.0, 0.0, 0.12)],
+        "paper_b": [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (-0.16, 0.10, -0.12), (0.20, -0.14, 0.16), (-0.15, 0.10, -0.12), (0.10, -0.06, 0.08), (-0.06, 0.04, -0.06), (0.0, 0.0, -0.10)],
+    }
+    for target_id, positions in paper_paths.items():
+        points = tracks[target_id]["points"]
+        for point, position, rotation in zip(points, positions, paper_rotations[target_id]):
+            point["position"] = list(position)
+            point["rotation"] = list(rotation)
+    revised["appearance_prompt"] = str(revised["appearance_prompt"]) + (
+        " The packing slips are small receipt-sized sheets, never boards or panels. Keep them below the performers' torso width, "
+        "clear of all bodies and cart geometry after release, and visibly settle flat in the counter-side receiving zone."
+    )
+    revised["revision"] = {
+        "id": "revision_045",
+        "parent_revision": "revision_044",
+        "reason": "Plan-aligned VLM review showed revision_044 sheets were oversized and collided with actors; shrink the sheet proxy, route both slips away from the helper/cart after release, and use a short counter-side landing path",
+        "preserved": ["revision_044 dense audit frames", "shared world", "cart/box coupling", "grounded character staging", "brake release timing", "four moving camera roles"],
+    }
+    return revised
+
+
 def appearance_profile_for(spec: Mapping[str, Any]) -> dict[str, Any]:
     """Create appearance facts without leaking motion/camera instructions."""
     identity_bible = {}
@@ -2596,7 +2645,7 @@ def _blender_script() -> str:
                 else:
                     parent_local(add_cube(eid + "__body", (0, 0, 0.38), (0.38, 0.38, 0.38), light), root, (0, 0, 0.38))
             elif eid.startswith("paper_"):
-                slip_scale = (0.62, 0.42, 0.006) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)
+                slip_scale = (0.18, 0.12, 0.003) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)
                 parent_local(add_cube(eid + "__sheet", (0, 0, 0), slip_scale, light, 0.01), root, (0, 0, 0))
             elif eid == "counter":
                 if scene_plan["scene_id"] in {"indoor_market_exchange", "warehouse_loading_maneuver"}:
@@ -3293,25 +3342,48 @@ def run_seedance_t2v_single(*, scene_output: Path, spec: Mapping[str, Any], mode
     return result
 
 
-def _extract_sheet(video: Path, output: Path) -> str | None:
+def review_frame_indices_for(spec: Mapping[str, Any], frame_count: int = 120) -> list[int]:
+    """Return audit frames from the authored plan, not only fixed K0/K4 defaults."""
+    indices = {0, 30, 60, 90, max(0, int(frame_count) - 1)}
+    for track in spec.get("tracks", []):
+        for point in track.get("points", []) if isinstance(track, Mapping) else []:
+            indices.add(int(point.get("frame", 0)))
+    for camera in spec.get("cameras", []):
+        for point in camera.get("points", []) if isinstance(camera, Mapping) else []:
+            indices.add(int(point.get("frame", 0)))
+    for event in spec.get("physical_events", []):
+        if isinstance(event, Mapping) and event.get("frame") is not None:
+            indices.add(int(event["frame"]))
+    return sorted(index for index in indices if 0 <= index < int(frame_count))
+
+
+def _ffmpeg_select_expression(frames: Sequence[int]) -> str:
+    return "+".join(f"eq(n\\,{int(frame)})" for frame in frames)
+
+
+def _extract_sheet(video: Path, output: Path, frames: Sequence[int] | None = None) -> str | None:
     if not FFMPEG.is_file():
         return None
+    selected_frames = list(frames or (0, 30, 60, 90, 119))
     sheet = output.with_suffix(".sheet.jpg")
-    command = [str(FFMPEG), "-y", "-v", "error", "-i", str(video), "-vf", "select='eq(n,0)+eq(n,30)+eq(n,60)+eq(n,90)+eq(n,119)',scale=240:-1,tile=5x1", "-frames:v", "1", str(sheet)]
+    tile_columns = max(1, len(selected_frames))
+    command = [str(FFMPEG), "-y", "-v", "error", "-i", str(video), "-vf", f"select='{_ffmpeg_select_expression(selected_frames)}',scale=240:-1,tile={tile_columns}x1", "-frames:v", "1", str(sheet)]
     completed = subprocess.run(command, capture_output=True, text=True)
     return str(sheet) if completed.returncode == 0 and sheet.is_file() else None
 
 
-def _extract_review_frames(video: Path, output_dir: Path) -> list[str]:
-    """Extract real K0-K4 JPEGs so VLM sees independent frames, not only a tile."""
+def _extract_review_frames(video: Path, output_dir: Path, frames: Sequence[int] | None = None) -> list[str]:
+    """Extract real plan-aligned JPEGs so VLM sees events, not only fixed K0-K4."""
     if not FFMPEG.is_file():
         return []
     output_dir.mkdir(parents=True, exist_ok=True)
-    pattern = output_dir / "frame_%02d.jpg"
-    command = [str(FFMPEG), "-y", "-v", "error", "-i", str(video), "-vf", "select='eq(n,0)+eq(n,30)+eq(n,60)+eq(n,90)+eq(n,119)'", "-vsync", "vfr", "-q:v", "2", str(pattern)]
+    selected_frames = list(frames or (0, 30, 60, 90, 119))
+    pattern = output_dir / "frame_%03d.jpg"
+    command = [str(FFMPEG), "-y", "-v", "error", "-i", str(video), "-vf", f"select='{_ffmpeg_select_expression(selected_frames)}'", "-vsync", "vfr", "-q:v", "2", str(pattern)]
     completed = subprocess.run(command, capture_output=True, text=True)
     if completed.returncode != 0:
         return []
+    (output_dir / "source_frames.json").write_text(json.dumps({"frames": selected_frames}, separators=(",", ":")), encoding="utf-8")
     return [str(path) for path in sorted(output_dir.glob("frame_*.jpg")) if path.is_file() and path.stat().st_size > 0]
 
 
@@ -3500,8 +3572,9 @@ def run_final_review(*, scene_output: Path, final_report: Mapping[str, Any], fin
     if final_video is not None and not items:
         items = [("final", final_video)]
     review_frames = []
+    review_indices = review_frame_indices_for(spec)
     for camera_id, path in items:
-        review_frames.extend(_extract_review_frames(path, scene_output / "final_video_review" / str(camera_id)))
+        review_frames.extend(_extract_review_frames(path, scene_output / "final_video_review" / str(camera_id), review_indices))
     if not review_frames:
         return {"status": "vlm_failed", "mode": "vlm", "api_calls": 0, "error": "final video review frames could not be extracted"}
     review_dir = scene_output / "final_vlm_review"
@@ -3609,15 +3682,16 @@ def run_scene(spec: Mapping[str, Any], *, output_root: Path, blender: Path, mode
         return failure
     sheets = []
     review_frames = []
+    review_indices = review_frame_indices_for(spec, world.frame_count)
     for video in manifest["videos"]:
-        sheet = _extract_sheet(sandbox_dir / video["path"], sandbox_dir / Path(video["path"]).stem)
+        sheet = _extract_sheet(sandbox_dir / video["path"], sandbox_dir / Path(video["path"]).stem, review_indices)
         if sheet:
             sheets.append(sheet)
     # VLM must inspect every authored camera responsibility, not only the first
     # two entries in the manifest.  Each camera gets independent K0-K4 frames.
     for video in manifest.get("videos", []):
         camera_id = str(video.get("camera_id") or Path(video["path"]).stem)
-        review_frames.extend(_extract_review_frames(sandbox_dir / video["path"], sandbox_dir / f"vlm_frames_{camera_id}"))
+        review_frames.extend(_extract_review_frames(sandbox_dir / video["path"], sandbox_dir / f"vlm_frames_{camera_id}", review_indices))
     _write_json(scene_output / "proxy_verifier_report.json", verifier)
     proxy_review = run_proxy_review(scene_output=scene_output, verifier=verifier, review_frames=review_frames, spec=spec, mode=proxy_review_mode)
     # Keep the machine-readable verifier and the explicit visual gate in sync.
@@ -3737,6 +3811,7 @@ def main() -> int:
     parser.add_argument("--warehouse-loading-coverage-revision", action="store_true", help="apply revision_042 with cart-targeted reverse coverage and a trailing assistant lane")
     parser.add_argument("--warehouse-loading-physics-revision", action="store_true", help="apply revision_043 with separated pusher/supervisor staging and wider coverage")
     parser.add_argument("--warehouse-loading-paper-revision", action="store_true", help="apply revision_044 with flat tilted packing-slip proxies")
+    parser.add_argument("--warehouse-loading-paper-contact-revision", action="store_true", help="apply revision_045 with small source-connected slips and counter-side landing")
     parser.add_argument("--motion-bvh", type=Path, help="real BVH clip for the lead motion branch")
     parser.add_argument("--motion-bvh-alt", type=Path, help="optional second real BVH clip concatenated after the first")
     parser.add_argument("--realization-mode", choices=["reference_video", "t2v"], default="reference_video", help="reference_video consumes the Proxy; t2v is a text-only baseline and does not receive the Proxy")
@@ -3831,6 +3906,8 @@ def main() -> int:
         selected = [warehouse_loading_physics_revision(spec) for spec in selected]
     if args.warehouse_loading_paper_revision:
         selected = [warehouse_loading_paper_revision(spec) for spec in selected]
+    if args.warehouse_loading_paper_contact_revision:
+        selected = [warehouse_loading_paper_contact_revision(spec) for spec in selected]
     if len(selected) > SEEDANCE_SUBMISSION_BUDGET:
         raise SystemExit(f"selected scenes exceed hard Seedance budget {SEEDANCE_SUBMISSION_BUDGET}")
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")

@@ -159,7 +159,7 @@ def test_warehouse_proxy_uses_larger_visible_packing_slip_geometry():
 
     script = _blender_script()
     assert 'scene_plan["scene_id"] == "warehouse_loading_maneuver"' in script
-    assert '(0.62, 0.42, 0.006)' in script
+    assert '(0.18, 0.12, 0.003)' in script
 
 
 def test_asset_humanoid_embeds_rig_map_for_blender_runtime_access():
@@ -210,6 +210,45 @@ def test_warehouse_paper_revision_uses_tilted_flat_slip_poses():
     tracks = {track["target_id"]: track for track in spec["tracks"]}
     assert any(abs(float(point["rotation"][0])) > 0.2 or abs(float(point["rotation"][1])) > 0.2 for point in tracks["paper_a"]["points"])
     assert any(abs(float(point["rotation"][0])) > 0.2 or abs(float(point["rotation"][1])) > 0.2 for point in tracks["paper_b"]["points"])
+
+
+def test_warehouse_motion_profile_covers_dense_frames_and_grounds_pause_and_end():
+    from scripts.run_complex_scene_suite import canonical_motion_profile_for, warehouse_loading_physics_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_physics_revision(scene_spec("warehouse_loading_maneuver"))
+    profile = canonical_motion_profile_for(spec)
+    customer = next(item for item in profile["characters"] if item["target_id"] == "customer")
+    assert len(customer["limb_tracks"]["left_leg"]) == 10
+    contacts = {item["frame"]: item for item in customer["foot_contacts"]}
+    assert contacts[60]["left"] and contacts[60]["right"]
+    assert contacts[90]["left"] and contacts[90]["right"]
+    assert contacts[119]["left"] and contacts[119]["right"]
+
+
+def test_proxy_review_samples_authored_event_frames_not_only_fixed_defaults():
+    from scripts.run_complex_scene_suite import review_frame_indices_for, warehouse_loading_physics_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_physics_revision(scene_spec("warehouse_loading_maneuver"))
+    frames = review_frame_indices_for(spec)
+    assert 66 in frames and 72 in frames and 102 in frames
+    assert frames[0] == 0 and frames[-1] == 119
+    assert frames == sorted(set(frames))
+
+
+def test_warehouse_paper_contact_revision_routes_small_slips_away_from_helper_to_counter_side():
+    from scripts.run_complex_scene_suite import warehouse_loading_paper_contact_revision
+    from videoactagent.complex_scene_prompts_v2 import scene_spec
+
+    spec = warehouse_loading_paper_contact_revision(scene_spec("warehouse_loading_maneuver"))
+    assert spec["revision"]["id"] == "revision_045"
+    tracks = {track["target_id"]: track for track in spec["tracks"]}
+    for paper_id in ("paper_a", "paper_b"):
+        points = tracks[paper_id]["points"]
+        assert max(abs(float(point["position"][0])) for point in points) < 4.0
+        assert points[-1]["position"][2] < 0.1
+        assert points[5]["position"][1] >= 0.5
 
 
 def test_canonical_motion_profile_contains_leg_tracks_and_foot_contacts():
@@ -880,7 +919,7 @@ def test_indoor_market_action_physics_revision_expands_beats_and_paper_flutter()
     assert any(any(abs(float(value)) > 0.1 for value in point["rotation"]) for point in papers["paper_a"]["points"])
     script = _blender_script()
     assert 'eid + "__body", (0, 0, 0.30), (0.28, 0.28, 0.30)' in script
-    assert 'slip_scale = (0.62, 0.42, 0.006) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)' in script
+    assert 'slip_scale = (0.18, 0.12, 0.003) if scene_plan["scene_id"] == "warehouse_loading_maneuver" else (0.24, 0.18, 0.015)' in script
 
 
 def test_indoor_market_identity_grounding_revision_adds_role_clothing_and_source_contact():

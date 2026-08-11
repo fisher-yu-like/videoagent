@@ -108,9 +108,9 @@ Run with `--skip-seedance` first. A missing or hash-mismatched asset fails close
 ```powershell
 \.venv\Scripts\python.exe scripts\run_complex_scene_suite.py `
   --scene-id warehouse_loading_maneuver `
-  --warehouse-loading-paper-revision `
+  --warehouse-loading-paper-contact-revision `
   --proxy-style asset_humanoid --proxy-review vlm --skip-seedance `
   --blender D:\blender\blender.exe
 ```
 
-The run writes four MP4s plus `state_log.json`, `camera_log.json`, `asset_log.json`, `coupling_log.json`, `render_manifest.json`, the VLM feedback, and an immutable `scene_summary.json` under `runs/results/`. Seedance is intentionally blocked until the Proxy VLM gate approves. The current 2026-08-11 warehouse runs are recorded in [CURRENT_PIPELINE_AND_RESULTS.md](docs/CURRENT_PIPELINE_AND_RESULTS.md); their real VLM verdict is `revision_requested`, so no final-video API task was submitted for this prompt.
+The run writes four MP4s plus `state_log.json`, `camera_log.json`, `asset_log.json`, `coupling_log.json`, `motion_log.json`, `render_manifest.json`, plan-aligned VLM frames, and an immutable `scene_summary.json` under `runs/results/`. Seedance is intentionally blocked until the Proxy VLM gate approves. The current approved Proxy is `revision_045`, recorded in [CURRENT_PIPELINE_AND_RESULTS.md](docs/CURRENT_PIPELINE_AND_RESULTS.md); the verification run itself made no final-video API call.

@@ -503,7 +503,27 @@ One reproducibility fix was required during the run. Blender's background proces
 
 The current next action is not a Seedance call. The paper event needs a dedicated flat-sheet/parent-release implementation (or a simpler new prompt without tiny airborne papers) and one fresh VLM gate. The previous four revisions remain immutable evidence; none was overwritten.
 
-Verification after this worktree change: `tests/test_complex_scene_suite.py` = `85 passed`; `py_compile`, `compileall` and `git diff --check` passed. This is code/regression evidence only and does not override the four real VLM `revision_requested` decisions.
+Verification after the initial warehouse worktree change: `tests/test_complex_scene_suite.py` = `85 passed`; `py_compile`, `compileall` and `git diff --check` passed. Later audit-frame, motion-profile and revision_045 tests bring the same suite to `88 passed`; this is code/regression evidence only and does not override the earlier rejected VLM decisions.
+
+### 4.39 root-cause repair and approved Proxy / 2026-08-11
+
+The repeated rejection was not one single prompt problem. The evidence showed three interacting implementation defects:
+
+1. The VLM frame extractor always sent only `0/30/60/90/119`. Warehouse release/flutter/landing were authored at frames `66/72/84/102`, so the critical physical event was absent from the audit. The review was not plan-aligned.
+2. `canonical_motion_profile_for()` zipped a five-sample gait phase onto a ten-frame trajectory. Frames `72-119` therefore had no leg phase and the generated foot-contact log reported both feet airborne during the pause/end.
+3. The paper proxy scale was first too small to identify, then too large (`0.62 x 0.42`) and collided with characters. Its path also crossed the helper lane.
+
+The fixes are now in code and covered by regression tests:
+
+- `review_frame_indices_for()` unions fixed audit frames with every authored track/camera/event frame; the VLM now receives frames `0,24,30,48,60,66,72,84,90,102,119` for this scene and records the source-frame mapping.
+- The motion adapter emits one gait/foot-contact sample per authored root frame and keeps both feet grounded on holds and at the final frame.
+- `revision_045` uses receipt-sized slips (`0.18 x 0.12 x 0.003` proxy scale), a short counter-side route clear of the helper/cart, and small tilt changes instead of broad rigid sheets.
+
+Real validation run:
+
+`runs/results/warehouse_loading_20260811_revision045_proxy/complex_scene_suite_20260811_005749/warehouse_loading_maneuver_20260811_005749/`
+
+The run produced four real Proxy MP4s, a shared `.blend`, state/camera/asset/coupling/motion logs, plan-aligned review frames, and a real VLM result of `approve` (one VLM call). Deterministic world, trajectory, coupling, asset, ffprobe and black-frame checks passed. Seedance was deliberately not called in this verification run (`submit/query/download=0`); the approved Proxy is now eligible for the separately budgeted per-camera backend experiment.
 ### 4.21 免费女性资产注册与真实 `asset_humanoid` Proxy / 2026-08-10
 
 用户提供了 `Universal Base Characters[Standard].zip`。压缩包内的 `Superhero_Female_FullBody.gltf`、`.bin` 和纹理已被提取；随包许可证明确为 CC0 1.0。Blender 5.1.2 将 glTF 转换为 `assets/characters/human_female_v1/model.glb`，模型 SHA-256 为 `82d7cc937235d32af6b53bcedf4968f3e20663140c03fe0124ba902b1473c427`，统一 16 骨骼映射全部通过。该模型是风格化 Proxy，不是最终真人资产。
